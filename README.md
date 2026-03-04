@@ -22,29 +22,35 @@ Dentro del archivo descargado se utilizan el interpretado (`occurrence.txt`)y lo
 Clonar el código desde el repositorio
 
 Es preferible establecer un virtual environment para ejecutar el script.
-```
+
+```bash
 python3 -m venv myvenv
 source myvenv/bin/activate
 ```
+
 (Se puede cambiar `myvenv` con otro nombre)
 
 Instalar los requerimientos con PIP
-```
+
+```bash
 pip install -r requirements.txt
 ```
 
 Hacer copia del archivo .env_template y dejarlo como .env
-```
+
+```bash
 cp .env_template .env
 ```
+
 Modificar los parámetros dentro del .env
-```
+
+```bash
 vi .env
 ```
 
 Ejecutar el script
 
-```
+```bash
 python3 main.py
 ```
 
@@ -55,7 +61,6 @@ Ninguno hasta el momento :P
 ## Autores(as) y contacto
 
 * **Diego Moreno** - *PS* - [damorenov](https://github.com/damorenov)
-
 
 ## Licencia
 
