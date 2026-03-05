@@ -75,4 +75,6 @@ timer(add_geometry_and_indexes, "Añadiendo geometría en integrada dwc_occurren
 
 # Registrar la carga en la tabla de registro de versiones de tablas (table_registry) con la fecha de ejecución del script
 register_load(engine, table_names, today)
+
+engine.dispose()
 logger.info("Proceso completado.")
