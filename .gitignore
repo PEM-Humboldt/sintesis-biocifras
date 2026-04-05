@@ -175,3 +175,8 @@ cython_debug/
 .vscode/
 .cursor/
 .cursorrules/
+
+# R
+.Rproj.user
+**.Rproj
+**/.Renviron
