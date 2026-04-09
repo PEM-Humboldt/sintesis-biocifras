@@ -14,6 +14,11 @@ from sqlalchemy import create_engine, inspect, text
 
 logger = logging.getLogger('sintesis_biocifras')
 
+# Indica el número de filas que se van a cargar a la base de datos desde los archivos TSV de GBIF 
+# en cada batch para evitar bloqueos de memoria.
+
+FLUSH_EVERY = 500_000
+
 # ------------------------------------------------------------------------------------------------------------
 # Definición de listas y variables para el proceso de carga desde los archivos TSV de GBIF
 # 
@@ -26,57 +31,93 @@ logger = logging.getLogger('sintesis_biocifras')
 # ------------------------------------------------------------------------------------------------------------
 
 OCCURRENCE_COLS = [
-    'gbifID', 'occurrenceID', 'basisOfRecord', 'collectionCode',
-    'catalogNumber', 'recordedBy', 'individualCount', 'eventDate',
-    'countryCode', 'stateProvince', 'locality', 'elevation', 'depth',
-    'decimalLatitude', 'decimalLongitude', 'coordinateUncertaintyInMeters',
-    'scientificName', 'kingdom', 'phylum', 'class', 'order', 'family',
-    'genus', 'species', 'infraspecificEpithet', 'taxonRank', 'day', 'month',
-    'year', 'verbatimScientificName', 'datasetKey', 'publishingOrgKey',
-    'taxonKey', 'issue', 'occurrenceStatus', 'lastInterpreted',
+    'gbifid', 'occurrenceid', 'basisofrecord', 'collectioncode',
+    'catalognumber', 'recordedby', 'individualcount', 'eventdate',
+    'countrycode', 'stateprovince', 'locality', 'elevation', 'depth',
+    'decimallatitude', 'decimallongitude', 'coordinateuncertaintyinmeters',
+    'scientificname', 'kingdom', 'phylum', 'class', 'order', 'family',
+    'genus', 'species', 'infraspecificepithet', 'taxonrank', 'day', 'month',
+    'year', 'verbatimscientificname', 'datasetkey', 'publishingorgkey',
+    'taxonkey', 'issue', 'occurrencestatus', 'lastinterpreted',
 ]
 
 VERBATIM_COLS = [
-    'gbifID', 'type', 'datasetID', 'datasetName', 'organismQuantity',
-    'organismQuantityType', 'eventID', 'samplingProtocol', 'county',
-    'municipality', 'repatriated', 'publishingCountry', 'lastParsed',
+    'gbifid', 'type', 'datasetid', 'datasetname', 'organismquantity',
+    'organismquantitytype', 'eventid', 'samplingprotocol', 'county',
+    'municipality', 'repatriated', 'publishingcountry', 'lastparsed',
+]
+
+SQL_COLS = [
+    'gbifid', 'occurrenceid', 'basisofrecord',
+    'collectioncode', 'catalognumber', 'recordedby', 'individualcount',
+    'eventdate', 'countrycode', 'stateprovince', 'locality', 'elevation',
+    'depth', 'decimallatitude', 'decimallongitude', 'coordinateuncertaintyinmeters',
+    'scientificname', 'kingdom', 'phylum', 'class', 'order', 'family',
+    'genus', 'species', 'infraspecificepithet', 'taxonrank', 'day', 'month',
+    'year', 'v_scientificname', 'datasetkey', 'publishingorgkey', 'taxonkey', 'issue',
+    'occurrencestatus', 'lastinterpreted', 'v_type', 'v_datasetid', 'v_datasetname',
+    'v_organismquantity', 'v_organismquantitytype', 'v_eventid', 'v_samplingprotocol',
+    'v_county', 'v_municipality', 'repatriated', 'publishingcountry', 'lastparsed',
 ]
 
 # Mapeo de columnas tipo SQL para CREATE TABLE dinamico
 _OCCURRENCE_TYPES = {
-    'gbifID': 'BIGINT PRIMARY KEY',
-    'occurrenceID': 'TEXT', 'basisOfRecord': 'TEXT',
-    'collectionCode': 'TEXT', 'catalogNumber': 'TEXT',
-    'recordedBy': 'TEXT', 'individualCount': 'INTEGER',
-    'eventDate': 'TEXT', 'countryCode': 'TEXT',
-    'stateProvince': 'TEXT', 'locality': 'TEXT',
+    'gbifid': 'BIGINT PRIMARY KEY',
+    'occurrenceid': 'TEXT', 'basisofrecord': 'TEXT',
+    'collectioncode': 'TEXT', 'catalognumber': 'TEXT',
+    'recordedby': 'TEXT', 'individualcount': 'INTEGER',
+    'eventdate': 'TEXT', 'countrycode': 'TEXT',
+    'stateprovince': 'TEXT', 'locality': 'TEXT',
     'elevation': 'DOUBLE PRECISION', 'depth': 'DOUBLE PRECISION',
-    'decimalLatitude': 'DOUBLE PRECISION',
-    'decimalLongitude': 'DOUBLE PRECISION',
-    'coordinateUncertaintyInMeters': 'DOUBLE PRECISION',
-    'scientificName': 'TEXT', 'kingdom': 'TEXT', 'phylum': 'TEXT',
+    'decimallatitude': 'DOUBLE PRECISION',
+    'decimallongitude': 'DOUBLE PRECISION',
+    'coordinateuncertaintyinmeters': 'DOUBLE PRECISION',
+    'scientificname': 'TEXT', 'kingdom': 'TEXT', 'phylum': 'TEXT',
     'class': 'TEXT', 'order': 'TEXT', 'family': 'TEXT',
-    'genus': 'TEXT', 'species': 'TEXT', 'infraspecificEpithet': 'TEXT',
-    'taxonRank': 'TEXT', 'day': 'SMALLINT', 'month': 'SMALLINT',
-    'year': 'SMALLINT', 'verbatimScientificName': 'TEXT',
-    'datasetKey': 'TEXT', 'publishingOrgKey': 'TEXT',
-    'taxonKey': 'BIGINT', 'issue': 'TEXT', 'occurrenceStatus': 'TEXT',
-    'lastInterpreted': 'TIMESTAMPTZ',
+    'genus': 'TEXT', 'species': 'TEXT', 'infraspecificepithet': 'TEXT',
+    'taxonrank': 'TEXT', 'day': 'SMALLINT', 'month': 'SMALLINT',
+    'year': 'SMALLINT', 'verbatimscientificname': 'TEXT',
+    'datasetkey': 'TEXT', 'publishingorgkey': 'TEXT',
+    'taxonkey': 'BIGINT', 'issue': 'TEXT', 'occurrencestatus': 'TEXT',
+    'lastinterpreted': 'TIMESTAMPTZ',
 }
 
 _VERBATIM_TYPES = {
-    'gbifID': 'BIGINT PRIMARY KEY',
-    'type': 'TEXT', 'datasetID': 'TEXT', 'datasetName': 'TEXT',
-    'organismQuantity': 'TEXT', 'organismQuantityType': 'TEXT',
-    'eventID': 'TEXT', 'samplingProtocol': 'TEXT',
+    'gbifid': 'BIGINT PRIMARY KEY',
+    'type': 'TEXT', 'datasetid': 'TEXT', 'datasetname': 'TEXT',
+    'organismquantity': 'TEXT', 'organismquantitytype': 'TEXT',
+    'eventid': 'TEXT', 'samplingprotocol': 'TEXT',
     'county': 'TEXT', 'municipality': 'TEXT',
-    'repatriated': 'TEXT', 'publishingCountry': 'TEXT',
-    'lastParsed': 'TIMESTAMPTZ',
+    'repatriated': 'TEXT', 'publishingcountry': 'TEXT',
+    'lastparsed': 'TIMESTAMPTZ',
 }
 
-# Indica el número de filas que se van a cargar en cada batch para evitar bloqueos de memoria.
-FLUSH_EVERY = 500_000
-
+_SQL_COL_TYPES = {
+    'gbifid': 'BIGINT PRIMARY KEY',
+    'occurrenceid': 'TEXT',
+    'basisofrecord': 'TEXT', 'collectioncode': 'TEXT',
+    'catalognumber': 'TEXT', 'recordedby': 'TEXT',
+    'individualcount': 'INTEGER', 'eventdate': 'TEXT',
+    'countrycode': 'TEXT', 'stateprovince': 'TEXT',
+    'locality': 'TEXT', 'elevation': 'DOUBLE PRECISION',
+    'depth': 'DOUBLE PRECISION',
+    'decimallatitude': 'DOUBLE PRECISION',
+    'decimallongitude': 'DOUBLE PRECISION',
+    'coordinateuncertaintyinmeters': 'DOUBLE PRECISION',
+    'scientificname': 'TEXT', 'kingdom': 'TEXT', 'phylum': 'TEXT',
+    'class': 'TEXT', 'order': 'TEXT', 'family': 'TEXT',
+    'genus': 'TEXT', 'species': 'TEXT', 'infraspecificepithet': 'TEXT',
+    'taxonrank': 'TEXT', 'day': 'SMALLINT', 'month': 'SMALLINT',
+    'year': 'SMALLINT', 'v_scientificname': 'TEXT', 'datasetkey': 'TEXT',
+    'publishingorgkey': 'TEXT', 'taxonkey': 'BIGINT',
+    'issue': 'TEXT', 'occurrencestatus': 'TEXT',
+    'v_type': 'TEXT', 'v_datasetid': 'TEXT', 'v_datasetname': 'TEXT',
+    'v_organismquantity': 'TEXT', 'v_organismquantitytype': 'TEXT',
+    'v_eventid': 'TEXT', 'v_samplingprotocol': 'TEXT',
+    'v_county': 'TEXT', 'v_municipality': 'TEXT',
+    'repatriated': 'BOOLEAN', 'publishingcountry': 'TEXT',
+    'lastinterpreted': 'TIMESTAMPTZ', 'lastparsed': 'TIMESTAMPTZ',
+}
 
 # ------------------------------------------------------------------------------
 # Funciones para la conexión y chequeo de conexión a la base de datos PostgreSQL
@@ -133,6 +174,7 @@ def register_load(engine, table_names, created_at):
         'occurrence': 'dwc_occurrence_%',
         'verbatim': 'dwc_verbatim_%',
         'integrated': 'dwc_integrated_%',
+        'sql': 'dwc_sql_%',
     }
     with engine.connect() as conn:
         for key, table_name in table_names.items():
@@ -161,30 +203,32 @@ def _build_create_ddl(table_name, col_types):
     return f'CREATE TABLE "{table_name}" ({cols});'
 
 # Para mantener un historial de las tablas de staging y la tabla integrada se utiliza un sufijo de fecha.
-def tables_operations(engine, suffix):
+def tables_operations(engine, suffix, upload_type="default"):
     """Crea o trunca tablas con sufijo de fecha. Retorna dict con nombres."""
-    table_names = {
-        'occurrence': f'dwc_occurrence_{suffix}',
-        'verbatim': f'dwc_verbatim_{suffix}',
-        'integrated': f'dwc_integrated_{suffix}',
-    }
-    type_maps = {
-        'occurrence': _OCCURRENCE_TYPES,
-        'verbatim': _VERBATIM_TYPES,
-    }
-    # Se utiliza el inspector de SQLAlchemy para verificar si las tablas existen y para crearlas o truncarlas.
-    # Es equivalente a ejecutar la siguiente consulta:
-    # SELECT * FROM information_schema.tables WHERE table_name = 'tabla_fecha';
+    if upload_type == "sql":
+        table_names = {'sql': f'dwc_sql_{suffix}'}
+        type_maps = {'sql': _SQL_COL_TYPES}
+        keys = ('sql',)
+    else:
+        table_names = {
+            'occurrence': f'dwc_occurrence_{suffix}',
+            'verbatim': f'dwc_verbatim_{suffix}',
+            'integrated': f'dwc_integrated_{suffix}',
+        }
+        type_maps = {
+            'occurrence': _OCCURRENCE_TYPES,
+            'verbatim': _VERBATIM_TYPES,
+        }
+        keys = ('occurrence', 'verbatim')
+
     insp = inspect(engine)
     with engine.connect() as conn:
-        for key in ('occurrence', 'verbatim'):
+        for key in keys:
             tname = table_names[key]
-            # Si la tablas existen (tabla_fecha), se trunca la información ya que se asume que se cargan nuevos datos al día.
             if insp.has_table(tname):
                 conn.execute(text(f'TRUNCATE TABLE "{tname}"'))
                 logger.info("TRUNCATE en %s", tname)
             else:
-                # Si la tablas no existen (tabla_fecha), se crea la tabla con las columnas definidas en las listas _OCCURRENCE_TYPES y _VERBATIM_TYPES.
                 ddl = _build_create_ddl(tname, type_maps[key])
                 conn.execute(text(ddl))
                 logger.info("CREATE TABLE %s", tname)
@@ -215,7 +259,8 @@ def tables_operations(engine, suffix):
 # que crea un cursor y se ejecuta el comando de copy_expert con el buffer de datos procesado por csv.writer.
 
 def data_upload(engine, filepath, table_name, columns):
-    quoted_cols = ', '.join(f'"{c}"' for c in columns)
+    db_cols = [c.lower() for c in columns]
+    quoted_cols = ', '.join(f'"{c}"' for c in db_cols)
     copy_sql = (
         f'COPY "{table_name}" ({quoted_cols}) '
         f"FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t', NULL '')"
@@ -227,12 +272,11 @@ def data_upload(engine, filepath, table_name, columns):
         buffer = io.StringIO()
         writer = csv.writer(buffer, delimiter='\t', quoting=csv.QUOTE_MINIMAL)
         count = 0
-        # Se lee el archivo y se procesa linea a linea para el manejo de caracteres especiales
-        # Cuando se leen N linea (variable FLUSH_EVERY) se cargan en un buffer y se carga a la base de datos
         with open(filepath, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f, delimiter='\t', quoting=csv.QUOTE_NONE)
+            reader.fieldnames = [name.lower() for name in reader.fieldnames]
             for row in reader:
-                writer.writerow([row.get(c, '') for c in columns])
+                writer.writerow([row.get(c.lower(), '') for c in columns])
                 count += 1
                 if count % FLUSH_EVERY == 0:
                     buffer.seek(0)
@@ -255,6 +299,24 @@ def data_upload(engine, filepath, table_name, columns):
         raw_conn.close()
 
 
+def rename_sql_columns(engine, table_name, columns):
+    """Renombra columnas con prefijo v_ quitando el prefijo (v_scientificname → verbatimscientificname)."""
+    renames = {}
+    for c in columns:
+        if c == 'v_scientificname':
+            renames[c] = 'verbatimscientificname'
+        elif c.startswith('v_'):
+            renames[c] = c[2:]
+
+    with engine.connect() as conn:
+        for old, new in renames.items():
+            conn.execute(text(
+                f'ALTER TABLE "{table_name}" RENAME COLUMN "{old}" TO "{new}"'
+            ))
+            logger.info("Columna renombrada: %s → %s en %s", old, new, table_name)
+        conn.commit()
+
+
 # -----------------------------------------------------------------------------------------------------
 # Creación de índices en las tablas de staging dwc_occurrence y dwc_verbatim
 # -----------------------------------------------------------------------------------------------------
@@ -270,7 +332,7 @@ def create_staging_indexes(engine, table_names):
         for key in ('occurrence', 'verbatim'):
             tname = table_names[key]
             idx_name = f"idx_{tname}_gbifid"
-            conn.execute(text(f'CREATE INDEX "{idx_name}" ON "{tname}" ("gbifID")'))
+            conn.execute(text(f'CREATE INDEX "{idx_name}" ON "{tname}" ("gbifid")'))
             logger.info("Indice creado: %s", idx_name)
         conn.commit()
 
@@ -293,12 +355,11 @@ def create_integrated_table(engine, table_names):
     integrated = table_names['integrated']
 
     occurrence_cols = ', '.join(
-        f'o."{c}"' for c in OCCURRENCE_COLS
+        f'o."{c.lower()}"' for c in OCCURRENCE_COLS
     )
     verbatim_cols = ', '.join(
-        f'v."{c}"' for c in VERBATIM_COLS if c != 'gbifID'
+        f'v."{c.lower()}"' for c in VERBATIM_COLS if c != 'gbifid'
     )
-    # Se revisa que la tabla integrada por fecha no exista para evitar errores de duplicación.
     insp = inspect(engine)
     with engine.connect() as conn:
         if insp.has_table(integrated):
@@ -309,7 +370,7 @@ def create_integrated_table(engine, table_names):
             f'CREATE TABLE "{integrated}" AS '
             f'SELECT {occurrence_cols}, {verbatim_cols} '
             f'FROM "{occurrence}" o '
-            f'INNER JOIN "{verbatim}" v ON o."gbifID" = v."gbifID"'
+            f'INNER JOIN "{verbatim}" v ON o."gbifid" = v."gbifid"'
         )
         conn.execute(text(sql))
         conn.commit()
@@ -322,30 +383,30 @@ def create_integrated_table(engine, table_names):
 
 # Se hace una verificación de la extensión postgis para evitar errores de carga.
 
-def add_geometry_and_indexes(engine, table_names):
-    integrated = table_names['integrated']
+def add_geometry_and_indexes(engine, table_name):
+    integrated = table_name
     with engine.connect() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
         logger.info("Chequeo de extension postgis")
 
         conn.execute(text(
-            f'ALTER TABLE "{integrated}" ADD PRIMARY KEY ("gbifID")'
+            f'ALTER TABLE "{integrated}" ADD PRIMARY KEY ("gbifid")'
         ))
-        logger.info("PK a campo gbifID agregada a %s", integrated)
+        logger.info("PK a campo gbifid agregada a %s", integrated)
 
         conn.execute(text(
-            f'ALTER TABLE "{integrated}" ADD COLUMN geometry GEOMETRY(Point, 4326)'
+            f'ALTER TABLE "{integrated}" ADD COLUMN geom GEOMETRY(Point, 4326)'
         ))
         conn.execute(text(
             f'UPDATE "{integrated}" '
-            f'SET geometry = ST_SetSRID(ST_MakePoint("decimalLongitude", "decimalLatitude"), 4326) '
-            f'WHERE "decimalLatitude" IS NOT NULL AND "decimalLongitude" IS NOT NULL'
+            f'SET geom = ST_SetSRID(ST_MakePoint("decimallongitude", "decimallatitude"), 4326) '
+            f'WHERE "decimallatitude" IS NOT NULL AND "decimallongitude" IS NOT NULL'
         ))
-        logger.info("Columna geometry creada con EPSG 4326 en %s", integrated)
+        logger.info("Columna geom creada con EPSG 4326 en %s", integrated)
 
-        idx_name = f"idx_{integrated}_geometry"
+        idx_name = f"idx_{integrated}_geom"
         conn.execute(text(
-            f'CREATE INDEX "{idx_name}" ON "{integrated}" USING GIST (geometry)'
+            f'CREATE INDEX "{idx_name}" ON "{integrated}" USING GIST (geom)'
         ))
         logger.info("Indice GIST creado: %s", idx_name)
 

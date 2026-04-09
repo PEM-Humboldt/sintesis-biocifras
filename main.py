@@ -28,16 +28,20 @@ from utils.logger import setup_logger, timer
 from utils.functions import (
     OCCURRENCE_COLS,
     VERBATIM_COLS,
+    SQL_COLS,
     get_engine,
     check_connection,
     registry_table,
     register_load,
     tables_operations,
     data_upload,
+    rename_sql_columns,
     create_staging_indexes,
     create_integrated_table,
     add_geometry_and_indexes,
 )
+
+UPLOAD_TYPE = "sql"
 
 load_dotenv()
 
@@ -57,25 +61,33 @@ if not check_connection(engine):
 logger.info("Conectado a la base de datos.")
 
 try:
-    # Crea la tabla de registro de versiones de tablas (table_registry) si no existe
     registry_table(engine)
-    # Crear/truncar las tablas de staging (dwc_occurrence y dwc_verbatim) para almacenar los datos temporales. Se agrega
-    #sufijo de fecha para evitar errores de duplicación.
-    table_names = timer(tables_operations, "Operaciones sobre las tablas de staging dwc_occurrence y dwc_verbatim")(engine, suffix)
-    # La función timer mide el tiempo de ejecución de la función que se le pasa como argumento, así como el texto de loggin
-    # y registra el tiempo en minutos
-    timer(data_upload, "Carga de datos desde occurrence.txt")(
-        engine, os.getenv('OCCURRENCE_FILE'), table_names['occurrence'], OCCURRENCE_COLS
-    )
-    timer(data_upload, "Carga de datos desde verbatim.txt")(
-        engine, os.getenv('VERBATIM_FILE'), table_names['verbatim'], VERBATIM_COLS
-    )
 
-    timer(create_staging_indexes, "Creación de índices en las tablas de staging dwc_occurrence y dwc_verbatim")(engine, table_names)
-    timer(create_integrated_table, "Creación de la tabla integrada dwc_occurrence_integrated")(engine, table_names)
-    timer(add_geometry_and_indexes, "Añadiendo geometría en integrada dwc_occurrence_integrated")(engine, table_names)
+    if UPLOAD_TYPE == "sql":
+        table_names = timer(tables_operations, "Operaciones sobre la tabla de staging dwc_sql")(
+            engine, suffix, upload_type=UPLOAD_TYPE
+        )
+        timer(data_upload, "Carga de datos desde SQL_FILE")(
+            engine, os.getenv('SQL_FILE'), table_names['sql'], SQL_COLS
+        )
+        timer(rename_sql_columns, "Renombrando columnas verbatim en tabla SQL")(
+            engine, table_names['sql'], SQL_COLS
+        )
+        target_table = table_names['sql']
+    else:
+        table_names = timer(tables_operations, "Operaciones sobre las tablas de staging dwc_occurrence y dwc_verbatim")(engine, suffix)
+        timer(data_upload, "Carga de datos desde occurrence.txt")(
+            engine, os.getenv('OCCURRENCE_FILE'), table_names['occurrence'], OCCURRENCE_COLS
+        )
+        timer(data_upload, "Carga de datos desde verbatim.txt")(
+            engine, os.getenv('VERBATIM_FILE'), table_names['verbatim'], VERBATIM_COLS
+        )
+        timer(create_staging_indexes, "Creación de índices en las tablas de staging dwc_occurrence y dwc_verbatim")(engine, table_names)
+        timer(create_integrated_table, "Creación de la tabla integrada dwc_occurrence_integrated")(engine, table_names)
+        target_table = table_names['integrated']
 
-    # Registrar la carga en la tabla de registro de versiones de tablas (table_registry) con la fecha de ejecución del script
+    timer(add_geometry_and_indexes, "Añadiendo geometría e índices")(engine, target_table)
+
     register_load(engine, table_names, today)
     logger.info("Proceso completado.")
 
