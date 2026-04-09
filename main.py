@@ -59,7 +59,8 @@ logger.info("Conectado a la base de datos.")
 try:
     # Crea la tabla de registro de versiones de tablas (table_registry) si no existe
     registry_table(engine)
-    # Crear/truncar las tablas de staging (dwc_occurrence y dwc_verbatim) para almacenar los datos temporales
+    # Crear/truncar las tablas de staging (dwc_occurrence y dwc_verbatim) para almacenar los datos temporales. Se agrega
+    #sufijo de fecha para evitar errores de duplicación.
     table_names = timer(tables_operations, "Operaciones sobre las tablas de staging dwc_occurrence y dwc_verbatim")(engine, suffix)
     # La función timer mide el tiempo de ejecución de la función que se le pasa como argumento, así como el texto de loggin
     # y registra el tiempo en minutos

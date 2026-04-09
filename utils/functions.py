@@ -42,7 +42,7 @@ VERBATIM_COLS = [
     'municipality', 'repatriated', 'publishingCountry', 'lastParsed',
 ]
 
-# Mapeo de columna → tipo SQL para CREATE TABLE dinamico
+# Mapeo de columnas tipo SQL para CREATE TABLE dinamico
 _OCCURRENCE_TYPES = {
     'gbifID': 'BIGINT PRIMARY KEY',
     'occurrenceID': 'TEXT', 'basisOfRecord': 'TEXT',
