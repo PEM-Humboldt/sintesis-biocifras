@@ -13,8 +13,17 @@ knitr:
 reticulate::use_virtualenv("../env_cifras/")
 ```
 
+
+## `pyGbif`: la lista de descargas 
+
+`pyGbif` es un paquete de python que permite manejar la API de GBIF.
+En particular, el modulo `occurrences` permite manejar las descargas de conjunto de datos a través de la API.
+Sin embargo es importante anotar que el modulo no permite importar los conjuntos de datos, simplemente su descarga.
+
+
+Primero es importante incluir el archivo .env con los usuarios y contraseñas de GBIF.
+
 ```{python}
-#| results: asis
 import os
 from dotenv import load_dotenv, dotenv_values
 from pygbif import occurrences as occ
@@ -23,6 +32,12 @@ import pandas as pd
 import json
 load_dotenv()
 print(os.getenv("GBIF_USER"))
+```
+
+La lista de descarga permite descargar los metadatos de las descargas presentes en el perfil del usuario de GBIF
+
+```{python}
+#| results: asis
 #ref_occ_down = occ.download_sql("SELECT gbifid, ScientificName, countryCode FROM occurrence WHERE genus='Espeletia' LIMIT 10")
 #occ.download_meta(ref_occ_down)
 downList = occ.download_list()
@@ -31,6 +46,9 @@ df_downList.columns
 df_downList2 = df_downList[['key', 'doi','created','status','request.sendNotification','downloadLink']]
 print(tabulate(df_downList2, headers = 'keys', tablefmt = 'github'))
 ```
+
+Podemos utilizar esta lista para probar si ya se descargo, a través de la API SQL una consulta SQL (Nota: imagino que cuando son consultas complejas, podríamos tener problemas con los cambios de linea):
+
 
 
 ```{python}
@@ -44,7 +62,11 @@ def is_in_my_download_list(sql_query, limit=20):
 
 query = "SELECT gbifid, ScientificName, countryCode FROM occurrence WHERE genus='Espeletia' LIMIT 10"
 is_in_my_download_list(query)
+```
 
+Incluso podemos mirar cual es el "key" de descarga que corresponde a la consulta SQL:
+
+```{python}
 def get_query_key(sql_query, limit=20):
   downList = occ.download_list(limit=limit)
   df_downList = pd.json_normalize(downList["results"])
@@ -57,14 +79,22 @@ get_query_key(query)
 ```
 
 
+## Hacer una función Wait
+
+
+Gracias a la función `download_meta` podemos mirar el estatus de la descarga, que cuando todo va bien pasa de 'PREPARING' a 'RUNNING' a 'SUCCEEDED'
+
 ```{python}
 def download_status(key):
   status = occ.download_meta(key)['status']
   return status
   
 download_status(get_query_key(query))
+```
 
+Entonces, podemos crear una función wait, para esperar que el estatus llegue a 'SUCCEEDED', y muestre los cambios de estatus:
 
+```{python}
 """
 Potential statuses of a download in gbif PREPARING, RUNNING, SUCCEEDED, CANCELLED, KILLED, FAILED, SUSPENDED, FILE_ERASED
 """
@@ -93,3 +123,10 @@ else:
   
 ```
 
+## Crear la consulta geográfica con el WKT
+
+Para manejar datos espaciales vectoriales, los paquetes Python más utilizados son:
+
+* `shapely` que parece ser la base de codigo de muchos otros paquetes
+* `fiona` que parece ser una solución un poco más completa, pero algunos usuarios han mencionado dificultades de instalación
+* `geopandas` que permite 
