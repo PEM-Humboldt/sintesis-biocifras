@@ -130,3 +130,38 @@ Para manejar datos espaciales vectoriales, los paquetes Python más utilizados s
 * `shapely` que parece ser la base de codigo de muchos otros paquetes
 * `fiona` que parece ser una solución un poco más completa, pero algunos usuarios han mencionado dificultades de instalación
 * `geopandas` que permite 
+
+```{python}
+import fiona
+import shapely
+from shapely.plotting import plot_polygon
+#from shapely.geometry import shape,Polygon, MultiPolygon
+import matplotlib.pyplot as plt
+
+with fiona.open("../../data_sintesis-biocifras/RegionesMaritimas.shp") as src:
+    for feature in src:
+        # Convert the record geometry to a Shapely object
+        geom_rm = shape(feature['geometry'])
+        print(geom_rm.geom_type)
+        
+fig, ax = plt.subplots()
+for poly in geom_rm:
+    plot_polygon(poly, ax=ax, add_points=False, color='blue', alpha=0.5)
+plt.show()
+
+with fiona.open("../../data_sintesis-biocifras/MGN_DPTO_POLITICO_2023.shp") as src:
+    for feature in src:
+        # Convert the record geometry to a Shapely object
+        geom_col = shape(feature['geometry'])
+        print(geom_col.geom_type)
+
+geom_multi = shapely.union_all([geom_rm,geom_col])
+geom_polys = list(geom_multi.geoms)
+
+fig, ax = plt.subplots()
+for poly in geom_polys:
+    plot_polygon(poly, ax=ax, add_points=False, color='blue', alpha=0.5)
+plt.show()
+
+```
+

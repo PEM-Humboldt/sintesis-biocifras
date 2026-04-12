@@ -180,3 +180,4 @@ cython_debug/
 .Rproj.user
 **.Rproj
 **/.Renviron
+.Rhistory
