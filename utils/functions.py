@@ -217,7 +217,7 @@ def _build_create_ddl(table_name, col_types):
 
 # Para mantener un historial de las tablas de staging y la tabla integrada se utiliza un sufijo de fecha.
 def tables_operations(engine, suffix, upload_type="default"):
-    """Crea o trunca tablas con sufijo de fecha. Retorna dict con nombres."""
+    """Crea tablas con sufijo de fecha. Si ya existen, las elimina y recrea para garantizar un schema limpio. Retorna dict con nombres."""
     if upload_type == "sql":
         table_names = {'sql': f'dwc_sql_{suffix}'}
         type_maps = {'sql': _SQL_COL_TYPES}
@@ -239,12 +239,11 @@ def tables_operations(engine, suffix, upload_type="default"):
         for key in keys:
             tname = table_names[key]
             if insp.has_table(tname):
-                conn.execute(text(f'TRUNCATE TABLE "{tname}"'))
-                logger.info("TRUNCATE en %s", tname)
-            else:
-                ddl = _build_create_ddl(tname, type_maps[key])
-                conn.execute(text(ddl))
-                logger.info("CREATE TABLE %s", tname)
+                conn.execute(text(f'DROP TABLE "{tname}"'))
+                logger.info("DROP TABLE %s", tname)
+            ddl = _build_create_ddl(tname, type_maps[key])
+            conn.execute(text(ddl))
+            logger.info("CREATE TABLE %s", tname)
         conn.commit()
     return table_names
 
@@ -348,8 +347,12 @@ def rename_sql_columns(engine, table_name, columns):
 
 
 def rename_table(engine, old_name, new_name):
-    """Renombra una tabla en la base de datos."""
+    """Renombra una tabla en la base de datos. Si new_name ya existe, la elimina primero."""
+    insp = inspect(engine)
     with engine.connect() as conn:
+        if insp.has_table(new_name):
+            conn.execute(text(f'DROP TABLE "{new_name}"'))
+            logger.info("DROP TABLE existente: %s", new_name)
         conn.execute(text(f'ALTER TABLE "{old_name}" RENAME TO "{new_name}"'))
         conn.commit()
     logger.info("Tabla renombrada: %s → %s", old_name, new_name)
@@ -432,6 +435,22 @@ _TAXONRANK_MAP = {
     'VARIETY': 'Variedad',
     'UNRANKED': '',
 }
+
+
+def fill_species_from_scientificname(engine, table_name):
+    """Llena el campo species con las dos primeras palabras de scientificname
+    cuando taxonrank es 'SPECIES' y species es nulo o vacío."""
+    sql = (
+        f'UPDATE "{table_name}" '
+        f'SET "species" = TRIM(split_part("scientificname", \' \', 1) '
+        f"|| ' ' || split_part(\"scientificname\", ' ', 2)) "
+        f'WHERE UPPER("taxonrank") = \'SPECIES\' '
+        f'AND ("species" IS NULL OR TRIM("species") = \'\')'
+    )
+    with engine.connect() as conn:
+        result = conn.execute(text(sql))
+        conn.commit()
+    logger.info("Campo species completado desde scientificname en %s (%s filas)", table_name, f"{result.rowcount:,}")
 
 
 def translate_taxonrank(engine, table_name):

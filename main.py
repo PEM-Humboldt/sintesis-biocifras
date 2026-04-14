@@ -39,6 +39,7 @@ from utils.functions import (
     rename_table,
     create_staging_indexes,
     create_integrated_table,
+    fill_species_from_scientificname,
     translate_taxonrank,
     add_geometry_and_indexes,
 )
@@ -94,6 +95,7 @@ try:
         timer(create_integrated_table, "Creación de la tabla integrada dwc_occurrence_integrated")(engine, table_names)
         origin = 'regular download'
 
+    timer(fill_species_from_scientificname, "Completando campo species desde scientificname")(engine, table_names['integrated'])
     timer(translate_taxonrank, "Traduciendo taxonrank a español")(engine, table_names['integrated'])
     timer(add_geometry_and_indexes, "Añadiendo geometría e índices")(engine, table_names['integrated'])
 
