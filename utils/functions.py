@@ -416,6 +416,58 @@ def create_integrated_table(engine, table_names):
 
 
 # -----------------------------------------------------------------------------------------------------
+# Traducción de valores de taxonrank a español en la tabla integrada
+# -----------------------------------------------------------------------------------------------------
+
+_TAXONRANK_MAP = {
+    'SPECIES': 'Especie',
+    'SUBSPECIES': 'Subespecie',
+    'GENUS': 'Género',
+    'FAMILY': 'Familia',
+    'ORDER': 'Orden',
+    'CLASS': 'Clase',
+    'PHYLUM': 'Filo',
+    'KINGDOM': 'Reino',
+    'FORM': 'Forma',
+    'VARIETY': 'Variedad',
+    'UNRANKED': '',
+}
+
+
+def translate_taxonrank(engine, table_name):
+    """Traduce los valores de la columna taxonrank"""
+    """ Equivalente a UPDATE "dwc_integrated_{fecha}}"
+            SET "taxonrank" = CASE UPPER("taxonrank")
+                WHEN 'SPECIES' THEN 'Especie'
+                WHEN 'SUBSPECIES' THEN 'Subespecie'
+                WHEN 'GENUS' THEN 'Género'
+                WHEN 'FAMILY' THEN 'Familia'
+                WHEN 'ORDER' THEN 'Orden'
+                WHEN 'CLASS' THEN 'Clase'
+                WHEN 'PHYLUM' THEN 'Filo'
+                WHEN 'KINGDOM' THEN 'Reino'
+                WHEN 'FORM' THEN 'Forma'
+                WHEN 'VARIETY' THEN 'Variedad'
+                WHEN 'UNRANKED' THEN ''
+                ELSE ''
+            END"""
+    cases = ' '.join(
+        f"WHEN 'UNRANKED' THEN ''" if eng == 'UNRANKED'
+        else f"WHEN '{eng}' THEN '{esp}'"
+        for eng, esp in _TAXONRANK_MAP.items()
+    )
+    sql = (
+        f'UPDATE "{table_name}" '
+        f'SET "taxonrank" = CASE UPPER("taxonrank") {cases} '
+        f"ELSE '' END"
+    )
+    with engine.connect() as conn:
+        result = conn.execute(text(sql))
+        conn.commit()
+    logger.info("Taxonrank traducido en %s (%s filas actualizadas)", table_name, f"{result.rowcount:,}")
+
+
+# -----------------------------------------------------------------------------------------------------
 # Creación de indices y geometrías en la tabla integrada
 # -----------------------------------------------------------------------------------------------------
 
