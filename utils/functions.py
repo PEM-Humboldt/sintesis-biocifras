@@ -508,19 +508,19 @@ def add_geometry_and_indexes(engine, table_name):
             logger.info("PK ya existe en %s, se omite creación", integrated)
 
         conn.execute(text(
-            "SELECT AddGeometryColumn(:table, 'the_geom', 4326, 'POINT', 2)"
+            "SELECT AddGeometryColumn(:table, 'geom', 4326, 'POINT', 2)"
         ), {'table': integrated})
         conn.execute(text(
             f'UPDATE "{integrated}" '
-            f'SET the_geom = ST_SetSRID(ST_MakePoint("decimallongitude", "decimallatitude"), 4326) '
+            f'SET geom = ST_SetSRID(ST_MakePoint("decimallongitude", "decimallatitude"), 4326) '
             f'WHERE "decimallatitude" IS NOT NULL AND "decimallongitude" IS NOT NULL'
         ))
-        logger.info("Columna the_geom creada con EPSG 4326 en %s", integrated)
+        logger.info("Columna geom creada con EPSG 4326 en %s", integrated)
 
-        idx_name = f"idx_{integrated}_the_geom"
+        idx_name = f"idx_{integrated}_geom"
         conn.execute(text(
-            f'CREATE INDEX "{idx_name}" ON "{integrated}" USING GIST (the_geom)'
+            f'CREATE INDEX "{idx_name}" ON "{integrated}" USING GIST (geom)'
         ))
-        logger.info("Indice GIST creado: %s", idx_name)
+        logger.info("Indice GIST creado: %s", idx_name) 
 
         conn.commit()
