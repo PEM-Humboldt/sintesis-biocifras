@@ -8,6 +8,7 @@ import csv
 import io
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import create_engine, inspect, text
@@ -18,6 +19,18 @@ logger = logging.getLogger('sintesis_biocifras')
 # en cada batch para evitar bloqueos de memoria.
 
 FLUSH_EVERY = 500_000
+
+_EPOCH_MS_COLS = {'lastinterpreted', 'lastparsed'}
+
+
+def _epoch_ms_to_iso(value):
+    """Convierte epoch en milisegundos a ISO 8601 para columnas TIMESTAMPTZ."""
+    if not value:
+        return value
+    try:
+        return datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc).isoformat()
+    except (ValueError, OSError):
+        return value
 
 # ------------------------------------------------------------------------------------------------------------
 # Definición de listas y variables para el proceso de carga desde los archivos TSV de GBIF
@@ -289,7 +302,11 @@ def data_upload(engine, filepath, table_name, columns):
             reader = csv.DictReader(f, delimiter='\t', quoting=csv.QUOTE_NONE)
             reader.fieldnames = [name.lower() for name in reader.fieldnames]
             for row in reader:
-                writer.writerow([row.get(c.lower(), '') for c in columns])
+                writer.writerow([
+                    _epoch_ms_to_iso(row.get(c.lower(), '')) if c.lower() in _EPOCH_MS_COLS
+                    else row.get(c.lower(), '')
+                    for c in columns
+                ])
                 count += 1
                 if count % FLUSH_EVERY == 0:
                     buffer.seek(0)
@@ -402,24 +419,28 @@ def add_geometry_and_indexes(engine, table_name):
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
         logger.info("Chequeo de extension postgis")
 
-        conn.execute(text(
-            f'ALTER TABLE "{integrated}" ADD PRIMARY KEY ("gbifid")'
-        ))
-        logger.info("PK a campo gbifid agregada a %s", integrated)
+        pk = inspect(engine).get_pk_constraint(integrated)
+        if not pk or not pk.get('constrained_columns'):
+            conn.execute(text(
+                f'ALTER TABLE "{integrated}" ADD PRIMARY KEY ("gbifid")'
+            ))
+            logger.info("PK a campo gbifid agregada a %s", integrated)
+        else:
+            logger.info("PK ya existe en %s, se omite creación", integrated)
 
         conn.execute(text(
-            f'ALTER TABLE "{integrated}" ADD COLUMN the_geom GEOMETRY(Point, 4326)'
-        ))
+            "SELECT AddGeometryColumn(:table, 'the_geom', 4326, 'POINT', 2)"
+        ), {'table': integrated})
         conn.execute(text(
             f'UPDATE "{integrated}" '
-            f'SET geom = ST_SetSRID(ST_MakePoint("decimallongitude", "decimallatitude"), 4326) '
+            f'SET the_geom = ST_SetSRID(ST_MakePoint("decimallongitude", "decimallatitude"), 4326) '
             f'WHERE "decimallatitude" IS NOT NULL AND "decimallongitude" IS NOT NULL'
         ))
-        logger.info("Columna geom creada con EPSG 4326 en %s", integrated)
+        logger.info("Columna the_geom creada con EPSG 4326 en %s", integrated)
 
-        idx_name = f"idx_{integrated}_geom"
+        idx_name = f"idx_{integrated}_the_geom"
         conn.execute(text(
-            f'CREATE INDEX "{idx_name}" ON "{integrated}" USING GIST (geom)'
+            f'CREATE INDEX "{idx_name}" ON "{integrated}" USING GIST (the_geom)'
         ))
         logger.info("Indice GIST creado: %s", idx_name)
 
