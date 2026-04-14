@@ -259,6 +259,15 @@ def tables_operations(engine, suffix, upload_type="default"):
 # que crea un cursor y se ejecuta el comando de copy_expert con el buffer de datos procesado por csv.writer.
 
 def data_upload(engine, filepath, table_name, columns):
+    if not filepath:
+        msg = f"No se definió la ruta del archivo en el .env para la tabla {table_name}"
+        logger.error(msg)
+        raise FileNotFoundError(msg)
+    if not Path(filepath).is_file():
+        msg = f"El archivo no existe en la ruta indicada en el .env: {filepath}"
+        logger.error(msg)
+        raise FileNotFoundError(msg)
+
     db_cols = [c.lower() for c in columns]
     quoted_cols = ', '.join(f'"{c}"' for c in db_cols)
     copy_sql = (
@@ -395,7 +404,7 @@ def add_geometry_and_indexes(engine, table_name):
         logger.info("PK a campo gbifid agregada a %s", integrated)
 
         conn.execute(text(
-            f'ALTER TABLE "{integrated}" ADD COLUMN geom GEOMETRY(Point, 4326)'
+            f'ALTER TABLE "{integrated}" ADD COLUMN the_geom GEOMETRY(Point, 4326)'
         ))
         conn.execute(text(
             f'UPDATE "{integrated}" '

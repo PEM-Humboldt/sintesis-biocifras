@@ -91,6 +91,9 @@ try:
     register_load(engine, table_names, today)
     logger.info("Proceso completado.")
 
+except (FileNotFoundError, ValueError) as e:
+    logger.error("Error durante el proceso: %s", e)
+    sys.exit(1)
 except Exception as e:
     logger.error("Error durante el proceso: %s", e, exc_info=True)
     sys.exit(1)
