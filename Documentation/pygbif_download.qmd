@@ -272,8 +272,10 @@ else:
     key = download_wait(occ.download_sql(query))
 ```
 
+En particular nos interesa poder mirar los registros que no tiene 'CO' como countryCode
+
 ```{python}
-query = "SELECT gbifid,scientificname, datasetid, countrycode,hasgeospatialissues FROM occurrence WHERE countrycode <> 'CO' AND decimalLatitude <= "+ str(maxy) +" AND decimalLatitude >= " + str(miny) + " AND decimalLongitude <= " + str(maxx) +  "AND decimalLongitude >= " + str(minx) + "  AND GBIF_WITHIN('" + ser2.wkt + "', decimalLatitude, decimalLongitude) " 
+query = "SELECT gbifid,scientificname, datasetid, countrycode,hasgeospatialissues, decimalLatitude, decimalLongitude FROM occurrence WHERE countrycode <> 'CO' AND decimalLatitude <= "+ str(maxy) +" AND decimalLatitude >= " + str(miny) + " AND decimalLongitude <= " + str(maxx) +  "AND decimalLongitude >= " + str(minx) + "  AND GBIF_WITHIN('" + ser2.wkt + "', decimalLatitude, decimalLongitude) " 
 with open(datadir + 'spatialQuery2.sql','w') as f:
   f.write(query)
 if is_in_my_download_list(query):
