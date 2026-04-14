@@ -170,6 +170,7 @@ def registry_table(engine):
     CREATE TABLE IF NOT EXISTS table_registry (
         id SERIAL PRIMARY KEY,
         table_name TEXT NOT NULL,
+        origin TEXT,
         created_at DATE NOT NULL,
         is_latest BOOLEAN NOT NULL DEFAULT TRUE
     );
@@ -182,12 +183,11 @@ def registry_table(engine):
 # Con la tabla table_registry se maneja el campo is_latest para indicar
 # la versión más reciente de las tablas de staging y la tabla integrada.
 
-def register_load(engine, table_names, created_at):
+def register_load(engine, table_names, created_at, origin):
     prefixes = {
         'occurrence': 'dwc_occurrence_%',
         'verbatim': 'dwc_verbatim_%',
         'integrated': 'dwc_integrated_%',
-        'sql': 'dwc_sql_%',
     }
     with engine.connect() as conn:
         for key, table_name in table_names.items():
@@ -197,9 +197,9 @@ def register_load(engine, table_names, created_at):
                 "WHERE table_name LIKE :prefix AND is_latest = TRUE"
             ), {'prefix': prefix})
             conn.execute(text(
-                "INSERT INTO table_registry (table_name, created_at, is_latest) "
-                "VALUES (:table_name, :created_at, TRUE)"
-            ), {'table_name': table_name, 'created_at': created_at})
+                "INSERT INTO table_registry (table_name, origin, created_at, is_latest) "
+                "VALUES (:table_name, :origin, :created_at, TRUE)"
+            ), {'table_name': table_name, 'origin': origin, 'created_at': created_at})
         conn.commit()
     logger.info("Datos cargados en table_registry.")
 
@@ -345,6 +345,14 @@ def rename_sql_columns(engine, table_name, columns):
             ))
             logger.info("Columna renombrada: %s → %s en %s", old, new, table_name)
         conn.commit()
+
+
+def rename_table(engine, old_name, new_name):
+    """Renombra una tabla en la base de datos."""
+    with engine.connect() as conn:
+        conn.execute(text(f'ALTER TABLE "{old_name}" RENAME TO "{new_name}"'))
+        conn.commit()
+    logger.info("Tabla renombrada: %s → %s", old_name, new_name)
 
 
 # -----------------------------------------------------------------------------------------------------

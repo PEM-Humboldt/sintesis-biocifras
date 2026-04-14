@@ -36,6 +36,7 @@ from utils.functions import (
     tables_operations,
     data_upload,
     rename_sql_columns,
+    rename_table,
     create_staging_indexes,
     create_integrated_table,
     add_geometry_and_indexes,
@@ -63,6 +64,8 @@ logger.info("Conectado a la base de datos.")
 try:
     registry_table(engine)
 
+    integrated_name = f'dwc_integrated_{suffix}'
+
     if UPLOAD_TYPE == "sql":
         table_names = timer(tables_operations, "Operaciones sobre la tabla de staging dwc_sql")(
             engine, suffix, upload_type=UPLOAD_TYPE
@@ -73,7 +76,11 @@ try:
         timer(rename_sql_columns, "Renombrando columnas verbatim en tabla SQL")(
             engine, table_names['sql'], SQL_COLS
         )
-        target_table = table_names['sql']
+        timer(rename_table, "Renombrando tabla SQL a integrated")(
+            engine, table_names['sql'], integrated_name
+        )
+        table_names = {'integrated': integrated_name}
+        origin = 'sql download'
     else:
         table_names = timer(tables_operations, "Operaciones sobre las tablas de staging dwc_occurrence y dwc_verbatim")(engine, suffix)
         timer(data_upload, "Carga de datos desde occurrence.txt")(
@@ -84,11 +91,11 @@ try:
         )
         timer(create_staging_indexes, "Creación de índices en las tablas de staging dwc_occurrence y dwc_verbatim")(engine, table_names)
         timer(create_integrated_table, "Creación de la tabla integrada dwc_occurrence_integrated")(engine, table_names)
-        target_table = table_names['integrated']
+        origin = 'regular download'
 
-    timer(add_geometry_and_indexes, "Añadiendo geometría e índices")(engine, target_table)
+    timer(add_geometry_and_indexes, "Añadiendo geometría e índices")(engine, table_names['integrated'])
 
-    register_load(engine, table_names, today)
+    register_load(engine, table_names, today, origin)
     logger.info("Proceso completado.")
 
 except (FileNotFoundError, ValueError) as e:
