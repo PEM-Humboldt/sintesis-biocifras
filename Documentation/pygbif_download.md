@@ -172,3 +172,229 @@ else:
 ```
 
     status: SUCCEEDED
+
+## Crear la consulta geográfica con el WKT
+
+Para manejar datos espaciales vectoriales, los paquetes Python más
+utilizados son:
+
+- `shapely` que parece ser la base de codigo de muchos otros paquetes,
+  `shapely` soló no contiene funciones de lectura de shapefiles…
+- `fiona` que parece ser una solución un poco más completa, pero algunos
+  usuarios han mencionado dificultades de instalación
+- `geopandas` que permite mezclar las posibilidades de `pandas` y
+  `shapely`, pero que es una dependencia particularmente pesada
+
+``` python
+import fiona
+import shapely
+from shapely.geometry import shape
+#from shapely.geometry import shape,Polygon, MultiPolygon
+
+with fiona.open("../../data_sintesis-biocifras/RegionesMaritimas.shp") as src:
+    for feature in src:
+        # Convert the record geometry to a Shapely object
+        geom_rm = shape(feature['geometry'])
+        print(geom_rm.geom_type)
+```
+
+    Polygon
+    Polygon
+    Polygon
+    Polygon
+    Polygon
+
+``` python
+        
+
+with fiona.open("../../data_sintesis-biocifras/MGN_DPTO_POLITICO_2023.shp") as src:
+    for feature in src:
+        # Convert the record geometry to a Shapely object
+        geom_col = shape(feature['geometry'])
+        print(geom_col.geom_type)
+```
+
+    Polygon
+    Polygon
+    Polygon
+    MultiPolygon
+    Polygon
+    Polygon
+    Polygon
+    Polygon
+    Polygon
+    Polygon
+    Polygon
+    Polygon
+    Polygon
+    Polygon
+    Polygon
+    Polygon
+    MultiPolygon
+    Polygon
+    Polygon
+    Polygon
+    Polygon
+    Polygon
+    Polygon
+    MultiPolygon
+    Polygon
+    Polygon
+    Polygon
+    MultiPolygon
+    Polygon
+    Polygon
+    Polygon
+    Polygon
+    Polygon
+
+``` python
+geom_multi_rm = shapely.unary_union(geom_rm)
+geom_multi_col = shapely.unary_union(geom_col)
+geom_multi = shapely.union(geom_rm,geom_col)
+geom_polys = list(geom_multi.geoms)
+
+exportPath = "../../data_sintesis-biocifras/"
+filerm = exportPath + 'geom_rm.geojson'
+filecol = exportPath + 'geom_col.geojson'
+fileGeomMulti=exportPath+'geom_multi.geojson'
+with open(filerm,'w') as f:
+  f.write(shapely.to_geojson(geom_multi_rm))
+```
+
+    6893
+
+``` python
+with open(filecol,'w') as f:
+  f.write(shapely.to_geojson(geom_multi_col))
+```
+
+    1108073
+
+``` python
+with open(fileGeomMulti,'w') as f:
+  f.write(shapely.to_geojson(geom_multi))
+```
+
+    1114941
+
+Parece que el manejo de los datos espaciales desde los paquetes
+`shapely` y `fiona`, aunque parecen ser la solución más ligera, son
+demasiado diferentes de lo que conozco en el paquete `sf` de R para que
+yo pueda adaptar mis codigos de manera rapida: `geopandas`, aunque más
+pesado, tiene una documentación mucho más facil y una logica más
+parecida a `sf`
+
+``` python
+import matplotlib.pyplot as plt
+import geopandas as gpd
+datadir = "../../data_sintesis-biocifras/"
+df_rm = gpd.read_file(datadir + 'RegionesMaritimas.shp')
+df_rm.plot(color='lightblue', edgecolor='black');
+plt.show()
+```
+
+![](./Fig/pygbifunnamed-chunk-9-1.png)
+
+``` python
+df_rm_un = df_rm.dissolve()
+df_rm_un.plot(color='lightblue', edgecolor='black')
+plt.show()
+```
+
+![](./Fig/pygbifunnamed-chunk-10-3.png)
+
+``` python
+df_col=gpd.read_file(datadir + 'MGN_MPIO_POLITICO_2023.shp')
+df_col.plot()
+plt.show()
+```
+
+![](./Fig/pygbifunnamed-chunk-11-5.png)
+
+``` python
+df_col_un = df_col.dissolve()
+df_col_un.plot(color='lightblue', edgecolor='black')
+plt.show()
+```
+
+![](./Fig/pygbifunnamed-chunk-12-7.png)
+
+``` python
+allCol=df_col_un.union(df_rm_un)
+allCol.plot(edgecolor='black')
+plt.show()
+```
+
+![](./Fig/pygbifunnamed-chunk-13-9.png)
+
+Entonces, logramos las operaciones dissolve y union para crear la
+geometría grande de colombia y de su zona maritima, sin embargo, al
+nivel de precisión de las capas, nos toca todavía supprimir los “inner
+holes” del poligono obtenido
+
+``` python
+from shapely.geometry import Polygon
+def remove_interiors(poly):
+    """
+    Close polygon holes by limitation to the exterior ring.
+
+    Arguments
+    ---------
+    poly: shapely.geometry.Polygon
+        Input shapely Polygon
+
+    Returns
+    ---------
+    Polygon without any interior holes
+    """
+    if poly.interiors:
+        return Polygon(list(poly.exterior.coords))
+    else:
+        return poly
+polygon=allCol.geometry[0]
+ser=remove_interiors(polygon)
+gdf=gpd.GeoDataFrame(index=[0], crs='epsg:4326', geometry=[ser])
+gdf.plot(edgecolor='black')
+plt.show()
+```
+
+![](./Fig/pygbifunnamed-chunk-14-11.png)
+
+``` python
+ser2=ser.simplify(0.0006)
+gdf=gpd.GeoDataFrame(index=[0], crs='epsg:4326', geometry=[ser2])
+gdf.plot(edgecolor='black')
+plt.show()
+```
+
+![](./Fig/pygbifunnamed-chunk-15-13.png)
+
+Longitud de los wkt antes y despues de la simplificación
+
+``` python
+len(ser.wkt)
+```
+
+    4918808
+
+``` python
+len(ser2.wkt)
+```
+
+    342127
+
+Una manera que puede ser más correcta de representar la complejidad es
+contar el numero de coma en las representaciones WKT
+
+``` python
+ser.wkt.count(",")
+```
+
+    127318
+
+``` python
+ser2.wkt.count(",")
+```
+
+    8880

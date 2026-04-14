@@ -262,7 +262,7 @@ maxx=ser2.bounds[2]
 maxy=ser2.bounds[3]
 ```
 
-```{python}
+```python
 query="SELECT countrycode,hasgeospatialissues,count(*) FROM occurrence WHERE countrycode='CO' OR (decimalLatitude <= "+ str(maxy) +" AND decimalLatitude >= " + str(miny) + " AND decimalLongitude <= " + str(maxx) +  "AND decimalLongitude >= " + str(minx) + "  AND GBIF_WITHIN('" + ser2.wkt + "', decimalLatitude, decimalLongitude)) " + "GROUP BY countrycode, hasgeospatialissues"
 with open(datadir + 'spatialQuery1.sql','w') as f:
   f.write(query)
@@ -281,6 +281,7 @@ if is_in_my_download_list(query):
 else:
   key = download_wait(occ.download_sql(query))
 ```
+
 
 
 
