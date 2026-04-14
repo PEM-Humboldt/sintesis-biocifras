@@ -259,12 +259,16 @@ def tables_operations(engine, suffix, upload_type="default"):
 # que crea un cursor y se ejecuta el comando de copy_expert con el buffer de datos procesado por csv.writer.
 
 def data_upload(engine, filepath, table_name, columns):
-    if not filepath:
-        msg = f"No se definió la ruta del archivo en el .env para la tabla {table_name}"
-        logger.error(msg)
-        raise FileNotFoundError(msg)
-    if not Path(filepath).is_file():
-        msg = f"El archivo no existe en la ruta indicada en el .env: {filepath}"
+    if not filepath or not Path(filepath).is_file():
+        with engine.connect() as conn:
+            conn.execute(text(f'DROP TABLE IF EXISTS "{table_name}"'))
+            conn.commit()
+        logger.info("DROP TABLE %s (sin archivo de datos para cargar)", table_name)
+        msg = (
+            f"No se definió la ruta del archivo en el .env para la tabla {table_name}"
+            if not filepath
+            else f"El archivo no existe en la ruta indicada en el .env: {filepath}"
+        )
         logger.error(msg)
         raise FileNotFoundError(msg)
 
