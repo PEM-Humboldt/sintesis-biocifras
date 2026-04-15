@@ -545,9 +545,10 @@ def spatials_joins(engine, table_name):
             f'ALTER TABLE "{integrated}" '
             f'ADD COLUMN IF NOT EXISTS "codemgn" VARCHAR(5), '
             f'ADD COLUMN IF NOT EXISTS "stateprovincemgn" VARCHAR(250), '
-            f'ADD COLUMN IF NOT EXISTS "countymgn" VARCHAR(250)'
+            f'ADD COLUMN IF NOT EXISTS "countymgn" VARCHAR(250), '
+            f'ADD COLUMN IF NOT EXISTS "maritimeregion" VARCHAR(250)'
         ))
-        logger.info("Columnas codemgn, stateprovincemgn, countymgn agregadas a %s", integrated)
+        logger.info("Columnas codemgn, stateprovincemgn, countymgn, maritimeregion agregadas a %s", integrated)
 
         conn.execute(text(
             f'UPDATE "{integrated}" i '
@@ -560,6 +561,16 @@ def spatials_joins(engine, table_name):
         ))
         logger.info("Cruce espacial con MGN_ADM_MPIO_2025 completado en %s", integrated)
 
+        conn.execute(text(
+            f'UPDATE "{integrated}" i '
+            f'SET "maritimeregion" = m."DESCRIP" '
+            f'FROM "INVEMAR_MARITIME_REGIONS" m '
+            f'WHERE i.geom IS NOT NULL '
+            f'AND i."countymgn" IS NULL '
+            f'AND ST_Intersects(i.geom, m.geom)'
+        ))
+        logger.info("Cruce espacial con INVEMAR_MARITIME_REGIONS completado en %s", integrated)
+
         for col in ('stateprovincemgn', 'countymgn'):
             expr = f'INITCAP("{col}")'
             for word in _LOWERCASE_WORDS:
@@ -568,6 +579,6 @@ def spatials_joins(engine, table_name):
                 f'UPDATE "{integrated}" SET "{col}" = {expr} '
                 f'WHERE "{col}" IS NOT NULL'
             ))
-        logger.info("INITCAP con correcciones aplicado a stateprovincemgn y countymgn en %s", integrated)
+        logger.info("INITCAP con estandarizaciones de nombres aplicado a stateprovincemgn y countymgn en %s", integrated)
 
         conn.commit()
