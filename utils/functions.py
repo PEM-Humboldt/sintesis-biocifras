@@ -527,7 +527,7 @@ def add_geometry_and_indexes(engine, table_name):
 
 
 # -----------------------------------------------------------------------------------------------------
-# Cruce espacial con la tabla MGN_ADM_MPIO_GRAFICO (división político-administrativa)
+# Cruce espacial con la tabla MGN_ADM_MPIO_2025 (división político-administrativa)
 # -----------------------------------------------------------------------------------------------------
 
 
@@ -536,8 +536,8 @@ def add_geometry_and_indexes(engine, table_name):
 # Por ejemplo, 'Norte De Santander' se convierte en 'Norte de Santander'.
 _LOWERCASE_WORDS = (' De ', ' Y ', ' Del ', ' La ', ' Las ', ' Los ', ' En ')
 
-def spatial_join_mgn(engine, table_name):
-    """Cruza la tabla integrada con MGN_ADM_MPIO_GRAFICO usando ST_Intersects
+def spatials_joins(engine, table_name):
+    """Cruza la tabla integrada con MGN_ADM_MPIO_2025 usando ST_Intersects
     y aplica INITCAP a los campos de departamento y municipio."""
     integrated = table_name
     with engine.connect() as conn:
@@ -554,11 +554,11 @@ def spatial_join_mgn(engine, table_name):
             f'SET "codemgn" = m."mpio_cdpmp", '
             f'    "stateprovincemgn" = m."dpto_cnmbr", '
             f'    "countymgn" = m."mpio_cnmbr" '
-            f'FROM "MGN_ADM_MPIO_GRAFICO" m '
+            f'FROM "MGN_ADM_MPIO_2025" m '
             f'WHERE i.geom IS NOT NULL '
             f'AND ST_Intersects(i.geom, m.geom)'
         ))
-        logger.info("Cruce espacial con MGN_ADM_MPIO_GRAFICO completado en %s", integrated)
+        logger.info("Cruce espacial con MGN_ADM_MPIO_2025 completado en %s", integrated)
 
         for col in ('stateprovincemgn', 'countymgn'):
             expr = f'INITCAP("{col}")'

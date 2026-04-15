@@ -42,7 +42,7 @@ from utils.functions import (
     fill_species_from_scientificname,
     translate_taxonrank,
     add_geometry_and_indexes,
-    spatial_join_mgn,
+    spatials_joins,
 )
 
 UPLOAD_TYPE = "sql"
@@ -99,7 +99,7 @@ try:
     timer(fill_species_from_scientificname, "Completando campo species desde scientificname")(engine, table_names['integrated'])
     timer(translate_taxonrank, "Traduciendo taxonrank a español")(engine, table_names['integrated'])
     timer(add_geometry_and_indexes, "Añadiendo geometría e índices")(engine, table_names['integrated'])
-    timer(spatial_join_mgn, "Cruce espacial con MGN municipios")(engine, table_names['integrated'])
+    timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios")(engine, table_names['integrated'])
 
     register_load(engine, table_names, today, origin)
     logger.info("Proceso completado.")
