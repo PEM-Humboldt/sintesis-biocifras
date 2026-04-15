@@ -558,6 +558,12 @@ def add_geometry_and_indexes(engine, table_name):
         ))
         logger.info("Indice GIST creado: %s", idx_name)
 
+        idx_species = f"idx_{integrated}_species"
+        conn.execute(text(
+            f'CREATE INDEX "{idx_species}" ON "{integrated}" USING BTREE ("species")'
+        ))
+        logger.info("Indice BTREE creado: %s", idx_species)
+
         conn.commit()
 
 
@@ -627,55 +633,56 @@ def spatials_joins(engine, table_name):
 # Se valida el estado y el municipio contra los valores del cruce con capas MGN y Zonas marítimas
 def validate_geography(engine, table_name):
     integrated = table_name
-    # Se los campos para validación y qué columnas se van a validar.
+
+    val_case = (
+        "CASE "
+        "WHEN UPPER(TRIM(\"{orig}\")) = UPPER(TRIM(\"{mgn}\")) THEN TRUE "
+        "WHEN \"{orig}\" IS NULL OR TRIM(\"{orig}\") = '' THEN NULL "
+        "WHEN \"decimallatitude\" IS NULL AND \"decimallongitude\" IS NULL THEN NULL "
+        "WHEN \"maritimeregion\" IS NOT NULL THEN NULL "
+        "ELSE FALSE END"
+    )
+
     validations = {
         'stateprovincevalidation': ('stateprovince', 'stateprovincemgn'),
         'countyvalidation': ('county', 'countymgn'),
     }
+
+    sp_case = val_case.format(orig='stateprovince', mgn='stateprovincemgn')
+    co_case = val_case.format(orig='county', mgn='countymgn')
+
     with engine.connect() as conn:
-        # Se agregan las columnas para validación.
-        # Es equivalente a ejecutar la siguiente consulta:
-        # ALTER TABLE "dwc_integrated_{fecha}}" ADD COLUMN IF NOT EXISTS "stateprovincevalidation" BOOLEAN, ADD COLUMN IF NOT EXISTS "countyvalidation" BOOLEAN;
         cols_ddl = ', '.join(
             f'ADD COLUMN IF NOT EXISTS "{col}" BOOLEAN' for col in validations
         )
-        conn.execute(text(f'ALTER TABLE "{integrated}" {cols_ddl}'))
-
-        for val_col, (orig, mgn) in validations.items():
-            # Equivalente a ejecutar la siguiente consulta (se tienen en cuenta las columnas para validación):
-            # UPDATE "dwc_integrated_{fecha}}" SET "stateprovincevalidation" = CASE WHEN UPPER(TRIM("stateprovince")) = UPPER(TRIM("stateprovincemgn")) THEN TRUE WHEN "stateprovince" IS NULL OR TRIM("stateprovince") = '' THEN NULL WHEN "decimallatitude" IS NULL AND "decimallongitude" IS NULL THEN NULL WHEN "maritimeregion" IS NOT NULL THEN NULL ELSE FALSE END;
-            conn.execute(text(
-                f'UPDATE "{integrated}" SET "{val_col}" = CASE '
-                f"WHEN UPPER(TRIM(\"{orig}\")) = UPPER(TRIM(\"{mgn}\")) THEN TRUE "
-                f"WHEN \"{orig}\" IS NULL OR TRIM(\"{orig}\") = '' THEN NULL "
-                f'WHEN "decimallatitude" IS NULL AND "decimallongitude" IS NULL THEN NULL '
-                f'WHEN "maritimeregion" IS NOT NULL THEN NULL '
-                f'ELSE FALSE END'
-            ))
-            logger.info("Validacion %s completada en %s", val_col, integrated)
-
-        # Se agrega la columna flaggeo para la validación geográfica.
         conn.execute(text(
-            f'ALTER TABLE "{integrated}" ADD COLUMN IF NOT EXISTS "flaggeo" VARCHAR(255)'
+            f'ALTER TABLE "{integrated}" {cols_ddl}, '
+            f'ADD COLUMN IF NOT EXISTS "flaggeo" VARCHAR(255)'
         ))
-        # Se realizan las validaciones geográficas según las columnas para validación.
+
+        # Una sola pasada: calcula las validaciones booleanas y flaggeo simultáneamente.
+        # flaggeo se deriva inline de las mismas expresiones CASE para evitar depender
+        # de columnas que aún no tienen valor en esta misma sentencia.
         conn.execute(text(
-            f'UPDATE "{integrated}" SET "flaggeo" = CASE '
-            f'WHEN "stateprovincevalidation" IS TRUE AND "countyvalidation" IS TRUE THEN NULL '
-            f'WHEN "stateprovincevalidation" IS FALSE AND "countyvalidation" IS FALSE '
+            f'UPDATE "{integrated}" SET '
+            f'"stateprovincevalidation" = {sp_case}, '
+            f'"countyvalidation" = {co_case}, '
+            f'"flaggeo" = CASE '
+            f'WHEN ({sp_case}) IS TRUE  AND ({co_case}) IS TRUE  THEN NULL '
+            f'WHEN ({sp_case}) IS FALSE AND ({co_case}) IS FALSE '
             f"THEN 'Departamento y municipio no coinciden con ubicación de la coordenada' "
-            f'WHEN "stateprovincevalidation" IS TRUE AND "countyvalidation" IS FALSE '
+            f'WHEN ({sp_case}) IS TRUE  AND ({co_case}) IS FALSE '
             f"THEN 'Municipio no coincide con ubicación de la coordenada' "
-            f'WHEN "stateprovincevalidation" IS FALSE AND "countyvalidation" IS TRUE '
+            f'WHEN ({sp_case}) IS FALSE AND ({co_case}) IS TRUE '
             f"THEN 'Departamento no coincide con ubicación de la coordenada' "
-            f'WHEN "stateprovincevalidation" IS NULL AND "countyvalidation" IS NULL '
+            f'WHEN ({sp_case}) IS NULL  AND ({co_case}) IS NULL '
             f'AND "maritimeregion" IS NOT NULL '
             f"THEN 'Coordenada en área marítima' "
-            f'WHEN "stateprovincevalidation" IS NULL AND "countyvalidation" IS NULL '
+            f'WHEN ({sp_case}) IS NULL  AND ({co_case}) IS NULL '
             f'AND "decimallatitude" IS NULL AND "decimallongitude" IS NULL '
             f"THEN 'Sin coordenadas' "
             f'ELSE NULL END'
         ))
-        logger.info("Campo flaggeo completado en %s", integrated)
+        logger.info("Validación geográfica completada en %s", integrated)
 
         conn.commit()
