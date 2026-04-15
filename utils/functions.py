@@ -521,6 +521,51 @@ def add_geometry_and_indexes(engine, table_name):
         conn.execute(text(
             f'CREATE INDEX "{idx_name}" ON "{integrated}" USING GIST (geom)'
         ))
-        logger.info("Indice GIST creado: %s", idx_name) 
+        logger.info("Indice GIST creado: %s", idx_name)
+
+        conn.commit()
+
+
+# -----------------------------------------------------------------------------------------------------
+# Cruce espacial con la tabla MGN_ADM_MPIO_GRAFICO (división político-administrativa)
+# -----------------------------------------------------------------------------------------------------
+
+
+# Palabras que se deben convertir a minúsculas después de INITCAP en los campos de departamento y municipio
+_LOWERCASE_WORDS = (' De ', ' Y ', ' Del ', ' La ', ' Las ', ' Los ', ' En ')
+
+def spatial_join_mgn(engine, table_name):
+    """Cruza la tabla integrada con MGN_ADM_MPIO_GRAFICO usando ST_Intersects
+    y aplica INITCAP a los campos de departamento y municipio."""
+    integrated = table_name
+    with engine.connect() as conn:
+        conn.execute(text(
+            f'ALTER TABLE "{integrated}" '
+            f'ADD COLUMN IF NOT EXISTS "codemgn" VARCHAR(5), '
+            f'ADD COLUMN IF NOT EXISTS "deptomgn" VARCHAR(250), '
+            f'ADD COLUMN IF NOT EXISTS "mpiomgn" VARCHAR(250)'
+        ))
+        logger.info("Columnas codemgn, deptomgn, mpiomgn agregadas a %s", integrated)
+
+        conn.execute(text(
+            f'UPDATE "{integrated}" i '
+            f'SET "codemgn" = m."mpio_cdpmp", '
+            f'    "deptomgn" = m."dpto_cnmbr", '
+            f'    "mpiomgn" = m."mpio_cnmbr" '
+            f'FROM "MGN_ADM_MPIO_GRAFICO" m '
+            f'WHERE i.geom IS NOT NULL '
+            f'AND ST_Intersects(i.geom, m.geom)'
+        ))
+        logger.info("Cruce espacial con MGN_ADM_MPIO_GRAFICO completado en %s", integrated)
+
+        for col in ('deptomgn', 'mpiomgn'):
+            expr = f'INITCAP("{col}")'
+            for word in _LOWERCASE_WORDS:
+                expr = f"REPLACE({expr}, '{word}', '{word.lower()}')"
+            conn.execute(text(
+                f'UPDATE "{integrated}" SET "{col}" = {expr} '
+                f'WHERE "{col}" IS NOT NULL'
+            ))
+        logger.info("INITCAP con correcciones aplicado a deptomgn y mpiomgn en %s", integrated)
 
         conn.commit()
