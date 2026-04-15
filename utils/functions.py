@@ -64,7 +64,7 @@ SQL_COLS = [
 
 # Mapeo de columnas tipo SQL para CREATE TABLE dinamico
 _OCCURRENCE_TYPES = {
-    'gbifid': 'BIGINT PRIMARY KEY',
+    'gbifid': 'BIGINT',
     'occurrenceid': 'TEXT', 'basisofrecord': 'TEXT',
     'collectioncode': 'TEXT', 'catalognumber': 'TEXT',
     'recordedby': 'TEXT', 'individualcount': 'INTEGER',
@@ -85,7 +85,7 @@ _OCCURRENCE_TYPES = {
 }
 
 _VERBATIM_TYPES = {
-    'gbifid': 'BIGINT PRIMARY KEY',
+    'gbifid': 'BIGINT',
     'type': 'TEXT', 'datasetid': 'TEXT', 'datasetname': 'TEXT',
     'organismquantity': 'TEXT', 'organismquantitytype': 'TEXT',
     'eventid': 'TEXT', 'samplingprotocol': 'TEXT',
@@ -95,7 +95,7 @@ _VERBATIM_TYPES = {
 }
 
 _SQL_COL_TYPES = {
-    'gbifid': 'BIGINT PRIMARY KEY',
+    'gbifid': 'BIGINT',
     'occurrenceid': 'TEXT',
     'basisofrecord': 'TEXT', 'collectioncode': 'TEXT',
     'catalognumber': 'TEXT', 'recordedby': 'TEXT',
@@ -204,7 +204,7 @@ def _build_create_ddl(table_name, col_types):
     # Es equivalente a ejecutar la siguiente consulta:
     # CREATE TABLE "tabla_fecha" ("columna1" tipo1, "columna2" tipo2, ...);
     cols = ', '.join(f'"{col}" {dtype}' for col, dtype in col_types.items())
-    return f'CREATE TABLE "{table_name}" ({cols});'
+    return f'CREATE UNLOGGED TABLE "{table_name}" ({cols});'
 
 # Para mantener un historial de las tablas de staging y la tabla integrada se utiliza un sufijo de fecha.
 def tables_operations(engine, suffix, upload_type="default"):
@@ -310,6 +310,8 @@ def data_upload(engine, filepath, table_name, columns):
     raw_conn = engine.raw_connection()
     try:
         cur = raw_conn.cursor()
+        cur.execute("SET synchronous_commit = OFF")
+        cur.execute("SET maintenance_work_mem = '4GB'")
         buffer = io.StringIO()
         writer = csv.writer(buffer, delimiter='\t', quoting=csv.QUOTE_MINIMAL)
         count = 0
@@ -346,6 +348,8 @@ def data_upload(engine, filepath, table_name, columns):
         raw_conn.rollback()
         raise
     finally:
+        cur.execute("RESET synchronous_commit")
+        cur.execute("RESET maintenance_work_mem")
         raw_conn.close()
 
 
@@ -526,17 +530,16 @@ def add_geometry_and_indexes(engine, table_name):
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
         logger.info("Chequeo de extension postgis")
 
-        pk = inspect(engine).get_pk_constraint(integrated)
-        # Si no existe la PK en la tabla, se agrega la PK a la columna gbifid. Esto aplica cuando se hace el merge
-        # de las tablas de staging dwc_occurrence y dwc_verbatim para crear la tabla integrada. Con la tabla dwc_sql
-        # no aplica ya que en su creación se define la PK en la columna gbifid.
-        if not pk or not pk.get('constrained_columns'):
-            conn.execute(text(
-                f'ALTER TABLE "{integrated}" ADD PRIMARY KEY ("gbifid")'
-            ))
-            logger.info("PK a campo gbifid agregada a %s", integrated)
-        else:
-            logger.info("PK ya existe en %s, se omite creación", integrated)
+        conn.execute(text(
+            f'ALTER TABLE "{integrated}" ADD PRIMARY KEY ("gbifid")'
+        ))
+        logger.info("PK a campo gbifid agregada a %s", integrated)
+
+        idx_species = f"idx_{integrated}_species"
+        conn.execute(text(
+            f'CREATE INDEX "{idx_species}" ON "{integrated}" USING BTREE ("species")'
+        ))
+        logger.info("Indice BTREE creado: %s", idx_species)
 
         # Se agrega la columna geom a la tabla con la proyección EPSG 4326 utilizando la función AddGeometryColumn de
         # PostGIS. El nombre de la columna es geom para asegurar consistencia con el uso de postgis versión >= 2.0
@@ -557,12 +560,6 @@ def add_geometry_and_indexes(engine, table_name):
             f'CREATE INDEX "{idx_name}" ON "{integrated}" USING GIST (geom)'
         ))
         logger.info("Indice GIST creado: %s", idx_name)
-
-        idx_species = f"idx_{integrated}_species"
-        conn.execute(text(
-            f'CREATE INDEX "{idx_species}" ON "{integrated}" USING BTREE ("species")'
-        ))
-        logger.info("Indice BTREE creado: %s", idx_species)
 
         conn.commit()
 
