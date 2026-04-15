@@ -532,6 +532,8 @@ def add_geometry_and_indexes(engine, table_name):
 
 
 # Palabras que se deben convertir a minúsculas después de INITCAP en los campos de departamento y municipio
+# para estandarizar el nombre de los departamentos y municipios.
+# Por ejemplo, 'Norte De Santander' se convierte en 'Norte de Santander'.
 _LOWERCASE_WORDS = (' De ', ' Y ', ' Del ', ' La ', ' Las ', ' Los ', ' En ')
 
 def spatial_join_mgn(engine, table_name):
@@ -542,23 +544,23 @@ def spatial_join_mgn(engine, table_name):
         conn.execute(text(
             f'ALTER TABLE "{integrated}" '
             f'ADD COLUMN IF NOT EXISTS "codemgn" VARCHAR(5), '
-            f'ADD COLUMN IF NOT EXISTS "deptomgn" VARCHAR(250), '
-            f'ADD COLUMN IF NOT EXISTS "mpiomgn" VARCHAR(250)'
+            f'ADD COLUMN IF NOT EXISTS "stateprovincemgn" VARCHAR(250), '
+            f'ADD COLUMN IF NOT EXISTS "countymgn" VARCHAR(250)'
         ))
-        logger.info("Columnas codemgn, deptomgn, mpiomgn agregadas a %s", integrated)
+        logger.info("Columnas codemgn, stateprovincemgn, countymgn agregadas a %s", integrated)
 
         conn.execute(text(
             f'UPDATE "{integrated}" i '
             f'SET "codemgn" = m."mpio_cdpmp", '
-            f'    "deptomgn" = m."dpto_cnmbr", '
-            f'    "mpiomgn" = m."mpio_cnmbr" '
+            f'    "stateprovincemgn" = m."dpto_cnmbr", '
+            f'    "countymgn" = m."mpio_cnmbr" '
             f'FROM "MGN_ADM_MPIO_GRAFICO" m '
             f'WHERE i.geom IS NOT NULL '
             f'AND ST_Intersects(i.geom, m.geom)'
         ))
         logger.info("Cruce espacial con MGN_ADM_MPIO_GRAFICO completado en %s", integrated)
 
-        for col in ('deptomgn', 'mpiomgn'):
+        for col in ('stateprovincemgn', 'countymgn'):
             expr = f'INITCAP("{col}")'
             for word in _LOWERCASE_WORDS:
                 expr = f"REPLACE({expr}, '{word}', '{word.lower()}')"
@@ -566,6 +568,6 @@ def spatial_join_mgn(engine, table_name):
                 f'UPDATE "{integrated}" SET "{col}" = {expr} '
                 f'WHERE "{col}" IS NOT NULL'
             ))
-        logger.info("INITCAP con correcciones aplicado a deptomgn y mpiomgn en %s", integrated)
+        logger.info("INITCAP con correcciones aplicado a stateprovincemgn y countymgn en %s", integrated)
 
         conn.commit()
