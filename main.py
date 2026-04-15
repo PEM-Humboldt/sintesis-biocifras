@@ -43,6 +43,7 @@ from utils.functions import (
     translate_taxonrank,
     add_geometry_and_indexes,
     spatials_joins,
+    validate_geography,
 )
 
 UPLOAD_TYPE = "sql"
@@ -97,9 +98,10 @@ try:
         origin = 'regular download'
 
     timer(fill_species_from_scientificname, "Completando campo species desde scientificname")(engine, table_names['integrated'])
-    timer(translate_taxonrank, "Traduciendo taxonrank a español")(engine, table_names['integrated'])
-    timer(add_geometry_and_indexes, "Añadiendo geometría e índices")(engine, table_names['integrated'])
-    timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios")(engine, table_names['integrated'])
+    timer(translate_taxonrank, "Traduciendo taxonrank a español en la tabla integrada")(engine, table_names['integrated'])
+    timer(add_geometry_and_indexes, "Añadiendo geometría e índices a la tabla integrada")(engine, table_names['integrated'])
+    timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(engine, table_names['integrated'])
+    timer(validate_geography, "Validación geográfica")(engine, table_names['integrated'])
 
     register_load(engine, table_names, today, origin)
     logger.info("Proceso completado.")
