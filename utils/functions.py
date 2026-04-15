@@ -11,34 +11,23 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Libreria para la conexión a la base de datos PostgreSQL y PostGIS
 from sqlalchemy import create_engine, inspect, text
 
+# Inicialización del logger
 logger = logging.getLogger('sintesis_biocifras')
 
 # Indica el número de filas que se van a cargar a la base de datos desde los archivos TSV de GBIF 
-# en cada batch para evitar bloqueos de memoria.
-
+# en cada batch para evitar bloqueos de memoria. 
 FLUSH_EVERY = 500_000
-
-_EPOCH_MS_COLS = {'lastinterpreted', 'lastparsed'}
-
-
-def _epoch_ms_to_iso(value):
-    """Convierte epoch en milisegundos a ISO 8601 para columnas TIMESTAMPTZ."""
-    if not value:
-        return value
-    try:
-        return datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc).isoformat()
-    except (ValueError, OSError):
-        return value
 
 # ------------------------------------------------------------------------------------------------------------
 # Definición de listas y variables para el proceso de carga desde los archivos TSV de GBIF
 # 
-# Para el process de carga desde los archivos occurrence.txt y verbatim.txt se definen únicamente las columnas 
+# Para el process de carga desde los archivos occurrence.txt, verbatim.txt y sql.csv se definen únicamente las columnas 
 # con listas que se van a utilizar para evitar cargar datos innecesarios y optimizar el proceso de carga.
 # Se pueden agregar más columnas si es necesario. Pero no olvidar agregar las columnas a las tablas de staging
-# en las listas _OCCURRENCE_TYPES y _VERBATIM_TYPES.
+# en las listas _OCCURRENCE_TYPES, _VERBATIM_TYPES, _SQL_COL_TYPES.
 # Se decide usar este enfoque de listas para poder agregar o reducir el número de columnas de manera dinámica
 # sin tener que modificar directamente consultas SQL en RAW o a través de SQLAlchemy.
 # ------------------------------------------------------------------------------------------------------------
@@ -136,7 +125,7 @@ _SQL_COL_TYPES = {
 # Funciones para la conexión y chequeo de conexión a la base de datos PostgreSQL
 # ------------------------------------------------------------------------------
 
-# Se crea el motor de conexión a la base de datos PostgreSQL usando SQLAlchemy para crear el pool de conexiones
+# Se crea el motor de conexión a la base de datos PostgreSQL usando SQLAlchemy para inicializar el pool de conexiones
 def get_engine():
     url = (
         f"postgresql+psycopg2://{os.getenv('DATABASE_USER')}:{os.getenv('DATABASE_PASS')}"
@@ -182,7 +171,6 @@ def registry_table(engine):
 
 # Con la tabla table_registry se maneja el campo is_latest para indicar
 # la versión más reciente de las tablas de staging y la tabla integrada.
-
 def register_load(engine, table_names, created_at, origin):
     prefixes = {
         'occurrence': 'dwc_occurrence_%',
@@ -205,11 +193,14 @@ def register_load(engine, table_names, created_at, origin):
 
 
 # -------------------------------------------------------------------------------------------------------------------------
-# Creacion / truncado de tablas de staging (dwc_occurrence y dwc_verbatim) y la tabla integrada (dwc_occurrence_integrated)
+# Creacion / truncado de tablas de staging (dwc_occurrence y dwc_verbatim) y la tabla integrada (dwc_integrated)
 # -------------------------------------------------------------------------------------------------------------------------
 
 def _build_create_ddl(table_name, col_types):
+    # Función de apoyo.
     # Genera sentencias CREATE TABLE a partir del diccionario columna -> tipo SQL.
+    # cols es un diccionario con el nombre de la columna y el tipo SQL que se genera dinámicamente
+    # col_types es uno de los diccionarios: _OCCURRENCE_TYPES, _VERBATIM_TYPES, _SQL_COL_TYPES
     # Es equivalente a ejecutar la siguiente consulta:
     # CREATE TABLE "tabla_fecha" ("columna1" tipo1, "columna2" tipo2, ...);
     cols = ', '.join(f'"{col}" {dtype}' for col, dtype in col_types.items())
@@ -217,7 +208,10 @@ def _build_create_ddl(table_name, col_types):
 
 # Para mantener un historial de las tablas de staging y la tabla integrada se utiliza un sufijo de fecha.
 def tables_operations(engine, suffix, upload_type="default"):
-    """Crea tablas con sufijo de fecha. Si ya existen, las elimina y recrea para garantizar un schema limpio. Retorna dict con nombres."""
+    """Crea tablas con sufijo de fecha. Si ya existen, las elimina y vuelven a crear para garantizar una carga limpia. 
+    Retorna dict con nombres de las tablas para seguir el proceso de carga.
+    Se tienen el cuenta el tipo de carga: sql o regular.
+    """
     if upload_type == "sql":
         table_names = {'sql': f'dwc_sql_{suffix}'}
         type_maps = {'sql': _SQL_COL_TYPES}
@@ -249,7 +243,7 @@ def tables_operations(engine, suffix, upload_type="default"):
 
 
 # ------------------------------------------------------------------------------------------------------------
-# Carga masiva de datos desde los archivos TSV de GBIF a las tablas de staging (dwc_occurrence y dwc_verbatim)
+# Carga masiva de datos desde los archivos TSV de GBIF a las tablas de staging
 # ------------------------------------------------------------------------------------------------------------
 
 # Los datos de GBIF pueden presentar problemas por el uso de caracteres especiales como comillas, tabuladores y
@@ -258,7 +252,7 @@ def tables_operations(engine, suffix, upload_type="default"):
 # en el la sentencia COPY de PostgreSQL con el delimitador E'\\'.
 
 # El otro punto importante es que al cargar los datos se utiliza copy_expert de psycopg2 ya que es más eficiente
-# al poder definir cargas por batch y no tener que leer todo el archivo en memoria.
+# al poder hacer cargas por batch y no tener que leer todo el archivo en memoria.
 # Ahora, por qué se utiliza copy_expert y no copy_from o directamente a través de SQLAlchemy.execute o una 
 # consulta SQL en raw o con el comando COPY de PostgreSQL?
 # La principal son los caracteres especiales desde los archivos de GBIF, además de tener control sobre la cantidad
@@ -267,10 +261,28 @@ def tables_operations(engine, suffix, upload_type="default"):
 # archivos deben estár en el mismo servidor de la base de datos, aunque puede solventarse con salida STDOUT.
 # SQLAlchemy.execute es más flexible, pero espera siempre que se retorne el resultado de la consulta, por lo que
 # en procesos de carga masiva no es la mejor opción.
-# Por ultimo, el comando de copy_expert de psycopg2 se ejecuta a través de la conexión raw de SQLAlchemy,
+# Por último, el comando de copy_expert de psycopg2 se ejecuta a través de la conexión raw de SQLAlchemy,
 # que crea un cursor y se ejecuta el comando de copy_expert con el buffer de datos procesado por csv.writer.
 
+# Columnas cargadas desde los archivos TSV de GBIF que se deben convertir a ISO 8601 para columnas TIMESTAMPTZ
+# Bug que apareció al cargar los datos descargados en formato GBIF SQL
+# El EPOCH es el número de milisegundos desde el 1 de enero de 1970 00:00:00 UTC, pero no es legible como el timestamp
+# por lo que se debe convertir a ISO 8601 para que sea legible y que se pueda cargar a la base de datos.
+_EPOCH_MS_COLS = {'lastinterpreted', 'lastparsed'}
+
+# Función de apoyo para convertir epoch en milisegundos a ISO 8601 para columnas TIMESTAMPTZ.
+def _epoch_ms_to_iso(value):
+    """Convierte epoch en milisegundos a ISO 8601 para columnas TIMESTAMPTZ."""
+    if not value:
+        return value
+    try:
+        return datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc).isoformat()
+    except (ValueError, OSError):
+        return value
+
 def data_upload(engine, filepath, table_name, columns):
+    # Confirma que los archivos de datos definidos en el .env existen.
+    # Si no existen, se retorna un error y se elimina la tabla de staging.
     if not filepath or not Path(filepath).is_file():
         with engine.connect() as conn:
             conn.execute(text(f'DROP TABLE IF EXISTS "{table_name}"'))
@@ -284,6 +296,9 @@ def data_upload(engine, filepath, table_name, columns):
         logger.error(msg)
         raise FileNotFoundError(msg)
 
+    # Se generan las columnas de la tabla de staging en minúsculas para la ejecución del comando COPY de PostgreSQL.
+    # Primero se generan las columnas en minúsculas y luego se generan las columnas entre comillas dobles para la ejecución del comando COPY de PostgreSQL.
+    # Se ejecuta el comando COPY de PostgreSQL con el formato csv, el delimitador E'\\t' y el null '' para evitar errores de carga.
     db_cols = [c.lower() for c in columns]
     quoted_cols = ', '.join(f'"{c}"' for c in db_cols)
     copy_sql = (
@@ -291,6 +306,7 @@ def data_upload(engine, filepath, table_name, columns):
         f"FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t', NULL '')"
     )
 
+    # Se crea la conexión raw de SQLAlchemy para ejecutar el comando COPY de PostgreSQL usando psycopg2.
     raw_conn = engine.raw_connection()
     try:
         cur = raw_conn.cursor()
@@ -299,18 +315,23 @@ def data_upload(engine, filepath, table_name, columns):
         count = 0
         with open(filepath, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f, delimiter='\t', quoting=csv.QUOTE_NONE)
+            # Se lee la primera fila de nombres de columnas y se convierte a minúsculas para la ejecución del comando COPY de PostgreSQL.
             reader.fieldnames = [name.lower() for name in reader.fieldnames]
             for row in reader:
+                # Para cada fila, escribe en el buffer solo las columnas que necesita (las definidas en reader.fieldnames)
+                # Si la columna es de tipo timestamp (definida en _EPOCH_MS_COLS), convierte el epoch a ISO 8601.
                 writer.writerow([
                     _epoch_ms_to_iso(row.get(c.lower(), '')) if c.lower() in _EPOCH_MS_COLS
                     else row.get(c.lower(), '')
                     for c in columns
                 ])
                 count += 1
+                # Si el modulo de count con la variable FLUSH_EVERY se igual a 0 se envía el buffer a la base de datos
                 if count % FLUSH_EVERY == 0:
                     buffer.seek(0)
                     cur.copy_expert(copy_sql, buffer)
                     raw_conn.commit()
+                    # Se reinicia el buffer y el writer para la siguiente carga.
                     buffer = io.StringIO()
                     writer = csv.writer(buffer, delimiter='\t', quoting=csv.QUOTE_MINIMAL)
                     logger.info("  %s — %s filas cargadas...", table_name, f"{count:,}")
@@ -328,6 +349,12 @@ def data_upload(engine, filepath, table_name, columns):
         raw_conn.close()
 
 
+# -----------------------------------------------------------------------------------------------------
+# Renombrado de columnas en la tabla de staging dwc_sql
+# -----------------------------------------------------------------------------------------------------
+
+# Se renombran las columnas con prefijo v_ quitando el prefijo y en el caso de scientificname se cambia a verbatimscientificname.
+# Se realiza esta función para asegurar que el nombre de las columnas sean consistentes sin importar el origen de los datos.
 def rename_sql_columns(engine, table_name, columns):
     """Renombra columnas con prefijo v_ quitando el prefijo (v_scientificname → verbatimscientificname)."""
     renames = {}
@@ -345,7 +372,7 @@ def rename_sql_columns(engine, table_name, columns):
             logger.info("Columna renombrada: %s → %s en %s", old, new, table_name)
         conn.commit()
 
-
+# Se renombra la tabla de staging dwc_sql a dwc_integrated para integridad en el flujo de carga.
 def rename_table(engine, old_name, new_name):
     """Renombra una tabla en la base de datos. Si new_name ya existe, la elimina primero."""
     insp = inspect(engine)
@@ -419,9 +446,10 @@ def create_integrated_table(engine, table_names):
 
 
 # -----------------------------------------------------------------------------------------------------
-# Traducción de valores de taxonrank a español en la tabla integrada
+# Preparación y traducción de valores de taxonrank a español en la tabla integrada
 # -----------------------------------------------------------------------------------------------------
 
+# Mapeo de valores de taxonrank a español.
 _TAXONRANK_MAP = {
     'SPECIES': 'Especie',
     'SUBSPECIES': 'Subespecie',
@@ -436,7 +464,9 @@ _TAXONRANK_MAP = {
     'UNRANKED': '',
 }
 
-
+# Se llena el campo species con las dos primeras palabras de scientificname cuando taxonrank es 'SPECIES' y species es nulo o vacío.
+# Es equivalente a ejecutar la siguiente consulta:
+# UPDATE "dwc_integrated_{fecha}}" SET "species" = TRIM(split_part("scientificname", ' ', 1) || ' ' || split_part("scientificname", ' ', 2)) WHERE UPPER("taxonrank") = 'SPECIES' AND ("species" IS NULL OR TRIM("species") = '')
 def fill_species_from_scientificname(engine, table_name):
     """Llena el campo species con las dos primeras palabras de scientificname
     cuando taxonrank es 'SPECIES' y species es nulo o vacío."""
@@ -452,24 +482,23 @@ def fill_species_from_scientificname(engine, table_name):
         conn.commit()
     logger.info("Campo species completado desde scientificname en %s (%s filas)", table_name, f"{result.rowcount:,}")
 
-
+# Se traduce el valor de taxonrank a español según el mapeo en _TAXONRANK_MAP.
+# Es equivalente a ejecutar la siguiente consulta:
+# UPDATE "dwc_integrated_{fecha}}" SET "taxonrank" = CASE UPPER("taxonrank")
+# WHEN 'SPECIES' THEN 'Especie'
+# WHEN 'SUBSPECIES' THEN 'Subespecie'
+# WHEN 'GENUS' THEN 'Género'
+# WHEN 'FAMILY' THEN 'Familia'
+# WHEN 'ORDER' THEN 'Orden'
+# WHEN 'CLASS' THEN 'Clase'
+# WHEN 'PHYLUM' THEN 'Filo'
+# WHEN 'KINGDOM' THEN 'Reino'
+# WHEN 'FORM' THEN 'Forma'
+# WHEN 'VARIETY' THEN 'Variedad'
+# WHEN 'UNRANKED' THEN ''
+# ELSE ''
+# END
 def translate_taxonrank(engine, table_name):
-    """Traduce los valores de la columna taxonrank"""
-    """ Equivalente a UPDATE "dwc_integrated_{fecha}}"
-            SET "taxonrank" = CASE UPPER("taxonrank")
-                WHEN 'SPECIES' THEN 'Especie'
-                WHEN 'SUBSPECIES' THEN 'Subespecie'
-                WHEN 'GENUS' THEN 'Género'
-                WHEN 'FAMILY' THEN 'Familia'
-                WHEN 'ORDER' THEN 'Orden'
-                WHEN 'CLASS' THEN 'Clase'
-                WHEN 'PHYLUM' THEN 'Filo'
-                WHEN 'KINGDOM' THEN 'Reino'
-                WHEN 'FORM' THEN 'Forma'
-                WHEN 'VARIETY' THEN 'Variedad'
-                WHEN 'UNRANKED' THEN ''
-                ELSE ''
-            END"""
     cases = ' '.join(
         f"WHEN 'UNRANKED' THEN ''" if eng == 'UNRANKED'
         else f"WHEN '{eng}' THEN '{esp}'"
@@ -491,7 +520,6 @@ def translate_taxonrank(engine, table_name):
 # -----------------------------------------------------------------------------------------------------
 
 # Se hace una verificación de la extensión postgis para evitar errores de carga.
-
 def add_geometry_and_indexes(engine, table_name):
     integrated = table_name
     with engine.connect() as conn:
@@ -499,6 +527,9 @@ def add_geometry_and_indexes(engine, table_name):
         logger.info("Chequeo de extension postgis")
 
         pk = inspect(engine).get_pk_constraint(integrated)
+        # Si no existe la PK en la tabla, se agrega la PK a la columna gbifid. Esto aplica cuando se hace el merge
+        # de las tablas de staging dwc_occurrence y dwc_verbatim para crear la tabla integrada. Con la tabla dwc_sql
+        # no aplica ya que en su creación se define la PK en la columna gbifid.
         if not pk or not pk.get('constrained_columns'):
             conn.execute(text(
                 f'ALTER TABLE "{integrated}" ADD PRIMARY KEY ("gbifid")'
@@ -507,16 +538,20 @@ def add_geometry_and_indexes(engine, table_name):
         else:
             logger.info("PK ya existe en %s, se omite creación", integrated)
 
+        # Se agrega la columna geom a la tabla con la proyección EPSG 4326 utilizando la función AddGeometryColumn de
+        # PostGIS. El nombre de la columna es geom para asegurar consistencia con el uso de postgis versión >= 2.0
         conn.execute(text(
             "SELECT AddGeometryColumn(:table, 'geom', 4326, 'POINT', 2)"
         ), {'table': integrated})
+        # Se actualiza la columna geom con los valores de decimallongitude y decimallatitude para crear una geometría
+        # teniendo en cuenta la condición de que las columnas decimallatitude y decimallongitude no sean nulas.
         conn.execute(text(
             f'UPDATE "{integrated}" '
             f'SET geom = ST_SetSRID(ST_MakePoint("decimallongitude", "decimallatitude"), 4326) '
             f'WHERE "decimallatitude" IS NOT NULL AND "decimallongitude" IS NOT NULL'
         ))
         logger.info("Columna geom creada con EPSG 4326 en %s", integrated)
-
+        # Se crea un índice GIST en la columna geom para facilitar las consultas espaciales.
         idx_name = f"idx_{integrated}_geom"
         conn.execute(text(
             f'CREATE INDEX "{idx_name}" ON "{integrated}" USING GIST (geom)'
@@ -526,19 +561,18 @@ def add_geometry_and_indexes(engine, table_name):
         conn.commit()
 
 
-# -----------------------------------------------------------------------------------------------------
-# Cruce espacial con la tabla MGN_ADM_MPIO_2025 (división político-administrativa)
-# -----------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------------------------------------------
+# Cruces espaciales con la tabla MGN_ADM_MPIO_2025 (división político-administrativa) e Invemar_maritime_regions (regiones marítimas)
+# --------------------------------------------------------------------------------------------------------------------------------------
 
 
 # Palabras que se deben convertir a minúsculas después de INITCAP en los campos de departamento y municipio
-# para estandarizar el nombre de los departamentos y municipios.
-# Por ejemplo, 'Norte De Santander' se convierte en 'Norte de Santander'.
-_LOWERCASE_WORDS = (' De ', ' Y ', ' Del ', ' La ', ' Las ', ' Los ', ' En ')
+# para estandarización de nombres. Por ejemplo, 'Norte De Santander' a 'Norte de Santander'.
+_LOWERCASE_WORDS = (' De ', ' Y ', ' Del ', ' La ')
 
 def spatials_joins(engine, table_name):
-    """Cruza la tabla integrada con MGN_ADM_MPIO_2025 usando ST_Intersects
-    y aplica INITCAP a los campos de departamento y municipio."""
+    # Cruza la tabla integrada con MGN_ADM_MPIO_2025 y Invemar_maritime_regions usando ST_Intersects
+    # y aplica INITCAP a los campos de departamento y municipio para estandarización de nombres.
     integrated = table_name
     with engine.connect() as conn:
         conn.execute(text(
@@ -571,8 +605,11 @@ def spatials_joins(engine, table_name):
         ))
         logger.info("Cruce espacial con INVEMAR_MARITIME_REGIONS completado en %s", integrated)
 
+        # Se aplica INITCAP a los campos de departamento y municipio para estandarización de nombres.
         for col in ('stateprovincemgn', 'countymgn'):
             expr = f'INITCAP("{col}")'
+            # Se reemplazan las palabras que se deben convertir a minúsculas después de INITCAP en los campos de departamento y municipio
+            # Cada palabra en _LOWERCASE_WORDS se formatea para que sea un replace en SQL
             for word in _LOWERCASE_WORDS:
                 expr = f"REPLACE({expr}, '{word}', '{word.lower()}')"
             conn.execute(text(
