@@ -689,6 +689,15 @@ def validate_geography(engine, table_name):
 # Cruces taxonómicos con listados de referencia
 # --------------------------------------------------------------------------------------------------------------------------------------
 
+# Se definen las tablas y los campos a cruzar. La idea es iterar sobre las tablas y campos para evitar
+# tener que definirlas las consultas SQL manualmente.
+# Es equivalente a ejecutar la siguiente consulta:
+# UPDATE "dwc_integrated_{fecha}}" SET "cites" = t."cites" FROM "taxonomic_cites" t WHERE i."species" = t."species"
+# UPDATE "dwc_integrated_{fecha}}" SET "threatstatusuicn" = t."threatstatusuicn" FROM "taxonomic_threat_uicn" t WHERE i."species" = t."species"
+# UPDATE "dwc_integrated_{fecha}}" SET "threatstatusmads" = t."threatstatusmads" FROM "taxonomic_threat_mads" t WHERE i."species" = t."species"
+# UPDATE "dwc_integrated_{fecha}}" SET "exotic" = t."exotic", "exoticriskinvasion" = t."exoticriskinvasion", "invasiveness" = t."invasiveness", "invasive" = t."invasive", "transplanted" = t."transplanted" FROM "taxonomic_invasive_exotic" t WHERE i."species" = t."species"
+# UPDATE "dwc_integrated_{fecha}}" SET "migratory" = t."migratory", "endemic" = t."endemic" FROM "taxonomic_col_list" t WHERE i."species" = t."species"
+# UPDATE "dwc_integrated_{fecha}}" SET "referencelist" = 'Presente en lista taxonómica: ' || "referencelist" FROM "taxonomic_ref_list" t WHERE i."species" = t."species"
 _TAXONOMIC_JOINS = {
     'taxonomic_cites': {
         'columns': {'cites': 'cites'},
