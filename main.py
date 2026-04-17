@@ -44,6 +44,7 @@ from utils.functions import (
     add_geometry_and_indexes,
     spatials_joins,
     validate_geography,
+    taxonomic_joins,
 )
 
 UPLOAD_TYPE = "sql"
@@ -102,6 +103,7 @@ try:
     timer(add_geometry_and_indexes, "Añadiendo geometría e índices a la tabla integrada")(engine, table_names['integrated'])
     timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(engine, table_names['integrated'])
     timer(validate_geography, "Validación geográfica")(engine, table_names['integrated'])
+    timer(taxonomic_joins, "Cruces taxonómicos con listados")(engine, table_names['integrated'])
 
     register_load(engine, table_names, today, origin)
     logger.info("Proceso completado.")

@@ -683,3 +683,69 @@ def validate_geography(engine, table_name):
         logger.info("Validación geográfica completada en %s", integrated)
 
         conn.commit()
+
+
+# --------------------------------------------------------------------------------------------------------------------------------------
+# Cruces taxonómicos con listados de referencia
+# --------------------------------------------------------------------------------------------------------------------------------------
+
+_TAXONOMIC_JOINS = {
+    'taxonomic_cites': {
+        'columns': {'cites': 'cites'},
+    },
+    'taxonomic_threat_uicn': {
+        'columns': {'threatstatus': 'threatstatusuicn'},
+    },
+    'taxonomic_threat_mads': {
+        'columns': {'threatstatus': 'threatstatusmads'},
+    },
+    'taxonomic_invasive_exotic': {
+        'columns': {
+            'exotic': 'exotic',
+            'exoticriskinvasion': 'exoticriskinvasion',
+            'invasiveness': 'invasiveness',
+            'invasive': 'invasive',
+            'transplanted': 'transplanted',
+        },
+    },
+    'taxonomic_col_list': {
+        'columns': {
+            'migratory': 'migratory',
+            'endemic': 'endemic',
+            'datasetid': 'referencelist',
+        },
+    },
+}
+
+
+def taxonomic_joins(engine, table_name):
+    """Cruza la tabla integrada con tablas taxonómicas por el campo species."""
+    integrated = table_name
+    with engine.connect() as conn:
+        for src_table, config in _TAXONOMIC_JOINS.items():
+            col_map = config['columns']
+
+            add_cols = ', '.join(
+                f'ADD COLUMN IF NOT EXISTS "{dest}" TEXT' for dest in col_map.values()
+            )
+            conn.execute(text(f'ALTER TABLE "{integrated}" {add_cols}'))
+
+            set_clause = ', '.join(
+                f'"{dest}" = t."{src}"' for src, dest in col_map.items()
+            )
+            conn.execute(text(
+                f'UPDATE "{integrated}" i '
+                f'SET {set_clause} '
+                f'FROM "{src_table}" t '
+                f'WHERE i."species" = t."species"'
+            ))
+            logger.info("Join con %s completado en %s", src_table, integrated)
+
+        conn.execute(text(
+            f'UPDATE "{integrated}" '
+            f"SET \"referencelist\" = 'Presente en lista taxonómica: ' || \"referencelist\" "
+            f'WHERE "referencelist" IS NOT NULL'
+        ))
+        logger.info("Campo referencelist actualizado en %s", integrated)
+
+        conn.commit()
