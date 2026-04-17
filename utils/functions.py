@@ -180,7 +180,7 @@ def datasets_table(engine):
                 doi TEXT,
                 datasettitle TEXT,
                 logourl TEXT,
-                type TEXT
+                datatype TEXT
             );
         """))
         conn.execute(text("""
