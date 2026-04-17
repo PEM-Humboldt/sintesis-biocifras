@@ -6,8 +6,12 @@ para el proceso de análisis y síntesis de cifras para Biodiversidad en cifras.
 """
 import csv
 import io
+import json
 import logging
 import os
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -829,3 +833,100 @@ def taxonomic_joins(engine, table_name):
         logger.info("Campo flagtaxo completado en %s", integrated)
 
         conn.commit()
+
+
+def gbif_api_calls(engine, table_name):
+    """Enriquece la tabla integrada con metadatos de dataset desde gbif_datasets y, para faltantes, consulta la API de GBIF."""
+    integrated = table_name
+    with engine.connect() as conn:
+        conn.execute(text(
+            f'ALTER TABLE "{integrated}" '
+            f'ADD COLUMN IF NOT EXISTS "license" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "doi" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "datasettitle" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "logourl" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "datatype" TEXT'
+        ))
+
+        conn.execute(text(
+            f'UPDATE "{integrated}" i '
+            f'SET "license" = d."license", '
+            f'    "doi" = d."doi", '
+            f'    "datasettitle" = d."datasettitle", '
+            f'    "logourl" = d."logourl", '
+            f'    "datatype" = d."datatype" '
+            f'FROM "gbif_datasets" d '
+            f'WHERE i."datasetkey" = d."datasetkey"'
+        ))
+
+        missing_rows = conn.execute(text(
+            f'SELECT DISTINCT "datasetkey" '
+            f'FROM "{integrated}" '
+            f'WHERE "datasetkey" IS NOT NULL AND "datasettitle" IS NULL'
+        )).fetchall()
+        missing_keys = [row[0] for row in missing_rows if row[0]]
+        logger.info("Datasetkeys sin datasettitle en %s: %s", integrated, f"{len(missing_keys):,}")
+
+        fetched = 0
+        upserted = 0
+        errors = 0
+        for datasetkey in missing_keys:
+            try:
+                url = f'http://api.gbif.org/v1/dataset/{datasetkey}'
+                with urllib.request.urlopen(url, timeout=10) as response:
+                    if response.status != 200:
+                        logger.warning("GBIF API status %s para datasetkey %s", response.status, datasetkey)
+                        errors += 1
+                        continue
+                    data = json.loads(response.read().decode('utf-8'))
+                fetched += 1
+
+                conn.execute(text("""
+                    INSERT INTO gbif_datasets (datasetkey, license, doi, datasettitle, logourl, datatype)
+                    VALUES (:datasetkey, :license, :doi, :datasettitle, :logourl, :datatype)
+                    ON CONFLICT (datasetkey) DO UPDATE
+                    SET license = EXCLUDED.license,
+                        doi = EXCLUDED.doi,
+                        datasettitle = EXCLUDED.datasettitle,
+                        logourl = EXCLUDED.logourl,
+                        datatype = EXCLUDED.datatype
+                """), {
+                    'datasetkey': data.get('key') or datasetkey,
+                    'license': data.get('license'),
+                    'doi': data.get('doi'),
+                    'datasettitle': data.get('title'),
+                    'logourl': data.get('logoUrl'),
+                    'datatype': data.get('type'),
+                })
+                upserted += 1
+                time.sleep(0.005)
+            except urllib.error.HTTPError as e:
+                logger.warning("GBIF API status %s para datasetkey %s", e.code, datasetkey)
+                errors += 1
+            except urllib.error.URLError as e:
+                logger.warning("Error de red consultando GBIF API para datasetkey %s: %s", datasetkey, e.reason)
+                errors += 1
+            except Exception as e:
+                logger.warning("Error consultando GBIF API para datasetkey %s: %s", datasetkey, e)
+                errors += 1
+
+        conn.execute(text(
+            f'UPDATE "{integrated}" i '
+            f'SET "license" = d."license", '
+            f'    "doi" = d."doi", '
+            f'    "datasettitle" = d."datasettitle", '
+            f'    "logourl" = d."logourl", '
+            f'    "datatype" = d."datatype" '
+            f'FROM "gbif_datasets" d '
+            f'WHERE i."datasetkey" = d."datasetkey"'
+        ))
+        conn.commit()
+
+    logger.info(
+        "Enriquecimiento GBIF datasets completado en %s (faltantes=%s, consultados=%s, upserts=%s, errores=%s)",
+        integrated,
+        f"{len(missing_keys):,}",
+        f"{fetched:,}",
+        f"{upserted:,}",
+        f"{errors:,}",
+    )

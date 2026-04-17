@@ -47,6 +47,7 @@ from utils.functions import (
     spatials_joins,
     validate_geography,
     taxonomic_joins,
+    gbif_api_calls,
 )
 
 UPLOAD_TYPE = "sql"
@@ -108,6 +109,7 @@ try:
     timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(engine, table_names['integrated'])
     timer(validate_geography, "Validación geográfica")(engine, table_names['integrated'])
     timer(taxonomic_joins, "Cruces taxonómicos con listados")(engine, table_names['integrated'])
+    timer(gbif_api_calls, "Enriqueciendo metadatos de datasets GBIF")(engine, table_names['integrated'])
 
     register_load(engine, table_names, today, origin)
     logger.info("Proceso completado.")
