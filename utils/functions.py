@@ -150,9 +150,9 @@ def check_connection(engine):
         return False
 
 
-# ----------------------------------------------------------------------------------
-# Creación y llenado de la tabla de registro de versiones de tablas (table_registry)
-# ----------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------------------------------
+# Creación de tablas de soporte y llenado de la tabla de registro de versiones de tablas (table_registry)
+# -------------------------------------------------------------------------------------------------------
 
 def registry_table(engine):
     ddl = """
@@ -189,6 +189,23 @@ def datasets_table(engine):
         """))
         conn.commit()
     logger.info("Tabla gbif_datasets creada")
+
+
+def publishers_table(engine):
+    """Crea la tabla gbif_publishers para almacenar metadatos de publicadores obtenidos desde la API de GBIF."""
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS gbif_publishers (
+                publishingorgkey TEXT PRIMARY KEY,
+                organization TEXT
+            );
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_gbif_publishers_publishingorgkey
+                ON gbif_publishers USING BTREE (publishingorgkey);
+        """))
+        conn.commit()
+    logger.info("Tabla gbif_publishers creada")
 
 # Con la tabla table_registry se maneja el campo is_latest para indicar
 # la versión más reciente de las tablas de staging y la tabla integrada.

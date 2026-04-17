@@ -33,6 +33,7 @@ from utils.functions import (
     check_connection,
     registry_table,
     datasets_table,
+    publishers_table,
     register_load,
     tables_operations,
     data_upload,
@@ -69,6 +70,8 @@ logger.info("Conectado a la base de datos.")
 
 try:
     registry_table(engine)
+    datasets_table(engine)
+    publishers_table(engine)
 
     integrated_name = f'dwc_integrated_{suffix}'
 
