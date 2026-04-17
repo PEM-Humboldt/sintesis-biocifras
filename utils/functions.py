@@ -169,6 +169,27 @@ def registry_table(engine):
         conn.commit()
     logger.info("Tabla table_registry creada")
 
+
+def datasets_table(engine):
+    """Crea la tabla gbif_datasets para almacenar metadatos de datasets obtenidos desde la API de GBIF."""
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS gbif_datasets (
+                datasetkey TEXT PRIMARY KEY,
+                license TEXT,
+                doi TEXT,
+                datasettitle TEXT,
+                logourl TEXT,
+                type TEXT
+            );
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_gbif_datasets_datasetkey
+                ON gbif_datasets USING BTREE (datasetkey);
+        """))
+        conn.commit()
+    logger.info("Tabla gbif_datasets creada")
+
 # Con la tabla table_registry se maneja el campo is_latest para indicar
 # la versión más reciente de las tablas de staging y la tabla integrada.
 def register_load(engine, table_names, created_at, origin):
@@ -698,6 +719,9 @@ def validate_geography(engine, table_name):
 # UPDATE "dwc_integrated_{fecha}}" SET "exotic" = t."exotic", "exoticriskinvasion" = t."exoticriskinvasion", "invasiveness" = t."invasiveness", "invasive" = t."invasive", "transplanted" = t."transplanted" FROM "taxonomic_invasive_exotic" t WHERE i."species" = t."species"
 # UPDATE "dwc_integrated_{fecha}}" SET "migratory" = t."migratory", "endemic" = t."endemic" FROM "taxonomic_col_list" t WHERE i."species" = t."species"
 # UPDATE "dwc_integrated_{fecha}}" SET "referencelist" = 'Presente en lista taxonómica: ' || "referencelist" FROM "taxonomic_ref_list" t WHERE i."species" = t."species"
+_FLAGTAXO_CLASSES = ('Aves', 'Mammalia', 'Reptilia', 'Squamata', 'Crocodylia', 'Testudines')
+_FLAGTAXO_ORDERS = ('Lepidoptera',)
+
 _TAXONOMIC_JOINS = {
     'taxonomic_cites': {
         'columns': {'cites': 'cites'},
@@ -756,5 +780,35 @@ def taxonomic_joins(engine, table_name):
             f'WHERE "referencelist" IS NOT NULL'
         ))
         logger.info("Campo referencelist actualizado en %s", integrated)
+
+        classes_list = ', '.join(f"'{c}'" for c in _FLAGTAXO_CLASSES)
+        orders_list = ', '.join(f"'{o}'" for o in _FLAGTAXO_ORDERS)
+
+        conn.execute(text(
+            f'ALTER TABLE "{integrated}" ADD COLUMN IF NOT EXISTS "flagtaxo" VARCHAR(255)'
+        ))
+        conn.execute(text(
+            f'UPDATE "{integrated}" SET "flagtaxo" = CASE '
+            f'WHEN "referencelist" IS NULL AND "species" IS NOT NULL '
+            f"AND \"transplanted\" = 'Trasplantada' "
+            f"THEN 'Ausente en lista taxonómica_Trasplantada' "
+            f'WHEN "referencelist" IS NULL AND "species" IS NOT NULL '
+            f"AND \"exoticriskinvasion\" = 'Exótica con potencial de invasión' "
+            f"THEN 'Ausente en lista taxonómica_Exótica con potencial de invasión' "
+            f'WHEN "referencelist" IS NULL AND "species" IS NOT NULL '
+            f"AND \"invasive\" = 'Invasora' "
+            f"THEN 'Ausente en lista taxonómica_Invasora' "
+            f'WHEN "referencelist" IS NULL AND "species" IS NOT NULL '
+            f"AND \"exotic\" = 'Exótica' "
+            f"THEN 'Ausente en lista taxonómica_Exótica' "
+            f'WHEN "referencelist" IS NULL AND "species" IS NOT NULL '
+            f'AND "class" IN ({classes_list}) '
+            f"THEN 'Ausente en lista taxonómica' "
+            f'WHEN "referencelist" IS NULL AND "species" IS NOT NULL '
+            f'AND "order" IN ({orders_list}) '
+            f"THEN 'Ausente en lista taxonómica' "
+            f'ELSE NULL END'
+        ))
+        logger.info("Campo flagtaxo completado en %s", integrated)
 
         conn.commit()

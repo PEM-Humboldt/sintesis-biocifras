@@ -32,6 +32,7 @@ from utils.functions import (
     get_engine,
     check_connection,
     registry_table,
+    datasets_table,
     register_load,
     tables_operations,
     data_upload,
