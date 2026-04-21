@@ -57,26 +57,26 @@ print(tabulate(df_downList2, headers = 'keys', tablefmt = 'github'))
 
 |  | key | doi | created | status | request.sendNotification | downloadLink |
 |----|----|----|----|----|----|----|
-| 0 | 0002968-260409193756587 | 10.15468/dl.d5u7xz | 2026-04-11T03:02:40.859+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0002968-260409193756587.zip |
-| 1 | 0002247-260409193756587 | 10.15468/dl.q749s6 | 2026-04-10T20:25:47.789+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0002247-260409193756587.zip |
-| 2 | 0001627-260409193756587 | 10.15468/dl.b8bq55 | 2026-04-10T15:45:40.874+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0001627-260409193756587.zip |
-| 3 | 0001625-260409193756587 | 10.15468/dl.b3vtxm | 2026-04-10T15:44:48.512+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0001625-260409193756587.zip |
-| 4 | 0001617-260409193756587 | 10.15468/dl.h2hk99 | 2026-04-10T15:40:48.745+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0001617-260409193756587.zip |
-| 5 | 0082621-260226173443078 | 10.15468/dl.pywwwt | 2026-04-03T21:01:03.966+00:00 | SUCCEEDED | False | https://api.gbif.org/v1/occurrence/download/request/0082621-260226173443078.zip |
-| 6 | 0082571-260226173443078 | 10.15468/dl.hf8r23 | 2026-04-03T20:46:34.621+00:00 | SUCCEEDED | False | https://api.gbif.org/v1/occurrence/download/request/0082571-260226173443078.zip |
-| 7 | 0065380-260226173443078 | 10.15468/dl.y8375s | 2026-03-27T21:06:00.411+00:00 | SUCCEEDED | False | https://api.gbif.org/v1/occurrence/download/request/0065380-260226173443078.zip |
-| 8 | 0065368-260226173443078 | nan | 2026-03-27T20:48:37.673+00:00 | CANCELLED | False | https://api.gbif.org/v1/occurrence/download/request/0065368-260226173443078.zip |
-| 9 | 0064920-260226173443078 | nan | 2026-03-27T15:08:16.378+00:00 | FAILED | False | https://api.gbif.org/v1/occurrence/download/request/0064920-260226173443078.zip |
-| 10 | 0064894-260226173443078 | 10.15468/dl.ytr8y9 | 2026-03-27T14:55:36.702+00:00 | SUCCEEDED | False | https://api.gbif.org/v1/occurrence/download/request/0064894-260226173443078.zip |
-| 11 | 0064859-260226173443078 | 10.15468/dl.2zptkn | 2026-03-27T14:41:33.806+00:00 | SUCCEEDED | False | https://api.gbif.org/v1/occurrence/download/request/0064859-260226173443078.zip |
-| 12 | 0064834-260226173443078 | 10.15468/dl.k8xwmr | 2026-03-27T14:28:53.677+00:00 | SUCCEEDED | False | https://api.gbif.org/v1/occurrence/download/request/0064834-260226173443078.zip |
-| 13 | 0027989-180131172636756 | 10.15468/dl.9ggjke | 2018-04-02T14:59:29.957+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0027989-180131172636756.zip |
-| 14 | 0027985-180131172636756 | 10.15468/dl.awmqai | 2018-04-02T14:27:14.581+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0027985-180131172636756.zip |
-| 15 | 0095338-160910150852091 | 10.15468/dl.reshq8 | 2017-05-30T19:48:22.381+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0095338-160910150852091.zip |
-| 16 | 0095337-160910150852091 | 10.15468/dl.xqndaq | 2017-05-30T19:48:10.703+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0095337-160910150852091.zip |
-| 17 | 0093362-160910150852091 | 10.15468/dl.kvw28z | 2017-05-23T22:28:22.010+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0093362-160910150852091.zip |
-| 18 | 0093356-160910150852091 | 10.15468/dl.goozhi | 2017-05-23T22:17:54.090+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0093356-160910150852091.zip |
-| 19 | 0092947-160910150852091 | 10.15468/dl.9vdjro | 2017-05-22T21:52:10.278+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0092947-160910150852091.zip |
+| 0 | 0021086-260409193756587 | 10.15468/dl.cvycbf | 2026-04-15T20:09:50.347+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0021086-260409193756587.zip |
+| 1 | 0014838-260409193756587 | 10.15468/dl.dgnk5q | 2026-04-14T13:17:44.430+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0014838-260409193756587.zip |
+| 2 | 0013205-260409193756587 | nan | 2026-04-14T02:28:48.246+00:00 | CANCELLED | True | https://api.gbif.org/v1/occurrence/download/request/0013205-260409193756587.zip |
+| 3 | 0011853-260409193756587 | 10.15468/dl.wjqax9 | 2026-04-13T16:55:33.892+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0011853-260409193756587.zip |
+| 4 | 0002968-260409193756587 | 10.15468/dl.d5u7xz | 2026-04-11T03:02:40.859+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0002968-260409193756587.zip |
+| 5 | 0002247-260409193756587 | 10.15468/dl.q749s6 | 2026-04-10T20:25:47.789+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0002247-260409193756587.zip |
+| 6 | 0001627-260409193756587 | 10.15468/dl.b8bq55 | 2026-04-10T15:45:40.874+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0001627-260409193756587.zip |
+| 7 | 0001625-260409193756587 | 10.15468/dl.b3vtxm | 2026-04-10T15:44:48.512+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0001625-260409193756587.zip |
+| 8 | 0001617-260409193756587 | 10.15468/dl.h2hk99 | 2026-04-10T15:40:48.745+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0001617-260409193756587.zip |
+| 9 | 0082621-260226173443078 | 10.15468/dl.pywwwt | 2026-04-03T21:01:03.966+00:00 | SUCCEEDED | False | https://api.gbif.org/v1/occurrence/download/request/0082621-260226173443078.zip |
+| 10 | 0082571-260226173443078 | 10.15468/dl.hf8r23 | 2026-04-03T20:46:34.621+00:00 | SUCCEEDED | False | https://api.gbif.org/v1/occurrence/download/request/0082571-260226173443078.zip |
+| 11 | 0065380-260226173443078 | 10.15468/dl.y8375s | 2026-03-27T21:06:00.411+00:00 | SUCCEEDED | False | https://api.gbif.org/v1/occurrence/download/request/0065380-260226173443078.zip |
+| 12 | 0065368-260226173443078 | nan | 2026-03-27T20:48:37.673+00:00 | CANCELLED | False | https://api.gbif.org/v1/occurrence/download/request/0065368-260226173443078.zip |
+| 13 | 0064920-260226173443078 | nan | 2026-03-27T15:08:16.378+00:00 | FAILED | False | https://api.gbif.org/v1/occurrence/download/request/0064920-260226173443078.zip |
+| 14 | 0064894-260226173443078 | 10.15468/dl.ytr8y9 | 2026-03-27T14:55:36.702+00:00 | SUCCEEDED | False | https://api.gbif.org/v1/occurrence/download/request/0064894-260226173443078.zip |
+| 15 | 0064859-260226173443078 | 10.15468/dl.2zptkn | 2026-03-27T14:41:33.806+00:00 | SUCCEEDED | False | https://api.gbif.org/v1/occurrence/download/request/0064859-260226173443078.zip |
+| 16 | 0064834-260226173443078 | 10.15468/dl.k8xwmr | 2026-03-27T14:28:53.677+00:00 | SUCCEEDED | False | https://api.gbif.org/v1/occurrence/download/request/0064834-260226173443078.zip |
+| 17 | 0027989-180131172636756 | 10.15468/dl.9ggjke | 2018-04-02T14:59:29.957+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0027989-180131172636756.zip |
+| 18 | 0027985-180131172636756 | 10.15468/dl.awmqai | 2018-04-02T14:27:14.581+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0027985-180131172636756.zip |
+| 19 | 0095338-160910150852091 | 10.15468/dl.reshq8 | 2017-05-30T19:48:22.381+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0095338-160910150852091.zip |
 
 Podemos utilizar esta lista para probar si ya se descargo, a través de
 la API SQL una consulta SQL (Nota: imagino que cuando son consultas
@@ -361,6 +361,10 @@ plt.show()
 
 ![](./Fig/pygbifunnamed-chunk-14-11.png)
 
+Para poder enviar esta geometría en una consulta SQL de la API de GBIF,
+se tiene que simplificar. Existen operaciones especificas del paquete
+`shapely` para este objetivo:
+
 ``` python
 ser2=ser.simplify(0.0006)
 gdf=gpd.GeoDataFrame(index=[0], crs='epsg:4326', geometry=[ser2])
@@ -370,7 +374,7 @@ plt.show()
 
 ![](./Fig/pygbifunnamed-chunk-15-13.png)
 
-Longitud de los wkt antes y despues de la simplificación
+Longitud de los wkt antes y después de la simplificación
 
 ``` python
 len(ser.wkt)
@@ -385,7 +389,8 @@ len(ser2.wkt)
     342127
 
 Una manera que puede ser más correcta de representar la complejidad es
-contar el numero de coma en las representaciones WKT
+contar el numero de coma en las representaciones WKT, que corresponde al
+numero de puntos -1 .
 
 ``` python
 ser.wkt.count(",")
@@ -398,3 +403,161 @@ ser2.wkt.count(",")
 ```
 
     8880
+
+Una de las recomendaciones de GBIF es integrar unas condiciones de
+coordenadas máximas y mínimas para facilitar el proceso biológico.
+
+``` python
+minx=ser2.bounds[0]
+miny=ser2.bounds[1]
+maxx=ser2.bounds[2]
+maxy=ser2.bounds[3]
+```
+
+Ahora simplemente se utilizan los parámetros para construir la consulta
+para la API de GBIF.
+
+``` python
+query="SELECT countrycode,hasgeospatialissues,count(*) FROM occurrence WHERE countrycode='CO' OR (decimalLatitude <= "+ str(maxy) +" AND decimalLatitude >= " + str(miny) + " AND decimalLongitude <= " + str(maxx) +  "AND decimalLongitude >= " + str(minx) + "  AND GBIF_WITHIN('" + ser2.wkt + "', decimalLatitude, decimalLongitude)) " + "GROUP BY countrycode, hasgeospatialissues"
+with open(datadir + 'spatialQuery1.sql','w') as f:
+  f.write(query)
+```
+
+    342461
+
+``` python
+if is_in_my_download_list(query):
+   key=download_wait(get_query_key(query))
+else:
+    key = download_wait(occ.download_sql(query))
+```
+
+    status: SUCCEEDED
+
+En particular nos interesa poder mirar los registros que no tiene ‘CO’
+como countryCode
+
+``` python
+query = "SELECT gbifid,scientificname, datasetid, countrycode,hasgeospatialissues, decimalLatitude, decimalLongitude FROM occurrence WHERE (countrycode IS NULL OR countrycode <> 'CO') AND decimalLatitude <= "+ str(maxy) +" AND decimalLatitude >= " + str(miny) + " AND decimalLongitude <= " + str(maxx) +  "AND decimalLongitude >= " + str(minx) + "  AND GBIF_WITHIN('" + ser2.wkt + "', decimalLatitude, decimalLongitude) " 
+with open(datadir + 'spatialQuery2.sql','w') as f:
+  f.write(query)
+```
+
+    342507
+
+``` python
+if is_in_my_download_list(query):
+  key=download_wait(get_query_key(query))
+else:
+  key = download_wait(occ.download_sql(query))
+```
+
+    status: SUCCEEDED
+
+Ahora para descargar efectivamente el archivo zip:
+
+``` python
+downloaded_query2 = occ.download_get(key, path = datadir)
+```
+
+Por ahora, para poder avanzar rapido, voy a seguir en R
+
+``` r
+library(readr)
+library(zip)
+```
+
+
+    Attaching package: 'zip'
+
+    The following objects are masked from 'package:utils':
+
+        unzip, zip
+
+``` r
+zipFile <- reticulate::py$downloaded_query2$path
+contents <- zip_list(zipFile)
+data_query2<-read.csv(unz(zipFile,contents$filename[1]),row.names = NULL,sep="\t")
+head(data_query2)
+```
+
+| gbifid | scientificname | datasetid | countrycode | hasgeospatialissues | decimallatitude | decimallongitude |
+|---:|:---|:---|:---|:---|---:|---:|
+| 4075426156 | Salix nigra Marshall |  | US | true | 11.033333 | -75.54694 |
+| 4075427333 | Sarracenia purpurea L. |  | US | true | 3.776639 | -75.33017 |
+| 1142263949 | Polystira Woodring, 1928 | invertebrates-19-mar-2026 | VE | true | 12.520000 | -71.68000 |
+| 1142263922 | Polystira albida (G.Perry, 1811) | invertebrates-19-mar-2026 | VE | true | 12.430000 | -71.93000 |
+| 1065259260 | Strophocheilus Spix, 1827 | invertebrates-19-mar-2026 | EC | true | 2.066700 | -75.80000 |
+| 1142263942 | Polystira albida (G.Perry, 1811) | invertebrates-19-mar-2026 | VE | true | 12.520000 | -71.68000 |
+
+``` r
+require(sf)
+```
+
+    Loading required package: sf
+
+    Linking to GEOS 3.13.0, GDAL 3.12.1, PROJ 9.4.1; sf_use_s2() is TRUE
+
+``` r
+DSN <- "../../data_sintesis-biocifras/"
+reg_mar<-st_read(dsn=DSN,layer = "RegionesMaritimas")
+```
+
+    Reading layer `RegionesMaritimas' from data source 
+      `/home/marius/Travail/traitementDonnees/2026_scripts_filter_sintesis_cifras/data_sintesis-biocifras' 
+      using driver `ESRI Shapefile'
+    Simple feature collection with 5 features and 2 fields
+    Geometry type: POLYGON
+    Dimension:     XY
+    Bounding box:  xmin: -85.9926 ymin: 1.429 xmax: -69.4917 ymax: 16.1694
+    Geodetic CRS:  WGS 84
+
+``` r
+depto<-st_read(dsn=DSN, layer="MGN_DPTO_POLITICO_2023")
+```
+
+    Reading layer `MGN_DPTO_POLITICO_2023' from data source 
+      `/home/marius/Travail/traitementDonnees/2026_scripts_filter_sintesis_cifras/data_sintesis-biocifras' 
+      using driver `ESRI Shapefile'
+    Simple feature collection with 33 features and 9 fields
+    Geometry type: MULTIPOLYGON
+    Dimension:     XY
+    Bounding box:  xmin: -81.73562 ymin: -4.229406 xmax: -66.84722 ymax: 13.39473
+    Geodetic CRS:  WGS 84
+
+``` r
+dq2_s<-st_as_sf(data_query2,coords=c("decimallongitude","decimallatitude"))
+par(mar=rep(.5,4))
+plot(c(st_geometry(reg_mar),st_geometry(depto)), col=NA, border=NA)
+plot(st_geometry(reg_mar), col="lightblue", border="white",add=T)
+plot(st_geometry(depto), col="lightgreen", border="white",add=T)
+plot(st_geometry(dq2_s[!(is.na(dq2_s$countrycode)|dq2_s$countrycode==""),]),col="orange",add=T, pch=16,cex=.5)
+plot(st_geometry(dq2_s[is.na(dq2_s$countrycode)|dq2_s$countrycode=="",]),col="red",add=T, pch=16,cex=.5)
+legend("topright",fill=c("red","orange"),legend=c("Ningun countrycode","countrycode diferente a 'CO'"), cex=.7)
+```
+
+![](./Fig/pygbifunnamed-chunk-23-1.png)
+
+``` r
+A<-table(is.na(dq2_s$countrycode)|dq2_s$countrycode=="")
+data.frame(`No countrycode`=names(A),registros=as.numeric(A))
+```
+
+| No.countrycode | registros |
+|:---------------|----------:|
+| FALSE          |     27081 |
+| TRUE           |     10095 |
+
+``` r
+A <- table(dq2_s$datasetid[is.na(dq2_s$countrycode)|dq2_s$countrycode==""])
+data.frame(dataset=names(A),registros=as.numeric(A))
+```
+
+| dataset                                         | registros |
+|:------------------------------------------------|----------:|
+|                                                 |     10019 |
+| 191                                             |         3 |
+| 203                                             |         3 |
+| 211                                             |         1 |
+| 885                                             |        23 |
+| calcofi.io_workflows_ichthyo_to_obis_2026-03-06 |        46 |

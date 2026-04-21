@@ -1,7 +1,9 @@
 ---
 title: "Descargar datos desde pygbif"
 author: "Marius Bottin"
-format: gfm
+format:
+  gfm:
+    df-print: kable
 knitr: 
   opts_chunk: 
     fig.path: "./Fig/pygbif"
@@ -235,6 +237,8 @@ gdf.plot(edgecolor='black')
 plt.show()
 ```
 
+Para poder enviar esta geometría en una consulta SQL de la API de GBIF, se tiene que simplificar.
+Existen operaciones especificas del paquete `shapely` para este objetivo:
 
 ```{python}
 ser2=ser.simplify(0.0006)
@@ -255,12 +259,18 @@ Una manera que puede ser más correcta de representar la complejidad es contar e
 ser.wkt.count(",")
 ser2.wkt.count(",")
 ```
+
+Una de las recomendaciones de GBIF es integrar unas condiciones de coordenadas máximas y mínimas para facilitar el proceso biológico.
+
 ```{python}
 minx=ser2.bounds[0]
 miny=ser2.bounds[1]
 maxx=ser2.bounds[2]
 maxy=ser2.bounds[3]
 ```
+
+Ahora simplemente se utilizan los parámetros para construir la consulta para la API de GBIF.
+
 
 ```{python}
 query="SELECT countrycode,hasgeospatialissues,count(*) FROM occurrence WHERE countrycode='CO' OR (decimalLatitude <= "+ str(maxy) +" AND decimalLatitude >= " + str(miny) + " AND decimalLongitude <= " + str(maxx) +  "AND decimalLongitude >= " + str(minx) + "  AND GBIF_WITHIN('" + ser2.wkt + "', decimalLatitude, decimalLongitude)) " + "GROUP BY countrycode, hasgeospatialissues"
@@ -275,7 +285,7 @@ else:
 En particular nos interesa poder mirar los registros que no tiene 'CO' como countryCode
 
 ```{python}
-query = "SELECT gbifid,scientificname, datasetid, countrycode,hasgeospatialissues, decimalLatitude, decimalLongitude FROM occurrence WHERE countrycode <> 'CO' AND decimalLatitude <= "+ str(maxy) +" AND decimalLatitude >= " + str(miny) + " AND decimalLongitude <= " + str(maxx) +  "AND decimalLongitude >= " + str(minx) + "  AND GBIF_WITHIN('" + ser2.wkt + "', decimalLatitude, decimalLongitude) " 
+query = "SELECT gbifid,scientificname, datasetid, countrycode,hasgeospatialissues, decimalLatitude, decimalLongitude FROM occurrence WHERE (countrycode IS NULL OR countrycode <> 'CO') AND decimalLatitude <= "+ str(maxy) +" AND decimalLatitude >= " + str(miny) + " AND decimalLongitude <= " + str(maxx) +  "AND decimalLongitude >= " + str(minx) + "  AND GBIF_WITHIN('" + ser2.wkt + "', decimalLatitude, decimalLongitude) " 
 with open(datadir + 'spatialQuery2.sql','w') as f:
   f.write(query)
 if is_in_my_download_list(query):
@@ -285,5 +295,48 @@ else:
 ```
 
 
+Ahora para descargar efectivamente el archivo zip:
+
+```{python}
+downloaded_query2 = occ.download_get(key, path = datadir)
+```
+
+Por ahora, para poder avanzar rapido, voy a seguir en R
+
+```{r}
+library(readr)
+library(zip)
+zipFile <- reticulate::py$downloaded_query2$path
+contents <- zip_list(zipFile)
+data_query2<-read.csv(unz(zipFile,contents$filename[1]),row.names = NULL,sep="\t")
+head(data_query2)
+```
+
+```{r}
+#| fig-width: 10
+#| fig-height: 10
+require(sf)
+DSN <- "../../data_sintesis-biocifras/"
+reg_mar<-st_read(dsn=DSN,layer = "RegionesMaritimas")
+depto<-st_read(dsn=DSN, layer="MGN_DPTO_POLITICO_2023")
+dq2_s<-st_as_sf(data_query2,coords=c("decimallongitude","decimallatitude"))
+par(mar=rep(.5,4))
+plot(c(st_geometry(reg_mar),st_geometry(depto)), col=NA, border=NA)
+plot(st_geometry(reg_mar), col="lightblue", border="white",add=T)
+plot(st_geometry(depto), col="lightgreen", border="white",add=T)
+plot(st_geometry(dq2_s[!(is.na(dq2_s$countrycode)|dq2_s$countrycode==""),]),col="orange",add=T, pch=16,cex=.5)
+plot(st_geometry(dq2_s[is.na(dq2_s$countrycode)|dq2_s$countrycode=="",]),col="red",add=T, pch=16,cex=.5)
+legend("topright",fill=c("red","orange"),legend=c("Ningun countrycode","countrycode diferente a 'CO'"), cex=.7)
+```
+
+```{r}
+A<-table(is.na(dq2_s$countrycode)|dq2_s$countrycode=="")
+data.frame(`No countrycode`=names(A),registros=as.numeric(A))
+```
+
+```{r}
+A <- table(dq2_s$datasetid[is.na(dq2_s$countrycode)|dq2_s$countrycode==""])
+data.frame(dataset=names(A),registros=as.numeric(A))
+```
 
 
