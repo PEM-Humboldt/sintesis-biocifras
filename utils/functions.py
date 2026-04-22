@@ -836,7 +836,7 @@ def taxonomic_joins(engine, table_name):
 
 
 def gbif_api_calls(engine, table_name):
-    """Enriquece la tabla integrada con metadatos de dataset desde gbif_datasets y, para faltantes, consulta la API de GBIF."""
+    """Enriquece la tabla integrada con metadatos de datasets y publicadores desde tablas locales y API GBIF."""
     integrated = table_name
     with engine.connect() as conn:
         conn.execute(text(
@@ -845,9 +845,11 @@ def gbif_api_calls(engine, table_name):
             f'ADD COLUMN IF NOT EXISTS "doi" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "datasettitle" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "logourl" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "datatype" TEXT'
+            f'ADD COLUMN IF NOT EXISTS "datatype" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "organization" TEXT'
         ))
 
+        # Backfill desde tabla local de datasets
         conn.execute(text(
             f'UPDATE "{integrated}" i '
             f'SET "license" = d."license", '
@@ -859,27 +861,35 @@ def gbif_api_calls(engine, table_name):
             f'WHERE i."datasetkey" = d."datasetkey"'
         ))
 
-        missing_rows = conn.execute(text(
+        # Backfill desde tabla local de publishers
+        conn.execute(text(
+            f'UPDATE "{integrated}" i '
+            f'SET "organization" = p."organization" '
+            f'FROM "gbif_publishers" p '
+            f'WHERE i."publishingorgkey" = p."publishingorgkey"'
+        ))
+
+        missing_dataset_rows = conn.execute(text(
             f'SELECT DISTINCT "datasetkey" '
             f'FROM "{integrated}" '
             f'WHERE "datasetkey" IS NOT NULL AND "datasettitle" IS NULL'
         )).fetchall()
-        missing_keys = [row[0] for row in missing_rows if row[0]]
-        logger.info("Datasetkeys sin datasettitle en %s: %s", integrated, f"{len(missing_keys):,}")
+        missing_dataset_keys = [row[0] for row in missing_dataset_rows if row[0]]
+        logger.info("Datasetkeys sin datasettitle en %s: %s", integrated, f"{len(missing_dataset_keys):,}")
 
-        fetched = 0
-        upserted = 0
-        errors = 0
-        for datasetkey in missing_keys:
+        ds_fetched = 0
+        ds_upserted = 0
+        ds_errors = 0
+        for datasetkey in missing_dataset_keys:
             try:
                 url = f'http://api.gbif.org/v1/dataset/{datasetkey}'
                 with urllib.request.urlopen(url, timeout=10) as response:
                     if response.status != 200:
                         logger.warning("GBIF API status %s para datasetkey %s", response.status, datasetkey)
-                        errors += 1
+                        ds_errors += 1
                         continue
                     data = json.loads(response.read().decode('utf-8'))
-                fetched += 1
+                ds_fetched += 1
 
                 conn.execute(text("""
                     INSERT INTO gbif_datasets (datasetkey, license, doi, datasettitle, logourl, datatype)
@@ -898,18 +908,19 @@ def gbif_api_calls(engine, table_name):
                     'logourl': data.get('logoUrl'),
                     'datatype': data.get('type'),
                 })
-                upserted += 1
+                ds_upserted += 1
                 time.sleep(0.005)
             except urllib.error.HTTPError as e:
                 logger.warning("GBIF API status %s para datasetkey %s", e.code, datasetkey)
-                errors += 1
+                ds_errors += 1
             except urllib.error.URLError as e:
                 logger.warning("Error de red consultando GBIF API para datasetkey %s: %s", datasetkey, e.reason)
-                errors += 1
+                ds_errors += 1
             except Exception as e:
                 logger.warning("Error consultando GBIF API para datasetkey %s: %s", datasetkey, e)
-                errors += 1
+                ds_errors += 1
 
+        # Reaplicar join de datasets tras upsert API
         conn.execute(text(
             f'UPDATE "{integrated}" i '
             f'SET "license" = d."license", '
@@ -920,13 +931,72 @@ def gbif_api_calls(engine, table_name):
             f'FROM "gbif_datasets" d '
             f'WHERE i."datasetkey" = d."datasetkey"'
         ))
+
+        missing_publisher_rows = conn.execute(text(
+            f'SELECT DISTINCT "publishingorgkey" '
+            f'FROM "{integrated}" '
+            f'WHERE "publishingorgkey" IS NOT NULL AND "organization" IS NULL'
+        )).fetchall()
+        missing_publisher_keys = [row[0] for row in missing_publisher_rows if row[0]]
+        logger.info("PublishingOrgKeys sin organization en %s: %s", integrated, f"{len(missing_publisher_keys):,}")
+
+        pub_fetched = 0
+        pub_upserted = 0
+        pub_errors = 0
+        for publishingorgkey in missing_publisher_keys:
+            try:
+                url = f'http://api.gbif.org/v1/organization/{publishingorgkey}'
+                with urllib.request.urlopen(url, timeout=10) as response:
+                    if response.status != 200:
+                        logger.warning("GBIF API status %s para publishingorgkey %s", response.status, publishingorgkey)
+                        pub_errors += 1
+                        continue
+                    data = json.loads(response.read().decode('utf-8'))
+                pub_fetched += 1
+
+                conn.execute(text("""
+                    INSERT INTO gbif_publishers (publishingorgkey, organization)
+                    VALUES (:publishingorgkey, :organization)
+                    ON CONFLICT (publishingorgkey) DO UPDATE
+                    SET organization = EXCLUDED.organization
+                """), {
+                    'publishingorgkey': data.get('key') or publishingorgkey,
+                    'organization': data.get('title'),
+                })
+                pub_upserted += 1
+                time.sleep(0.005)
+            except urllib.error.HTTPError as e:
+                logger.warning("GBIF API status %s para publishingorgkey %s", e.code, publishingorgkey)
+                pub_errors += 1
+            except urllib.error.URLError as e:
+                logger.warning("Error de red consultando GBIF API para publishingorgkey %s: %s", publishingorgkey, e.reason)
+                pub_errors += 1
+            except Exception as e:
+                logger.warning("Error consultando GBIF API para publishingorgkey %s: %s", publishingorgkey, e)
+                pub_errors += 1
+
+        # Reaplicar join de publishers tras upsert API
+        conn.execute(text(
+            f'UPDATE "{integrated}" i '
+            f'SET "organization" = p."organization" '
+            f'FROM "gbif_publishers" p '
+            f'WHERE i."publishingorgkey" = p."publishingorgkey"'
+        ))
         conn.commit()
 
     logger.info(
-        "Enriquecimiento GBIF datasets completado en %s (faltantes=%s, consultados=%s, upserts=%s, errores=%s)",
+        "Enriquecimiento GBIF datasets en %s (faltantes=%s, consultados=%s, upserts=%s, errores=%s)",
         integrated,
-        f"{len(missing_keys):,}",
-        f"{fetched:,}",
-        f"{upserted:,}",
-        f"{errors:,}",
+        f"{len(missing_dataset_keys):,}",
+        f"{ds_fetched:,}",
+        f"{ds_upserted:,}",
+        f"{ds_errors:,}",
+    )
+    logger.info(
+        "Enriquecimiento GBIF publishers en %s (faltantes=%s, consultados=%s, upserts=%s, errores=%s)",
+        integrated,
+        f"{len(missing_publisher_keys):,}",
+        f"{pub_fetched:,}",
+        f"{pub_upserted:,}",
+        f"{pub_errors:,}",
     )
