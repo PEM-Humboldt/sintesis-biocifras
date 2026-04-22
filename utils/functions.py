@@ -577,12 +577,6 @@ def add_geometry_and_indexes(engine, table_name):
         ))
         logger.info("PK a campo gbifid agregada a %s", integrated)
 
-        idx_species = f"idx_{integrated}_species"
-        conn.execute(text(
-            f'CREATE INDEX "{idx_species}" ON "{integrated}" USING BTREE ("species")'
-        ))
-        logger.info("Indice BTREE creado: %s", idx_species)
-
         # Se agrega la columna geom a la tabla con la proyección EPSG 4326 utilizando la función AddGeometryColumn de
         # PostGIS. El nombre de la columna es geom para asegurar consistencia con el uso de postgis versión >= 2.0
         conn.execute(text(
@@ -596,13 +590,67 @@ def add_geometry_and_indexes(engine, table_name):
             f'WHERE "decimallatitude" IS NOT NULL AND "decimallongitude" IS NOT NULL'
         ))
         logger.info("Columna geom creada con EPSG 4326 en %s", integrated)
-        # Se crea un índice GIST en la columna geom para facilitar las consultas espaciales.
-        idx_name = f"idx_{integrated}_geom"
-        conn.execute(text(
-            f'CREATE INDEX "{idx_name}" ON "{integrated}" USING GIST (geom)'
-        ))
-        logger.info("Indice GIST creado: %s", idx_name)
 
+        conn.commit()
+
+
+def prepare_integrated_columns(engine, table_name):
+    """Crea en un solo paso las columnas derivadas usadas por validaciones y cruces."""
+    integrated = table_name
+    with engine.connect() as conn:
+        conn.execute(text(
+            f'ALTER TABLE "{integrated}" '
+            f'ADD COLUMN IF NOT EXISTS "codemgn" VARCHAR(5), '
+            f'ADD COLUMN IF NOT EXISTS "stateprovincemgn" VARCHAR(250), '
+            f'ADD COLUMN IF NOT EXISTS "countymgn" VARCHAR(250), '
+            f'ADD COLUMN IF NOT EXISTS "maritimeregion" VARCHAR(250), '
+            f'ADD COLUMN IF NOT EXISTS "stateprovincevalidation" BOOLEAN, '
+            f'ADD COLUMN IF NOT EXISTS "countyvalidation" BOOLEAN, '
+            f'ADD COLUMN IF NOT EXISTS "flaggeo" VARCHAR(255), '
+            f'ADD COLUMN IF NOT EXISTS "cites" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "threatstatusuicn" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "threatstatusmads" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "exotic" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "exoticriskinvasion" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "invasiveness" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "invasive" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "transplanted" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "migratory" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "endemic" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "referencelist" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "flagtaxo" VARCHAR(255), '
+            f'ADD COLUMN IF NOT EXISTS "license" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "doi" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "datasettitle" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "logourl" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "datatype" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "organization" TEXT'
+        ))
+        conn.commit()
+    logger.info("Columnas derivadas preparadas en %s", integrated)
+
+
+def create_geom_index(engine, table_name):
+    """Crea índice espacial GIST para optimizar cruces espaciales."""
+    integrated = table_name
+    with engine.connect() as conn:
+        idx_geom = f"idx_{integrated}_geom"
+        conn.execute(text(
+            f'CREATE INDEX IF NOT EXISTS "{idx_geom}" ON "{integrated}" USING GIST (geom)'
+        ))
+        logger.info("Indice GIST creado: %s", idx_geom)
+        conn.commit()
+
+
+def create_species_index(engine, table_name):
+    """Crea índice BTREE sobre species para optimizar cruces taxonómicos."""
+    integrated = table_name
+    with engine.connect() as conn:
+        idx_species = f"idx_{integrated}_species"
+        conn.execute(text(
+            f'CREATE INDEX IF NOT EXISTS "{idx_species}" ON "{integrated}" USING BTREE ("species")'
+        ))
+        logger.info("Indice BTREE creado: %s", idx_species)
         conn.commit()
 
 

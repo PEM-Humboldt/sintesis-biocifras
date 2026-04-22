@@ -44,6 +44,9 @@ from utils.functions import (
     fill_species_from_scientificname,
     translate_taxonrank,
     add_geometry_and_indexes,
+    prepare_integrated_columns,
+    create_geom_index,
+    create_species_index,
     spatials_joins,
     validate_geography,
     taxonomic_joins,
@@ -105,9 +108,12 @@ try:
 
     timer(fill_species_from_scientificname, "Completando campo species desde scientificname")(engine, table_names['integrated'])
     timer(translate_taxonrank, "Traduciendo taxonrank a español en la tabla integrada")(engine, table_names['integrated'])
-    timer(add_geometry_and_indexes, "Añadiendo geometría e índices a la tabla integrada")(engine, table_names['integrated'])
+    timer(prepare_integrated_columns, "Preparando columnas derivadas en la tabla integrada")(engine, table_names['integrated'])
+    timer(add_geometry_and_indexes, "Añadiendo PK y geometría base a la tabla integrada")(engine, table_names['integrated'])
+    timer(create_geom_index, "Creando índice espacial GIST en la tabla integrada")(engine, table_names['integrated'])
     timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(engine, table_names['integrated'])
     timer(validate_geography, "Validación geográfica")(engine, table_names['integrated'])
+    timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(engine, table_names['integrated'])
     timer(taxonomic_joins, "Cruces taxonómicos con listados")(engine, table_names['integrated'])
     timer(gbif_api_calls, "Enriqueciendo metadatos de datasets GBIF")(engine, table_names['integrated'])
 
