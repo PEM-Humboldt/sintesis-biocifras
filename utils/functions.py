@@ -604,6 +604,7 @@ def prepare_integrated_columns(engine, table_name):
             f'ADD COLUMN IF NOT EXISTS "stateprovincemgn" VARCHAR(250), '
             f'ADD COLUMN IF NOT EXISTS "countymgn" VARCHAR(250), '
             f'ADD COLUMN IF NOT EXISTS "maritimeregion" VARCHAR(250), '
+            f'ADD COLUMN IF NOT EXISTS "narinomaritimeregion" VARCHAR(250), '
             f'ADD COLUMN IF NOT EXISTS "stateprovincevalidation" BOOLEAN, '
             f'ADD COLUMN IF NOT EXISTS "countyvalidation" BOOLEAN, '
             f'ADD COLUMN IF NOT EXISTS "flaggeo" VARCHAR(255), '
@@ -685,6 +686,15 @@ def spatials_joins(engine, table_name):
             f'FROM "INVEMAR_MARITIME_REGIONS" m '
             f'WHERE i.geom IS NOT NULL '
             f'AND i."countymgn" IS NULL '
+            f'AND ST_Intersects(i.geom, m.geom)'
+        ))
+        logger.info("Cruce espacial con INVEMAR_MARITIME_REGIONS completado en %s", integrated)
+
+        conn.execute(text(
+            f'UPDATE "{integrated}" i '
+            f'SET "narinomaritimeregion" = m."Nombre" '
+            f'FROM "NARINO_MARITIME_REGION" m '
+            f'WHERE i.geom IS NOT NULL '
             f'AND ST_Intersects(i.geom, m.geom)'
         ))
         logger.info("Cruce espacial con INVEMAR_MARITIME_REGIONS completado en %s", integrated)
