@@ -669,15 +669,6 @@ def spatials_joins(engine, table_name):
     integrated = table_name
     with engine.connect() as conn:
         conn.execute(text(
-            f'ALTER TABLE "{integrated}" '
-            f'ADD COLUMN IF NOT EXISTS "codemgn" VARCHAR(5), '
-            f'ADD COLUMN IF NOT EXISTS "stateprovincemgn" VARCHAR(250), '
-            f'ADD COLUMN IF NOT EXISTS "countymgn" VARCHAR(250), '
-            f'ADD COLUMN IF NOT EXISTS "maritimeregion" VARCHAR(250)'
-        ))
-        logger.info("Columnas codemgn, stateprovincemgn, countymgn, maritimeregion agregadas a %s", integrated)
-
-        conn.execute(text(
             f'UPDATE "{integrated}" i '
             f'SET "codemgn" = m."mpio_cdpmp", '
             f'    "stateprovincemgn" = m."dpto_cnmbr", '
@@ -739,14 +730,6 @@ def validate_geography(engine, table_name):
     co_case = val_case.format(orig='county', mgn='countymgn')
 
     with engine.connect() as conn:
-        cols_ddl = ', '.join(
-            f'ADD COLUMN IF NOT EXISTS "{col}" BOOLEAN' for col in validations
-        )
-        conn.execute(text(
-            f'ALTER TABLE "{integrated}" {cols_ddl}, '
-            f'ADD COLUMN IF NOT EXISTS "flaggeo" VARCHAR(255)'
-        ))
-
         # Una sola pasada: calcula las validaciones booleanas y flaggeo simultáneamente.
         # flaggeo se deriva inline de las mismas expresiones CASE para evitar depender
         # de columnas que aún no tienen valor en esta misma sentencia.
@@ -827,11 +810,6 @@ def taxonomic_joins(engine, table_name):
         for src_table, config in _TAXONOMIC_JOINS.items():
             col_map = config['columns']
 
-            add_cols = ', '.join(
-                f'ADD COLUMN IF NOT EXISTS "{dest}" TEXT' for dest in col_map.values()
-            )
-            conn.execute(text(f'ALTER TABLE "{integrated}" {add_cols}'))
-
             set_clause = ', '.join(
                 f'"{dest}" = t."{src}"' for src, dest in col_map.items()
             )
@@ -853,9 +831,6 @@ def taxonomic_joins(engine, table_name):
         classes_list = ', '.join(f"'{c}'" for c in _FLAGTAXO_CLASSES)
         orders_list = ', '.join(f"'{o}'" for o in _FLAGTAXO_ORDERS)
 
-        conn.execute(text(
-            f'ALTER TABLE "{integrated}" ADD COLUMN IF NOT EXISTS "flagtaxo" VARCHAR(255)'
-        ))
         conn.execute(text(
             f'UPDATE "{integrated}" SET "flagtaxo" = CASE '
             f'WHEN "referencelist" IS NULL AND "species" IS NOT NULL '
@@ -887,16 +862,6 @@ def gbif_api_calls(engine, table_name):
     """Enriquece la tabla integrada con metadatos de datasets y publicadores desde tablas locales y API GBIF."""
     integrated = table_name
     with engine.connect() as conn:
-        conn.execute(text(
-            f'ALTER TABLE "{integrated}" '
-            f'ADD COLUMN IF NOT EXISTS "license" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "doi" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "datasettitle" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "logourl" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "datatype" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "organization" TEXT'
-        ))
-
         # Backfill desde tabla local de datasets
         conn.execute(text(
             f'UPDATE "{integrated}" i '
