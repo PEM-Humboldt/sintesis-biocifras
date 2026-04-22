@@ -117,7 +117,7 @@ try:
     timer(validate_geography, "Validación geográfica")(engine, table_names['integrated'])
     timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(engine, table_names['integrated'])
     timer(taxonomic_joins, "Cruces taxonómicos con listados")(engine, table_names['integrated'])
-    timer(gbif_api_calls, "Enriqueciendo metadatos de datasets GBIF")(engine, table_names['integrated'])
+    timer(gbif_api_calls, "Enriqueciendo metadatos de datasets y publicadores GBIF")(engine, table_names['integrated'])
 
     register_load(engine, table_names, today, origin)
     logger.info("Proceso completado.")
