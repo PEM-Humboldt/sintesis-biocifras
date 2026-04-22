@@ -48,6 +48,7 @@ from utils.functions import (
     create_geom_index,
     create_species_index,
     spatials_joins,
+    normalize_stateprovince_county,
     validate_geography,
     taxonomic_joins,
     gbif_api_calls,
@@ -112,6 +113,7 @@ try:
     timer(add_geometry_and_indexes, "Añadiendo PK y geometría base a la tabla integrada")(engine, table_names['integrated'])
     timer(create_geom_index, "Creando índice espacial GIST en la tabla integrada")(engine, table_names['integrated'])
     timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(engine, table_names['integrated'])
+    timer(normalize_stateprovince_county, "Normalizando stateprovince/county antes de validación")(engine, table_names['integrated'])
     timer(validate_geography, "Validación geográfica")(engine, table_names['integrated'])
     timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(engine, table_names['integrated'])
     timer(taxonomic_joins, "Cruces taxonómicos con listados")(engine, table_names['integrated'])

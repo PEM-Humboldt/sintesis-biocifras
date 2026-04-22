@@ -211,6 +211,7 @@ def publishers_table(engine):
         conn.commit()
     logger.info("Tabla gbif_publishers creada")
 
+
 # Con la tabla table_registry se maneja el campo is_latest para indicar
 # la versión más reciente de las tablas de staging y la tabla integrada.
 def register_load(engine, table_names, created_at, origin):
@@ -600,6 +601,8 @@ def prepare_integrated_columns(engine, table_name):
     with engine.connect() as conn:
         conn.execute(text(
             f'ALTER TABLE "{integrated}" '
+            f'ADD COLUMN IF NOT EXISTS "verbatimstateprovince" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "verbatimcounty" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "codemgn" VARCHAR(5), '
             f'ADD COLUMN IF NOT EXISTS "stateprovincemgn" VARCHAR(250), '
             f'ADD COLUMN IF NOT EXISTS "countymgn" VARCHAR(250), '
@@ -629,6 +632,50 @@ def prepare_integrated_columns(engine, table_name):
         ))
         conn.commit()
     logger.info("Columnas derivadas preparadas en %s", integrated)
+
+
+def normalize_stateprovince_county(engine, table_name):
+    """Normaliza stateprovince y preserva valores originales verbatim antes de validar geografía."""
+    integrated = table_name
+    with engine.connect() as conn:
+        # Preserva valores originales una sola vez
+        conn.execute(text(
+            f'UPDATE "{integrated}" '
+            f'SET "verbatimstateprovince" = COALESCE("verbatimstateprovince", "stateprovince"), '
+            f'    "verbatimcounty" = COALESCE("verbatimcounty", "county")'
+        ))
+
+        # Normalización por alias: comparación case-insensitive con trim
+        conn.execute(text(
+            f'UPDATE "{integrated}" i '
+            f'SET "stateprovince" = a."validatedstateprovince" '
+            f'FROM "geo_stateprovince_validation" a '
+            f'WHERE UPPER(TRIM(i."stateprovince")) = UPPER(TRIM(a."originalstateprovince"))'
+        ))
+
+        # Regla específica del legado si existe la columna "Nombre"
+        has_nombre = conn.execute(text(
+            f"SELECT EXISTS ("
+            f"SELECT 1 FROM information_schema.columns "
+            f"WHERE table_name = '{integrated}' AND column_name = 'Nombre'"
+            f")"
+        )).scalar()
+        if has_nombre:
+            conn.execute(text(
+                f'UPDATE "{integrated}" '
+                f'SET "stateprovince" = \'Nariño\' '
+                f'WHERE "Nombre" = \'UAC Llanura Aluvial del Sur\''
+            ))
+
+        # Limpieza final de espacios
+        conn.execute(text(
+            f'UPDATE "{integrated}" '
+            f'SET "stateprovince" = TRIM("stateprovince"), '
+            f'    "county" = TRIM("county") '
+            f'WHERE "stateprovince" IS NOT NULL OR "county" IS NOT NULL'
+        ))
+        conn.commit()
+    logger.info("Normalización de stateprovince/county completada en %s", integrated)
 
 
 def create_geom_index(engine, table_name):
