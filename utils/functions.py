@@ -674,6 +674,22 @@ def normalize_stateprovince_county(engine, table_name):
             f'    "county" = TRIM("county") '
             f'WHERE "stateprovince" IS NOT NULL OR "county" IS NOT NULL'
         ))
+
+        # Asignación explícita por coordenada:
+        # si stateprovince es nulo o no está en la lista validada, usar stateprovincemgn.
+        conn.execute(text(
+            f'UPDATE "{integrated}" i '
+            f'SET "stateprovince" = i."stateprovincemgn" '
+            f'WHERE i."stateprovincemgn" IS NOT NULL '
+            f'AND ('
+            f'    i."stateprovince" IS NULL '
+            f'    OR NOT EXISTS ('
+            f'        SELECT 1 '
+            f'        FROM "geo_stateprovince_validation" v '
+            f'        WHERE UPPER(TRIM(v."validatedstateprovince")) = UPPER(TRIM(i."stateprovince"))'
+            f'    )'
+            f')'
+        ))
         conn.commit()
     logger.info("Normalización de stateprovince/county completada en %s", integrated)
 
