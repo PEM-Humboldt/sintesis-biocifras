@@ -1008,9 +1008,13 @@ _TAXONOMIC_JOINS = {
             'transplanted': 'transplanted',
         },
     },
-    'taxonomic_col_list': {
+    'taxonomic_migratory': {
         'columns': {
             'migratory': 'migratory',
+        },
+    },
+    'taxonomic_col_list': {
+        'columns': {
             'endemic': 'endemic',
             'datasetid': 'referencelist',
         },
