@@ -608,6 +608,8 @@ def prepare_integrated_columns(engine, table_name):
             f'ADD COLUMN IF NOT EXISTS "countymgn" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "maritimeregion" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "narinomaritimeregion" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "stateprovinceslug" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "countyslug" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "stateprovincevalidation" BOOLEAN, '
             f'ADD COLUMN IF NOT EXISTS "countyvalidation" BOOLEAN, '
             f'ADD COLUMN IF NOT EXISTS "flaggeo" TEXT, '
@@ -660,14 +662,6 @@ def normalize_stateprovince_county(engine, table_name):
             f'WHERE NULLIF(TRIM(COALESCE("narinomaritimeregion", \'\')), \'\') IS NOT NULL'
         ))
 
-        # Limpieza final de espacios
-        conn.execute(text(
-            f'UPDATE "{integrated}" '
-            f'SET "stateprovince" = TRIM("stateprovince"), '
-            f'    "county" = TRIM("county") '
-            f'WHERE "stateprovince" IS NOT NULL OR "county" IS NOT NULL'
-        ))
-
         # Asignación explícita por coordenada:
         # si stateprovince es nulo o no está en la lista validada, usar stateprovincemgn.
         conn.execute(text(
@@ -683,6 +677,29 @@ def normalize_stateprovince_county(engine, table_name):
             f'    )'
             f')'
         ))
+
+        # Limpieza de espacios en stateprovince y county
+        conn.execute(text(
+            f'UPDATE "{integrated}" '
+            f'SET "stateprovince" = TRIM("stateprovince"), '
+            f'    "county" = TRIM("county") '
+            f'WHERE "stateprovince" IS NOT NULL OR "county" IS NOT NULL'
+        ))
+
+
+        # stateprovinceslug desde geo_divipola para subtype = departamento
+        conn.execute(text(
+            f'UPDATE "{integrated}" i '
+            f'SET "stateprovinceslug" = d."slug" '
+            f'FROM ('
+            f'    SELECT UPPER(TRIM("name")) AS "dept_name", "slug" '
+            f'    FROM "geo_divipola" '
+            f'    WHERE "subtype" = \'departamento\' '
+            f') d '
+            f'WHERE i."stateprovince" IS NOT NULL '
+            f'AND UPPER(TRIM(i."stateprovince")) = d."dept_name"'
+        ))
+
         conn.commit()
     logger.info("Normalización de stateprovince/county completada en %s", integrated)
 
@@ -735,6 +752,8 @@ def spatials_joins(engine, table_name):
         ))
         logger.info("Cruce espacial con MGN_ADM_MPIO_2025 completado en %s", integrated)
 
+
+
         conn.execute(text(
             f'UPDATE "{integrated}" i '
             f'SET "maritimeregion" = m."DESCRIP" '
@@ -752,6 +771,7 @@ def spatials_joins(engine, table_name):
             f'WHERE i.geom IS NOT NULL '
             f'AND ST_Intersects(i.geom, m.geom)'
         ))
+
         logger.info("Cruce espacial con INVEMAR_MARITIME_REGIONS completado en %s", integrated)
 
         # Se aplica INITCAP a los campos de departamento y municipio para estandarización de nombres.
@@ -761,12 +781,26 @@ def spatials_joins(engine, table_name):
             # Cada palabra en _LOWERCASE_WORDS se formatea para que sea un replace en SQL.
             for word in _LOWERCASE_WORDS:
                 expr = f"REPLACE({expr}, '{word}', '{word.lower()}')"
+
             conn.execute(text(
                 f'UPDATE "{integrated}" SET "{col}" = {expr} '
                 f'WHERE "{col}" IS NOT NULL'
             ))
-        logger.info("INITCAP con estandarizaciones de nombres aplicado a stateprovincemgn y countymgn en %s", integrated)
 
+            logger.info("INITCAP con estandarizaciones de nombres aplicado a %s en %s", col, integrated)
+
+        # Reemplazos manuales para mantener consistencia con la salida de sintesis de cifras de biodiversidad
+        # Bogotá, D.C. -> Bogotá, D. C.
+        # Santiago de Cali -> Cali
+        
+        conn.execute(text(
+            f'UPDATE "{integrated}" '
+            f'SET "stateprovincemgn" = \'Bogotá, D. C.\', '
+            f'    "countymgn" = \'Bogotá, D. C.\' '
+            f'WHERE "stateprovincemgn" = \'Bogotá, D.C.\' '
+        ))
+
+        logger.info("Reemplazos manuales para mantener consistencia con la salida de sintesis de cifras de biodiversidad completados en %s", integrated)
         conn.commit()
 
 # --------------------------------------------------------------------------------------------------------------------------------------
