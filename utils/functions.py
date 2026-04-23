@@ -1119,15 +1119,6 @@ def clean_threatstatus_fields(engine, table_name):
 # Backfill desde API GBIF
 # --------------------------------------------------------------------------------------------------------------------------------------
 
-def _select_missing_keys(conn, integrated, key_col, required_col):
-    rows = conn.execute(text(
-        f'SELECT DISTINCT "{key_col}" '
-        f'FROM "{integrated}" '
-        f'WHERE "{key_col}" IS NOT NULL AND "{required_col}" IS NULL'
-    )).fetchall()
-    return [row[0] for row in rows if row[0]]
-
-
 def _fetch_gbif_json(url, key, label, retries=5, backoff_factor=0.5):
     retry_statuses = {429, 500, 502, 503, 504}
     for attempt in range(retries + 1):
@@ -1182,54 +1173,6 @@ def _parse_gbif_created_date(value):
     return None
 
 
-def _run_gbif_backfill(conn, integrated, *, key_col, required_col, refresh_sql, endpoint_fmt, upsert_sql, payload_builder, log_label):
-    # 1) Backfill desde tabla local
-    conn.execute(text(refresh_sql))
-
-    # 2) Detectar faltantes
-    missing_keys = _select_missing_keys(conn, integrated, key_col, required_col)
-    logger.info("%s sin %s en %s: %s", log_label, required_col, integrated, f"{len(missing_keys):,}")
-
-    fetched = 0
-    upserted = 0
-    errors = 0
-
-    # 3) Consultar API en paralelo + upsert local
-    if missing_keys:
-        max_workers = min(20, max(4, len(missing_keys)))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(
-                    _fetch_gbif_json,
-                    endpoint_fmt.format(key=key),
-                    key,
-                    key_col,
-                ): key
-                for key in missing_keys
-            }
-            for future in as_completed(futures):
-                key = futures[future]
-                try:
-                    data, ok = future.result()
-                except Exception as e:
-                    logger.warning("Error ejecutando tarea GBIF para %s %s: %s", key_col, key, e)
-                    errors += 1
-                    continue
-
-                if not ok:
-                    errors += 1
-                    continue
-
-                fetched += 1
-                conn.execute(text(upsert_sql), payload_builder(data, key))
-                upserted += 1
-                time.sleep(0.002)
-
-    # 4) Reaplicar backfill
-    conn.execute(text(refresh_sql))
-    return missing_keys, fetched, upserted, errors
-
-
 def gbif_api_calls(engine, table_name):
     """Enriquece la tabla integrada con metadatos de datasets y publicadores desde tablas locales y API GBIF."""
     integrated = table_name
@@ -1256,25 +1199,61 @@ def gbif_api_calls(engine, table_name):
                 created = EXCLUDED.created
         """
 
-        missing_dataset_keys, ds_fetched, ds_upserted, ds_errors = _run_gbif_backfill(
-            conn,
+        # Backfill local y detección de faltantes para datasets
+        conn.execute(text(dataset_refresh_sql))
+        dataset_rows = conn.execute(text(
+            f'SELECT DISTINCT "datasetkey" '
+            f'FROM "{integrated}" '
+            f'WHERE "datasetkey" IS NOT NULL AND "datasettitle" IS NULL'
+        )).fetchall()
+        missing_dataset_keys = [row[0] for row in dataset_rows if row[0]]
+        logger.info(
+            "Datasetkeys sin datasettitle en %s: %s",
             integrated,
-            key_col='datasetkey',
-            required_col='datasettitle',
-            refresh_sql=dataset_refresh_sql,
-            endpoint_fmt='https://api.gbif.org/v1/dataset/{key}',
-            upsert_sql=dataset_upsert_sql,
-            payload_builder=lambda data, key: {
-                'datasetkey': data.get('key') or key,
-                'license': data.get('license'),
-                'doi': data.get('doi'),
-                'datasettitle': data.get('title'),
-                'logourl': data.get('logoUrl'),
-                'datatype': data.get('type'),
-                'created': _parse_gbif_created_date(data.get('created')),
-            },
-            log_label='Datasetkeys',
+            f"{len(missing_dataset_keys):,}",
         )
+
+        ds_fetched = 0
+        ds_upserted = 0
+        ds_errors = 0
+        if missing_dataset_keys:
+            max_workers = min(20, max(4, len(missing_dataset_keys)))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        _fetch_gbif_json,
+                        f'https://api.gbif.org/v1/dataset/{key}',
+                        key,
+                        'datasetkey',
+                    ): key
+                    for key in missing_dataset_keys
+                }
+                for future in as_completed(futures):
+                    key = futures[future]
+                    try:
+                        data, ok = future.result()
+                    except Exception as e:
+                        logger.warning("Error ejecutando tarea GBIF para datasetkey %s: %s", key, e)
+                        ds_errors += 1
+                        continue
+
+                    if not ok:
+                        ds_errors += 1
+                        continue
+
+                    ds_fetched += 1
+                    conn.execute(text(dataset_upsert_sql), {
+                        'datasetkey': data.get('key') or key,
+                        'license': data.get('license'),
+                        'doi': data.get('doi'),
+                        'datasettitle': data.get('title'),
+                        'logourl': data.get('logoUrl'),
+                        'datatype': data.get('type'),
+                        'created': _parse_gbif_created_date(data.get('created')),
+                    })
+                    ds_upserted += 1
+                    time.sleep(0.002)
+        conn.execute(text(dataset_refresh_sql))
 
         publisher_refresh_sql = (
             f'UPDATE "{integrated}" i '
@@ -1289,20 +1268,56 @@ def gbif_api_calls(engine, table_name):
             SET organization = EXCLUDED.organization
         """
 
-        missing_publisher_keys, pub_fetched, pub_upserted, pub_errors = _run_gbif_backfill(
-            conn,
+        # Backfill local y detección de faltantes para publishers
+        conn.execute(text(publisher_refresh_sql))
+        publisher_rows = conn.execute(text(
+            f'SELECT DISTINCT "publishingorgkey" '
+            f'FROM "{integrated}" '
+            f'WHERE "publishingorgkey" IS NOT NULL AND "organization" IS NULL'
+        )).fetchall()
+        missing_publisher_keys = [row[0] for row in publisher_rows if row[0]]
+        logger.info(
+            "PublishingOrgKeys sin organization en %s: %s",
             integrated,
-            key_col='publishingorgkey',
-            required_col='organization',
-            refresh_sql=publisher_refresh_sql,
-            endpoint_fmt='https://api.gbif.org/v1/organization/{key}',
-            upsert_sql=publisher_upsert_sql,
-            payload_builder=lambda data, key: {
-                'publishingorgkey': data.get('key') or key,
-                'organization': data.get('title'),
-            },
-            log_label='PublishingOrgKeys',
+            f"{len(missing_publisher_keys):,}",
         )
+
+        pub_fetched = 0
+        pub_upserted = 0
+        pub_errors = 0
+        if missing_publisher_keys:
+            max_workers = min(20, max(4, len(missing_publisher_keys)))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        _fetch_gbif_json,
+                        f'https://api.gbif.org/v1/organization/{key}',
+                        key,
+                        'publishingorgkey',
+                    ): key
+                    for key in missing_publisher_keys
+                }
+                for future in as_completed(futures):
+                    key = futures[future]
+                    try:
+                        data, ok = future.result()
+                    except Exception as e:
+                        logger.warning("Error ejecutando tarea GBIF para publishingorgkey %s: %s", key, e)
+                        pub_errors += 1
+                        continue
+
+                    if not ok:
+                        pub_errors += 1
+                        continue
+
+                    pub_fetched += 1
+                    conn.execute(text(publisher_upsert_sql), {
+                        'publishingorgkey': data.get('key') or key,
+                        'organization': data.get('title'),
+                    })
+                    pub_upserted += 1
+                    time.sleep(0.002)
+        conn.execute(text(publisher_refresh_sql))
 
         conn.commit()
 
