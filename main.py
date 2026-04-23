@@ -51,6 +51,7 @@ from utils.functions import (
     normalize_stateprovince_county,
     validate_geography,
     taxonomic_joins,
+    clean_threatstatus_fields,
     gbif_api_calls,
 )
 
@@ -117,6 +118,7 @@ try:
     timer(validate_geography, "Validación geográfica")(engine, table_names['integrated'])
     timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(engine, table_names['integrated'])
     timer(taxonomic_joins, "Cruces taxonómicos con listados")(engine, table_names['integrated'])
+    timer(clean_threatstatus_fields, "Normalizando campos threatstatus antes de API")(engine, table_names['integrated'])
     timer(gbif_api_calls, "Enriqueciendo metadatos de datasets y publicadores GBIF")(engine, table_names['integrated'])
 
     register_load(engine, table_names, today, origin)

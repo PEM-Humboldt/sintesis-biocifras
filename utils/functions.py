@@ -987,7 +987,7 @@ def validate_geography(engine, table_name):
 # UPDATE "dwc_integrated_{fecha}}" SET "migratory" = t."migratory", "endemic" = t."endemic" FROM "taxonomic_col_list" t WHERE i."species" = t."species"
 # UPDATE "dwc_integrated_{fecha}}" SET "referencelist" = 'Presente en lista taxonómica: ' || "referencelist" FROM "taxonomic_ref_list" t WHERE i."species" = t."species"
 _FLAGTAXO_CLASSES = ('Aves', 'Mammalia', 'Reptilia', 'Squamata', 'Crocodylia', 'Testudines')
-_FLAGTAXO_ORDERS = ('Lepidoptera',)
+_FLAGTAXO_ORDERS = ('Lepidoptera','Odonota')
 
 _TAXONOMIC_JOINS = {
     'taxonomic_cites': {
@@ -1056,6 +1056,9 @@ def taxonomic_joins(engine, table_name):
             f"AND \"transplanted\" = 'Trasplantada' "
             f"THEN 'Ausente en lista taxonómica_Trasplantada' "
             f'WHEN "referencelist" IS NULL AND "species" IS NOT NULL '
+            f"AND \"migratory\" = 'Migratorio' "
+            f"THEN 'Ausente en lista taxonómica_Migratoria' "
+            f'WHEN "referencelist" IS NULL AND "species" IS NOT NULL '
             f"AND \"exoticriskinvasion\" = 'Exótica con potencial de invasión' "
             f"THEN 'Ausente en lista taxonómica_Exótica con potencial de invasión' "
             f'WHEN "referencelist" IS NULL AND "species" IS NOT NULL '
@@ -1076,6 +1079,39 @@ def taxonomic_joins(engine, table_name):
 
         conn.commit()
 
+# --------------------------------------------------------------------------------------------------------------------------------------
+# Normalización de campos threatstatus
+# --------------------------------------------------------------------------------------------------------------------------------------
+
+def clean_threatstatus_fields(engine, table_name):
+    """Normaliza threatstatus y agrega sufijos por fuente (IUCN/MADS)."""
+    integrated = table_name
+    with engine.connect() as conn:
+        conn.execute(text(
+            f'UPDATE "{integrated}" '
+            f'SET "threatstatusuicn" = NULLIF(TRIM("threatstatusuicn"), \'\'), '
+            f'    "threatstatusmads" = NULLIF(TRIM("threatstatusmads"), \'\') '
+            f'WHERE "threatstatusuicn" IS NOT NULL OR "threatstatusmads" IS NOT NULL'
+        ))
+        conn.execute(text(
+            f'UPDATE "{integrated}" '
+            f'SET "threatstatusuicn" = CASE '
+            f'    WHEN "threatstatusuicn" IS NULL THEN NULL '
+            f'    WHEN "threatstatusuicn" LIKE \'%_IUCN\' THEN "threatstatusuicn" '
+            f'    ELSE "threatstatusuicn" || \'_IUCN\' '
+            f'END, '
+            f'    "threatstatusmads" = CASE '
+            f'    WHEN "threatstatusmads" IS NULL THEN NULL '
+            f'    WHEN "threatstatusmads" LIKE \'%_MADS\' THEN "threatstatusmads" '
+            f'    ELSE "threatstatusmads" || \'_MADS\' '
+            f'END'
+        ))
+        logger.info("Validación de threatstatus (vacíos/sufijos por fuente) completada en %s", integrated)
+        conn.commit()
+
+# --------------------------------------------------------------------------------------------------------------------------------------
+# Backfill desde API GBIF
+# --------------------------------------------------------------------------------------------------------------------------------------
 
 def _select_missing_keys(conn, integrated, key_col, required_col):
     rows = conn.execute(text(
