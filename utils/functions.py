@@ -591,7 +591,7 @@ def add_geometry_and_indexes(engine, table_name):
 
 
 def prepare_integrated_columns(engine, table_name):
-    """Crea en un solo paso las columnas derivadas usadas por validaciones y cruces."""
+    """Crea todas las columnas derivadas usadas por validaciones y cruces."""
     integrated = table_name
     with engine.connect() as conn:
         conn.execute(text(
@@ -603,6 +603,7 @@ def prepare_integrated_columns(engine, table_name):
             f'ADD COLUMN IF NOT EXISTS "countymgn" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "maritimeregion" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "narinomaritimeregion" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "ismarine" BOOLEAN, '
             f'ADD COLUMN IF NOT EXISTS "stateprovinceslug" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "countyslug" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "stateprovincevalidation" BOOLEAN, '
@@ -681,6 +682,40 @@ def normalize_stateprovince_county(engine, table_name):
             f'WHERE "stateprovince" IS NOT NULL OR "county" IS NOT NULL'
         ))
 
+        # Normalización slug de municipio:
+        conn.execute(text(
+            f'UPDATE "{integrated}" '
+            f'SET "countyslug" = NULLIF(TRIM(BOTH \'-\' FROM REGEXP_REPLACE('
+            f'    REGEXP_REPLACE('
+            f'        REGEXP_REPLACE('
+            f'            TRANSLATE('
+            f'                LOWER(TRIM(COALESCE(NULLIF('
+            f'                    REGEXP_REPLACE('
+            f'                        REGEXP_REPLACE('
+            f'                            REGEXP_REPLACE(COALESCE("county", \'\'), \'d\\s*\\.\\s*c\\s*\\.\', \'dc\', \'gi\'), '
+            f'                            \'d\\s*\\.\\s*c\', \'dc\', \'gi\''
+            f'                        ), '
+            f'                        \'(municipio\\s+de|municipio|mpio\\.?\\s*de|mun\\.?|m\\.?\\s*de|no\\s+data|unknown|no\\s+reference\\s+available|distrito\\s+capital|southwestern|eastern|more\\s+info\\s+needed|northern|province|about|municipality|department|district|,n30km|\\(is\\.\\)|correg\\.?|\\.\\s*correg\\.?|mts|"+|,)\' , '
+            f'                        \' \', '
+            f'                        \'gi\''
+            f'                    ), '
+            f'                    \'\''
+            f'                ), REGEXP_REPLACE('
+            f'                    REGEXP_REPLACE(COALESCE("countymgn", \'\'), \'d\\s*\\.\\s*c\\s*\\.\', \'dc\', \'gi\'), '
+            f'                    \'d\\s*\\.\\s*c\', \'dc\', \'gi\''
+            f'                ), \'\'))), '
+            f'                \'áéíóúñüã√\', \'aeiounuao\''
+            f'            ), '
+            f'            \'[^a-z0-9\\s-]+\', '
+            f'            \' \', '
+            f'            \'g\''
+            f'        ), '
+            f'        \'\\s+\', \'-\', \'g\''
+            f'    ), '
+            f'    \'-+\', \'-\', \'g\''
+            f')), \'\')'
+        ))
+
 
         # stateprovinceslug desde geo_divipola para subtype = departamento
         conn.execute(text(
@@ -695,8 +730,94 @@ def normalize_stateprovince_county(engine, table_name):
             f'AND UPPER(TRIM(i."stateprovince")) = d."dept_name"'
         ))
 
+        # Reglas de validación de countyslug por utilizando stateprovinceslug
+        conn.execute(text(
+            f'UPDATE "{integrated}" i '
+            f'SET "countyslug" = o."countyslugresolved" '
+            f'FROM "geo_countyslug_validation" o '
+            f'WHERE i."stateprovinceslug" = o."stateprovinceslug" '
+            f'AND i."countyslug" = o."countyslug" '
+            f'AND i."countyslug" IS DISTINCT FROM o."countyslugresolved"'
+        ))
+
+        # Actualiza county desde la divipola para subtype = municipio.
+        conn.execute(text(
+            f'UPDATE "{integrated}" i '
+            f'SET "county" = m."name", '
+            f'    "countyslug" = m."slug" '
+            f'FROM "geo_divipola" m '
+            f'WHERE m."subtype" = \'municipio\' '
+            f'AND m."parentslug" = i."stateprovinceslug" '
+            f'AND m."slug" = i."countyslug"'
+        ))
+
+        # Fallback: cruza por nombre del municipio derivado por coordenada (countymgn)
+        # cuando no hubo match por slug.
+        conn.execute(text(
+            f'UPDATE "{integrated}" i '
+            f'SET "county" = m."name", '
+            f'    "countyslug" = m."slug" '
+            f'FROM "geo_divipola" m '
+            f'WHERE m."subtype" = \'municipio\' '
+            f'AND m."parentslug" = i."stateprovinceslug" '
+            f'AND i."countymgn" IS NOT NULL '
+            f'AND UPPER(TRIM(m."name")) = UPPER(TRIM(i."countymgn"))'
+        ))
+
+        # Regla: si el municipio no corresponde al departamento, se limpia county.
+        conn.execute(text(
+            f'UPDATE "{integrated}" i '
+            f'SET "county" = \'\' '
+            f'FROM "geo_divipola" m '
+            f'WHERE m."subtype" = \'municipio\' '
+            f'AND m."slug" = i."countyslug" '
+            f'AND m."parentslug" IS DISTINCT FROM i."stateprovinceslug"'
+        ))
+
+        # Regla: si county queda vacío y el departamento textual coincide con el de coordenada,
+        # usar municipio por coordenada (countymgn).
+        conn.execute(text(
+            f'UPDATE "{integrated}" '
+            f'SET "county" = "countymgn" '
+            f'WHERE ("county" IS NULL OR TRIM("county") = \'\') '
+            f'AND "countymgn" IS NOT NULL '
+            f'AND UPPER(TRIM(COALESCE("stateprovince", \'\'))) = '
+            f'    UPPER(TRIM(COALESCE("stateprovincemgn", \'\')))'
+        ))
+
+        # Cruce final con DIVIPOLA: código DANE e indicador marino.
+        conn.execute(text(
+            f'UPDATE "{integrated}" i '
+            f'SET "codedane" = m."codedane", '
+            f'    "ismarine" = m."ismarine" '
+            f'FROM "geo_divipola" m '
+            f'WHERE m."subtype" = \'municipio\' '
+            f'AND m."parentslug" = i."stateprovinceslug" '
+            f'AND m."slug" = i."countyslug"'
+        ))
+
+        # Fallback cuando falta countyslug pero county quedó verbatim.
+        conn.execute(text(
+            f'UPDATE "{integrated}" i '
+            f'SET "codedane" = m."codedane", '
+            f'    "ismarine" = m."ismarine" '
+            f'FROM "geo_divipola" m '
+            f'WHERE m."subtype" = \'municipio\' '
+            f'AND m."parentslug" = i."stateprovinceslug" '
+            f'AND i."county" IS NOT NULL '
+            f'AND UPPER(TRIM(m."name")) = UPPER(TRIM(i."county")) '
+            f'AND (i."codedane" IS NULL OR i."ismarine" IS NULL)'
+        ))
+
+        # Regla legado: para Bogotá se elimina el slug de municipio.
+        conn.execute(text(
+            f'UPDATE "{integrated}" '
+            f'SET "countyslug" = \'\' '
+            f'WHERE "stateprovinceslug" = \'bogota-dc\''
+        ))
+
         conn.commit()
-    logger.info("Normalización de stateprovince/county completada en %s", integrated)
+    logger.info("Normalización de stateprovince/county y slugs completada en %s", integrated)
 
 
 def create_geom_index(engine, table_name):
