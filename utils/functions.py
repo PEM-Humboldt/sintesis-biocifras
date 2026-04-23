@@ -1021,6 +1021,7 @@ _TAXONOMIC_JOINS = {
     },
     'taxonomic_col_list': {
         'columns': {
+            'migratory': 'migratory',
             'endemic': 'endemic',
             'datasetid': 'referencelist',
         },
@@ -1035,9 +1036,19 @@ def taxonomic_joins(engine, table_name):
         for src_table, config in _TAXONOMIC_JOINS.items():
             col_map = config['columns']
 
-            set_clause = ', '.join(
-                f'"{dest}" = t."{src}"' for src, dest in col_map.items()
-            )
+            # migratory solo se completa si está nulo, para no depender del orden
+            # entre taxonomic_migratory y taxonomic_col_list.
+            set_parts = []
+            for src, dest in col_map.items():
+                if dest == 'migratory':
+                    set_parts.append(
+                        f'"{dest}" = CASE '
+                        f'WHEN i."migratory" IS NULL THEN t."{src}" '
+                        f'ELSE i."migratory" END'
+                    )
+                else:
+                    set_parts.append(f'"{dest}" = t."{src}"')
+            set_clause = ', '.join(set_parts)
             conn.execute(text(
                 f'UPDATE "{integrated}" i '
                 f'SET {set_clause} '
