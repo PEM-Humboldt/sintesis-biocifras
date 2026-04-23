@@ -61,9 +61,9 @@ SQL_COLS = [
     'scientificname', 'kingdom', 'phylum', 'class', 'order', 'family',
     'genus', 'species', 'infraspecificepithet', 'taxonrank', 'day', 'month',
     'year', 'v_scientificname', 'datasetkey', 'publishingorgkey', 'taxonkey', 'issue',
-    'occurrencestatus', 'lastinterpreted', 'v_type', 'v_datasetid', 'v_datasetname',
-    'v_organismquantity', 'v_organismquantitytype', 'v_eventid', 'v_samplingprotocol',
-    'v_county', 'v_municipality', 'repatriated', 'publishingcountry', 'lastparsed',
+    'occurrencestatus', 'lastinterpreted', 'type', 'datasetid', 'datasetname',
+    'organismquantity', 'organismquantitytype', 'eventid', 'samplingprotocol',
+    'county', 'municipality', 'repatriated', 'publishingcountry', 'lastparsed',
 ]
 
 # Mapeo de columnas tipo SQL para CREATE TABLE dinamico
@@ -117,10 +117,10 @@ _SQL_COL_TYPES = {
     'year': 'SMALLINT', 'v_scientificname': 'TEXT', 'datasetkey': 'TEXT',
     'publishingorgkey': 'TEXT', 'taxonkey': 'BIGINT',
     'issue': 'TEXT', 'occurrencestatus': 'TEXT',
-    'v_type': 'TEXT', 'v_datasetid': 'TEXT', 'v_datasetname': 'TEXT',
-    'v_organismquantity': 'TEXT', 'v_organismquantitytype': 'TEXT',
-    'v_eventid': 'TEXT', 'v_samplingprotocol': 'TEXT',
-    'v_county': 'TEXT', 'v_municipality': 'TEXT',
+    'type': 'TEXT', 'datasetid': 'TEXT', 'datasetname': 'TEXT',
+    'organismquantity': 'TEXT', 'organismquantitytype': 'TEXT',
+    'eventid': 'TEXT', 'samplingprotocol': 'TEXT',
+    'county': 'TEXT', 'municipality': 'TEXT',
     'repatriated': 'BOOLEAN', 'publishingcountry': 'TEXT',
     'lastinterpreted': 'TIMESTAMPTZ', 'lastparsed': 'TIMESTAMPTZ',
 }
@@ -400,23 +400,18 @@ def data_upload(engine, filepath, table_name, columns):
 # Renombrado de columnas en la tabla de staging dwc_sql
 # -----------------------------------------------------------------------------------------------------
 
-# Se renombran las columnas con prefijo v_ quitando el prefijo y en el caso de scientificname se cambia a verbatimscientificname.
-# Se realiza esta función para asegurar que el nombre de las columnas sean consistentes sin importar el origen de los datos.
+# Se renombra únicamente v_scientificname a verbatimscientificname.
+# Los demás campos con prefijo v_ ya no se conservan en el flujo actual.
 def rename_sql_columns(engine, table_name, columns):
-    """Renombra columnas con prefijo v_ quitando el prefijo (v_scientificname → verbatimscientificname)."""
-    renames = {}
-    for c in columns:
-        if c == 'v_scientificname':
-            renames[c] = 'verbatimscientificname'
-        elif c.startswith('v_'):
-            renames[c] = c[2:]
-
+    """Renombra v_scientificname a verbatimscientificname """
     with engine.connect() as conn:
-        for old, new in renames.items():
-            conn.execute(text(
-                f'ALTER TABLE "{table_name}" RENAME COLUMN "{old}" TO "{new}"'
-            ))
-            logger.info("Columna renombrada: %s → %s en %s", old, new, table_name)
+        conn.execute(text(
+            f'ALTER TABLE "{table_name}" RENAME COLUMN "v_scientificname" TO "verbatimscientificname"'
+        ))
+        logger.info(
+            "Columna renombrada: v_scientificname a verbatimscientificname en %s",
+            table_name,
+        )
         conn.commit()
 
 # Se renombra la tabla de staging dwc_sql a dwc_integrated para integridad en el flujo de carga.
@@ -792,7 +787,7 @@ def spatials_joins(engine, table_name):
         # Reemplazos manuales para mantener consistencia con la salida de sintesis de cifras de biodiversidad
         # Bogotá, D.C. -> Bogotá, D. C.
         # Santiago de Cali -> Cali
-        
+
         conn.execute(text(
             f'UPDATE "{integrated}" '
             f'SET "stateprovincemgn" = \'Bogotá, D. C.\', '
