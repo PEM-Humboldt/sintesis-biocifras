@@ -653,19 +653,12 @@ def normalize_stateprovince_county(engine, table_name):
             f'WHERE UPPER(TRIM(i."stateprovince")) = UPPER(TRIM(a."originalstateprovince"))'
         ))
 
-        # Regla específica del legado si existe la columna "Nombre"
-        has_nombre = conn.execute(text(
-            f"SELECT EXISTS ("
-            f"SELECT 1 FROM information_schema.columns "
-            f"WHERE table_name = '{integrated}' AND column_name = 'Nombre'"
-            f")"
-        )).scalar()
-        if has_nombre:
-            conn.execute(text(
-                f'UPDATE "{integrated}" '
-                f'SET "stateprovince" = \'Nariño\' '
-                f'WHERE "Nombre" = \'UAC Llanura Aluvial del Sur\''
-            ))
+        # Región marítima Invemar (post-join): si hay valor en narinomaritimeregion, departamento Nariño
+        conn.execute(text(
+            f'UPDATE "{integrated}" '
+            f'SET "stateprovince" = \'Nariño\' '
+            f'WHERE NULLIF(TRIM(COALESCE("narinomaritimeregion", \'\')), \'\') IS NOT NULL'
+        ))
 
         # Limpieza final de espacios
         conn.execute(text(
