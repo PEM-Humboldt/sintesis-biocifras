@@ -10,10 +10,11 @@ import json
 import logging
 import os
 import time
-import urllib.error
-import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+import urllib.error
+import urllib.request
 
 # Libreria para la conexión a la base de datos PostgreSQL y PostGIS
 from sqlalchemy import create_engine, inspect, text
@@ -184,8 +185,13 @@ def datasets_table(engine):
                 doi TEXT,
                 datasettitle TEXT,
                 logourl TEXT,
-                datatype TEXT
+                datatype TEXT,
+                created DATE
             );
+        """))
+        conn.execute(text("""
+            ALTER TABLE gbif_datasets
+            ADD COLUMN IF NOT EXISTS created DATE;
         """))
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS idx_gbif_datasets_datasetkey
@@ -1122,21 +1128,58 @@ def _select_missing_keys(conn, integrated, key_col, required_col):
     return [row[0] for row in rows if row[0]]
 
 
-def _fetch_gbif_json(url, key, label):
-    try:
-        with urllib.request.urlopen(url, timeout=10) as response:
-            if response.status != 200:
-                logger.warning("GBIF API status %s para %s %s", response.status, label, key)
-                return None, False
-            data = json.loads(response.read().decode('utf-8'))
-        return data, True
-    except urllib.error.HTTPError as e:
-        logger.warning("GBIF API status %s para %s %s", e.code, label, key)
-    except urllib.error.URLError as e:
-        logger.warning("Error de red consultando GBIF API para %s %s: %s", label, key, e.reason)
-    except Exception as e:
-        logger.warning("Error consultando GBIF API para %s %s: %s", label, key, e)
+def _fetch_gbif_json(url, key, label, retries=5, backoff_factor=0.5):
+    retry_statuses = {429, 500, 502, 503, 504}
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=10) as response:
+                if response.status != 200:
+                    if response.status in retry_statuses and attempt < retries:
+                        time.sleep(backoff_factor * (2 ** attempt))
+                        continue
+                    logger.warning("GBIF API status %s para %s %s", response.status, label, key)
+                    return None, False
+                data = json.loads(response.read().decode('utf-8'))
+            return data, True
+        except urllib.error.HTTPError as e:
+            if e.code in retry_statuses and attempt < retries:
+                time.sleep(backoff_factor * (2 ** attempt))
+                continue
+            logger.warning("GBIF API status %s para %s %s", e.code, label, key)
+            return None, False
+        except urllib.error.URLError as e:
+            if attempt < retries:
+                time.sleep(backoff_factor * (2 ** attempt))
+                continue
+            logger.warning("Error de red consultando GBIF API para %s %s: %s", label, key, e.reason)
+            return None, False
+        except Exception as e:
+            logger.warning("Error consultando GBIF API para %s %s: %s", label, key, e)
+            return None, False
     return None, False
+
+
+def _parse_gbif_created_date(value):
+    """Convierte el campo created de GBIF a date (YYYY-MM-DD)."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            # Soporta ISO8601 con Z o con offset (+00:00)
+            return datetime.fromisoformat(raw.replace('Z', '+00:00')).date()
+        except ValueError:
+            try:
+                # Fallback cuando ya viene como YYYY-MM-DD
+                return datetime.strptime(raw[:10], '%Y-%m-%d').date()
+            except ValueError:
+                logger.warning("Fecha created inválida en respuesta GBIF: %s", value)
+                return None
+    return None
 
 
 def _run_gbif_backfill(conn, integrated, *, key_col, required_col, refresh_sql, endpoint_fmt, upsert_sql, payload_builder, log_label):
@@ -1151,18 +1194,36 @@ def _run_gbif_backfill(conn, integrated, *, key_col, required_col, refresh_sql, 
     upserted = 0
     errors = 0
 
-    # 3) Consultar API + upsert local
-    for key in missing_keys:
-        url = endpoint_fmt.format(key=key)
-        data, ok = _fetch_gbif_json(url, key, key_col)
-        if not ok:
-            errors += 1
-            continue
+    # 3) Consultar API en paralelo + upsert local
+    if missing_keys:
+        max_workers = min(20, max(4, len(missing_keys)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    _fetch_gbif_json,
+                    endpoint_fmt.format(key=key),
+                    key,
+                    key_col,
+                ): key
+                for key in missing_keys
+            }
+            for future in as_completed(futures):
+                key = futures[future]
+                try:
+                    data, ok = future.result()
+                except Exception as e:
+                    logger.warning("Error ejecutando tarea GBIF para %s %s: %s", key_col, key, e)
+                    errors += 1
+                    continue
 
-        fetched += 1
-        conn.execute(text(upsert_sql), payload_builder(data, key))
-        upserted += 1
-        time.sleep(0.005)
+                if not ok:
+                    errors += 1
+                    continue
+
+                fetched += 1
+                conn.execute(text(upsert_sql), payload_builder(data, key))
+                upserted += 1
+                time.sleep(0.002)
 
     # 4) Reaplicar backfill
     conn.execute(text(refresh_sql))
@@ -1184,14 +1245,15 @@ def gbif_api_calls(engine, table_name):
             f'WHERE i."datasetkey" = d."datasetkey"'
         )
         dataset_upsert_sql = """
-            INSERT INTO gbif_datasets (datasetkey, license, doi, datasettitle, logourl, datatype)
-            VALUES (:datasetkey, :license, :doi, :datasettitle, :logourl, :datatype)
+            INSERT INTO gbif_datasets (datasetkey, license, doi, datasettitle, logourl, datatype, created)
+            VALUES (:datasetkey, :license, :doi, :datasettitle, :logourl, :datatype, :created)
             ON CONFLICT (datasetkey) DO UPDATE
             SET license = EXCLUDED.license,
                 doi = EXCLUDED.doi,
                 datasettitle = EXCLUDED.datasettitle,
                 logourl = EXCLUDED.logourl,
-                datatype = EXCLUDED.datatype
+                datatype = EXCLUDED.datatype,
+                created = EXCLUDED.created
         """
 
         missing_dataset_keys, ds_fetched, ds_upserted, ds_errors = _run_gbif_backfill(
@@ -1200,7 +1262,7 @@ def gbif_api_calls(engine, table_name):
             key_col='datasetkey',
             required_col='datasettitle',
             refresh_sql=dataset_refresh_sql,
-            endpoint_fmt='http://api.gbif.org/v1/dataset/{key}',
+            endpoint_fmt='https://api.gbif.org/v1/dataset/{key}',
             upsert_sql=dataset_upsert_sql,
             payload_builder=lambda data, key: {
                 'datasetkey': data.get('key') or key,
@@ -1209,6 +1271,7 @@ def gbif_api_calls(engine, table_name):
                 'datasettitle': data.get('title'),
                 'logourl': data.get('logoUrl'),
                 'datatype': data.get('type'),
+                'created': _parse_gbif_created_date(data.get('created')),
             },
             log_label='Datasetkeys',
         )
@@ -1232,7 +1295,7 @@ def gbif_api_calls(engine, table_name):
             key_col='publishingorgkey',
             required_col='organization',
             refresh_sql=publisher_refresh_sql,
-            endpoint_fmt='http://api.gbif.org/v1/organization/{key}',
+            endpoint_fmt='https://api.gbif.org/v1/organization/{key}',
             upsert_sql=publisher_upsert_sql,
             payload_builder=lambda data, key: {
                 'publishingorgkey': data.get('key') or key,
