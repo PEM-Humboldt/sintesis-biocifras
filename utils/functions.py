@@ -727,8 +727,7 @@ def spatials_joins(engine, table_name):
     with engine.connect() as conn:
         conn.execute(text(
             f'UPDATE "{integrated}" i '
-            f'SET "codemgn" = m."mpio_cdpmp", '
-            f'    "stateprovincemgn" = m."dpto_cnmbr", '
+            f'SET "stateprovincemgn" = m."dpto_cnmbr", '
             f'    "countymgn" = m."mpio_cnmbr" '
             f'FROM "MGN_ADM_MPIO_2025" m '
             f'WHERE i.geom IS NOT NULL '
