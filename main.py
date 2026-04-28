@@ -43,7 +43,7 @@ from utils.functions import (
     fill_species_from_scientificname,
     translate_taxonrank,
     add_geometry_and_indexes,
-    prepare_integrated_columns,
+    create_join_validation_columns,
     create_geom_index,
     create_species_index,
     spatials_joins,
@@ -104,9 +104,9 @@ try:
         timer(create_integrated_table, "Creación de la tabla integrada dwc_occurrence_integrated")(db, table_names)
         origin = 'regular download'
 
+    timer(create_join_validation_columns, "Crando columnas para cruces y validaciones en la tabla integrada")(db, table_names['integrated'])
     timer(fill_species_from_scientificname, "Completando campo species desde scientificname")(db, table_names['integrated'])
     timer(translate_taxonrank, "Traduciendo taxonrank a español en la tabla integrada")(db, table_names['integrated'])
-    timer(prepare_integrated_columns, "Preparando columnas derivadas en la tabla integrada")(db, table_names['integrated'])
     timer(add_geometry_and_indexes, "Añadiendo PK y geometría base a la tabla integrada")(db, table_names['integrated'])
     timer(create_geom_index, "Creando índice espacial GIST en la tabla integrada")(db, table_names['integrated'])
     timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(db, table_names['integrated'])

@@ -555,6 +555,51 @@ def create_integrated_table(db, table_names):
 
 
 # -----------------------------------------------------------------------------------------------------
+# Creación de columnas a usar en las validaciones y cruces en la tabla integrada
+# -----------------------------------------------------------------------------------------------------
+
+def create_join_validation_columns(db, table_name):
+    # Crea todas las columnas derivadas usadas por validaciones y cruces.
+    integrated = table_name
+    with db.connect() as conn:
+        conn.execute(
+            f'ALTER TABLE "{integrated}" '
+            f'ADD COLUMN IF NOT EXISTS "verbatimstateprovince" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "verbatimcounty" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "codedane" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "stateprovincemgn" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "countymgn" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "maritimeregion" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "narinomaritimeregion" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "ismarine" BOOLEAN, '
+            f'ADD COLUMN IF NOT EXISTS "stateprovinceslug" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "countyslug" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "stateprovincevalidation" BOOLEAN, '
+            f'ADD COLUMN IF NOT EXISTS "countyvalidation" BOOLEAN, '
+            f'ADD COLUMN IF NOT EXISTS "flaggeo" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "cites" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "threatstatusuicn" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "threatstatusmads" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "exotic" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "exoticriskinvasion" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "invasiveness" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "invasive" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "transplanted" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "migratory" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "endemic" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "referencelist" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "flagtaxo" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "license" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "doi" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "datasettitle" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "logourl" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "datatype" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "organization" TEXT'
+        )
+        conn.commit()
+    logger.info("Columnas derivadas preparadas en %s", integrated)
+
+# -----------------------------------------------------------------------------------------------------
 # Preparación y traducción de valores de taxonrank y revisión de casos de nombres científicos vacíos en la tabla integrada
 # -----------------------------------------------------------------------------------------------------
 
@@ -610,7 +655,6 @@ def translate_taxonrank(db, table_name):
         conn.commit()
     logger.info("Taxonrank traducido en %s (%s filas actualizadas)", table_name, f"{result.rowcount:,}")
 
-
 # -----------------------------------------------------------------------------------------------------
 # Creación de indices y geometrías en la tabla integrada
 # -----------------------------------------------------------------------------------------------------
@@ -642,48 +686,6 @@ def add_geometry_and_indexes(db, table_name):
         logger.info("Columna geom creada con EPSG 4326 en %s", integrated)
 
         conn.commit()
-
-
-def prepare_integrated_columns(db, table_name):
-    # Crea todas las columnas derivadas usadas por validaciones y cruces.
-    integrated = table_name
-    with db.connect() as conn:
-        conn.execute(
-            f'ALTER TABLE "{integrated}" '
-            f'ADD COLUMN IF NOT EXISTS "verbatimstateprovince" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "verbatimcounty" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "codedane" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "stateprovincemgn" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "countymgn" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "maritimeregion" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "narinomaritimeregion" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "ismarine" BOOLEAN, '
-            f'ADD COLUMN IF NOT EXISTS "stateprovinceslug" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "countyslug" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "stateprovincevalidation" BOOLEAN, '
-            f'ADD COLUMN IF NOT EXISTS "countyvalidation" BOOLEAN, '
-            f'ADD COLUMN IF NOT EXISTS "flaggeo" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "cites" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "threatstatusuicn" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "threatstatusmads" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "exotic" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "exoticriskinvasion" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "invasiveness" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "invasive" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "transplanted" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "migratory" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "endemic" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "referencelist" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "flagtaxo" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "license" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "doi" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "datasettitle" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "logourl" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "datatype" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "organization" TEXT'
-        )
-        conn.commit()
-    logger.info("Columnas derivadas preparadas en %s", integrated)
 
 
 def normalize_stateprovince_county(db, table_name):
