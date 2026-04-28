@@ -473,33 +473,26 @@ def data_upload(db, filepath, table_name, columns):
 
 
 # -----------------------------------------------------------------------------------------------------
-# Renombrado de columnas en la tabla de staging dwc_sql
+# Renombrado de la tabla de staging dwc_sql
 # -----------------------------------------------------------------------------------------------------
 
-# Se renombra únicamente v_scientificname a verbatimscientificname.
-# Los demás campos con prefijo v_ ya no se conservan en el flujo actual.
-def rename_sql_columns(db, table_name, columns):
-    # Renombra v_scientificname a verbatimscientificname.
+# Se renombra la columna v_scientificname y la tabla de staging dwc_sql a dwc_integrated
+# para mantener integridad del flujo SQL en una sola transacción.
+def finalize_sql_table(db, old_name, new_name):
     with db.connect() as conn:
         conn.execute(
-            f'ALTER TABLE "{table_name}" RENAME COLUMN "v_scientificname" TO "verbatimscientificname"'
+            f'ALTER TABLE "{old_name}" RENAME COLUMN "v_scientificname" TO "verbatimscientificname"'
         )
         logger.info(
             "Columna renombrada: v_scientificname a verbatimscientificname en %s",
-            table_name,
+            old_name,
         )
-        conn.commit()
-
-# Se renombra la tabla de staging dwc_sql a dwc_integrated para integridad en el flujo de carga.
-def rename_table(db, old_name, new_name):
-    # Renombra una tabla en la base de datos. Si new_name ya existe, la elimina primero.
-    with db.connect() as conn:
         if _table_exists(db, new_name):
             conn.execute(f'DROP TABLE "{new_name}"')
             logger.info("DROP TABLE existente: %s", new_name)
         conn.execute(f'ALTER TABLE "{old_name}" RENAME TO "{new_name}"')
         conn.commit()
-    logger.info("Tabla renombrada: %s → %s", old_name, new_name)
+    logger.info("Tabla SQL finalizada: %s → %s", old_name, new_name)
 
 
 # -----------------------------------------------------------------------------------------------------

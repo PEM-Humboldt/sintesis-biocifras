@@ -37,8 +37,7 @@ from utils.functions import (
     register_load,
     tables_operations,
     data_upload,
-    rename_sql_columns,
-    rename_table,
+    finalize_sql_table,
     create_staging_indexes,
     create_integrated_table,
     fill_species_from_scientificname,
@@ -88,10 +87,7 @@ try:
         timer(data_upload, "Carga de datos desde SQL_FILE")(
             db, os.getenv('SQL_FILE'), table_names['sql'], SQL_COLS
         )
-        timer(rename_sql_columns, "Renombrando columnas verbatim en tabla SQL")(
-            db, table_names['sql'], SQL_COLS
-        )
-        timer(rename_table, "Renombrando tabla SQL a integrated")(
+        timer(finalize_sql_table, "Renombrando campos y tabla SQL a integrated")(
             db, table_names['sql'], integrated_name
         )
         table_names = {'integrated': integrated_name}
