@@ -555,7 +555,7 @@ def create_integrated_table(db, table_names):
 
 
 # -----------------------------------------------------------------------------------------------------
-# Preparación y traducción de valores de taxonrank a español en la tabla integrada
+# Preparación y traducción de valores de taxonrank y revisión de casos de nombres científicos vacíos en la tabla integrada
 # -----------------------------------------------------------------------------------------------------
 
 # Mapeo de valores de taxonrank a español.
@@ -573,17 +573,20 @@ _TAXONRANK_MAP = {
     'UNRANKED': '',
 }
 
-# Se llena el campo species con las dos primeras palabras de scientificname cuando taxonrank es 'SPECIES' y species es nulo o vacío.
+# Se llena el campo species con las dos primeras palabras de scientificname cuando taxonrank es
+# 'SPECIES' o 'Especie' y species es nulo o vacío.
 # Es equivalente a ejecutar la siguiente consulta:
 # UPDATE "dwc_integrated_{fecha}}" SET "species" = TRIM(split_part("scientificname", ' ', 1) || ' ' || split_part("scientificname", ' ', 2)) WHERE UPPER("taxonrank") = 'SPECIES' AND ("species" IS NULL OR TRIM("species") = '')
 def fill_species_from_scientificname(db, table_name):
     # Llena el campo species con las dos primeras palabras de scientificname
-    # cuando taxonrank es 'SPECIES' y species es nulo o vacío.
+    # cuando taxonrank es 'SPECIES' o 'Especie' y species es nulo o vacío.
     sql = (
         f'UPDATE "{table_name}" '
         f'SET "species" = TRIM(split_part("scientificname", \' \', 1) '
         f"|| ' ' || split_part(\"scientificname\", ' ', 2)) "
-        f'WHERE UPPER("taxonrank") = \'SPECIES\' '
+        f'WHERE UPPER(TRIM("taxonrank")) IN (\'SPECIES\', \'ESPECIE\') '
+        f'AND "scientificname" IS NOT NULL '
+        f'AND TRIM("scientificname") <> \'\' '
         f'AND ("species" IS NULL OR TRIM("species") = \'\')'
     )
     with db.connect() as conn:
