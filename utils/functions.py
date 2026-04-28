@@ -656,7 +656,7 @@ def translate_taxonrank(db, table_name):
     logger.info("Taxonrank traducido en %s (%s filas actualizadas)", table_name, f"{result.rowcount:,}")
 
 # -----------------------------------------------------------------------------------------------------
-# Creación de indices y geometrías en la tabla integrada
+# Ejecución de mantenimiento posterior a actualizaciones masivas
 # -----------------------------------------------------------------------------------------------------
 
 # Ejecuta mantenimiento posterior a actualizaciones masivas.
@@ -671,6 +671,9 @@ def _run_table_maintenance(db, table_name):
     finally:
         raw_conn.close()
 
+# -----------------------------------------------------------------------------------------------------
+# Creación de indices y geometrías en la tabla integrada
+# -----------------------------------------------------------------------------------------------------
 
 # Se hace una verificación de la extensión postgis para evitar errores de carga.
 def add_geometry_and_indexes(db, table_name):
@@ -686,7 +689,7 @@ def add_geometry_and_indexes(db, table_name):
         )
         logger.info("PK a campo gbifid agregada a %s", integrated)
 
-        # Se agrega la columna geom usando sintaxis nativa de PostGIS.
+        # Se agrega la columna geom de tipo Point, SRID 4326 de PostGIS.
         conn.execute(
             f'ALTER TABLE "{integrated}" '
             f'ADD COLUMN IF NOT EXISTS "geom" geometry(Point, 4326)'
@@ -714,12 +717,16 @@ def add_geometry_and_indexes(db, table_name):
             if batch_updated == 0:
                 break
             total_updated += batch_updated
-            logger.info("Geom batch en %s: %s filas (acumulado %s)", integrated, f"{batch_updated:,}", f"{total_updated:,}")
+            logger.info("Geom batch en %s: %s filas (total %s)", integrated, f"{batch_updated:,}", f"{total_updated:,}")
 
     logger.info("Columna geom creada con EPSG 4326 en %s (%s filas actualizadas)", integrated, f"{total_updated:,}")
     _run_table_maintenance(db, integrated)
     logger.info("Mantenimiento completado en %s (VACUUM ANALYZE)", integrated)
 
+
+# -----------------------------------------------------------------------------------------------------
+# Normalización de stateprovince y county en la tabla integrada
+# -----------------------------------------------------------------------------------------------------
 
 def normalize_stateprovince_county(db, table_name):
     # Normaliza stateprovince y preserva valores originales verbatim antes de validar geografía.
