@@ -558,21 +558,6 @@ def create_integrated_table(db, table_names):
 # Preparación y traducción de valores de taxonrank y revisión de casos de nombres científicos vacíos en la tabla integrada
 # -----------------------------------------------------------------------------------------------------
 
-# Mapeo de valores de taxonrank a español.
-_TAXONRANK_MAP = {
-    'SPECIES': 'Especie',
-    'SUBSPECIES': 'Subespecie',
-    'GENUS': 'Género',
-    'FAMILY': 'Familia',
-    'ORDER': 'Orden',
-    'CLASS': 'Clase',
-    'PHYLUM': 'Filo',
-    'KINGDOM': 'Reino',
-    'FORM': 'Forma',
-    'VARIETY': 'Variedad',
-    'UNRANKED': '',
-}
-
 # Se llena el campo species con las dos primeras palabras de scientificname cuando taxonrank es
 # 'SPECIES' o 'Especie' y species es nulo o vacío.
 # Es equivalente a ejecutar la siguiente consulta:
@@ -594,32 +579,31 @@ def fill_species_from_scientificname(db, table_name):
         conn.commit()
     logger.info("Campo species completado desde scientificname en %s (%s filas)", table_name, f"{result.rowcount:,}")
 
-# Se traduce el valor de taxonrank a español según el mapeo en _TAXONRANK_MAP.
-# Es equivalente a ejecutar la siguiente consulta:
-# UPDATE "dwc_integrated_{fecha}}" SET "taxonrank" = CASE UPPER("taxonrank")
-# WHEN 'SPECIES' THEN 'Especie'
-# WHEN 'SUBSPECIES' THEN 'Subespecie'
-# WHEN 'GENUS' THEN 'Género'
-# WHEN 'FAMILY' THEN 'Familia'
-# WHEN 'ORDER' THEN 'Orden'
-# WHEN 'CLASS' THEN 'Clase'
-# WHEN 'PHYLUM' THEN 'Filo'
-# WHEN 'KINGDOM' THEN 'Reino'
-# WHEN 'FORM' THEN 'Forma'
-# WHEN 'VARIETY' THEN 'Variedad'
-# WHEN 'UNRANKED' THEN ''
-# ELSE ''
-# END
+# Se traduce el valor de taxonrank a español con un CASE explícito para priorizar legibilidad.
+
 def translate_taxonrank(db, table_name):
-    cases = ' '.join(
-        f"WHEN 'UNRANKED' THEN ''" if eng == 'UNRANKED'
-        else f"WHEN '{eng}' THEN '{esp}'"
-        for eng, esp in _TAXONRANK_MAP.items()
-    )
     sql = (
-        f'UPDATE "{table_name}" '
-        f'SET "taxonrank" = CASE UPPER("taxonrank") {cases} '
-        f"ELSE '' END"
+        f'UPDATE "{table_name}" t '
+        'SET "taxonrank" = x."new_taxonrank" '
+        'FROM ('
+        f'    SELECT ctid, CASE UPPER(TRIM("taxonrank")) '
+        "    WHEN 'SPECIES' THEN 'Especie' "
+        "    WHEN 'SUBSPECIES' THEN 'Subespecie' "
+        "    WHEN 'GENUS' THEN 'Género' "
+        "    WHEN 'FAMILY' THEN 'Familia' "
+        "    WHEN 'ORDER' THEN 'Orden' "
+        "    WHEN 'CLASS' THEN 'Clase' "
+        "    WHEN 'PHYLUM' THEN 'Filo' "
+        "    WHEN 'KINGDOM' THEN 'Reino' "
+        "    WHEN 'FORM' THEN 'Forma' "
+        "    WHEN 'VARIETY' THEN 'Variedad' "
+        "    WHEN 'UNRANKED' THEN '' "
+        "    ELSE '' END AS \"new_taxonrank\" "
+        f'    FROM "{table_name}" '
+        '    WHERE "taxonrank" IS NOT NULL'
+        ') x '
+        'WHERE t.ctid = x.ctid '
+        'AND t."taxonrank" IS DISTINCT FROM x."new_taxonrank"'
     )
     with db.connect() as conn:
         result = conn.execute(sql)
