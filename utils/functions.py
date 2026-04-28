@@ -659,9 +659,24 @@ def translate_taxonrank(db, table_name):
 # Creación de indices y geometrías en la tabla integrada
 # -----------------------------------------------------------------------------------------------------
 
+# Ejecuta mantenimiento posterior a actualizaciones masivas.
+def _run_table_maintenance(db, table_name):
+    raw_conn = db.raw_connection()
+    try:
+        raw_conn.autocommit = True
+        with raw_conn.cursor() as cur:
+            cur.execute(f'VACUUM (ANALYZE) "{table_name}"')
+            if os.getenv('RUN_VACUUM_FULL', 'false').lower() == 'true':
+                cur.execute(f'VACUUM (FULL, ANALYZE) "{table_name}"')
+    finally:
+        raw_conn.close()
+
+
 # Se hace una verificación de la extensión postgis para evitar errores de carga.
 def add_geometry_and_indexes(db, table_name):
     integrated = table_name
+    geom_batch_size = int(os.getenv('GEOM_UPDATE_BATCH', '1000000'))
+    total_updated = 0
     with db.connect() as conn:
         conn.execute("CREATE EXTENSION IF NOT EXISTS postgis")
         logger.info("Chequeo de extension postgis")
@@ -671,21 +686,39 @@ def add_geometry_and_indexes(db, table_name):
         )
         logger.info("PK a campo gbifid agregada a %s", integrated)
 
-        # Se agrega la columna geom a la tabla con la proyección EPSG 4326 utilizando la función AddGeometryColumn de
-        # PostGIS. El nombre de la columna es geom para asegurar consistencia con el uso de postgis versión >= 2.0
+        # Se agrega la columna geom usando sintaxis nativa de PostGIS.
         conn.execute(
-            "SELECT AddGeometryColumn(%(table)s, 'geom', 4326, 'POINT', 2)"
-        , {'table': integrated})
-        # Se actualiza la columna geom con los valores de decimallongitude y decimallatitude para crear una geometría
-        # teniendo en cuenta la condición de que las columnas decimallatitude y decimallongitude no sean nulas.
-        conn.execute(
-            f'UPDATE "{integrated}" '
-            f'SET geom = ST_SetSRID(ST_MakePoint("decimallongitude", "decimallatitude"), 4326) '
-            f'WHERE "decimallatitude" IS NOT NULL AND "decimallongitude" IS NOT NULL'
+            f'ALTER TABLE "{integrated}" '
+            f'ADD COLUMN IF NOT EXISTS "geom" geometry(Point, 4326)'
         )
-        logger.info("Columna geom creada con EPSG 4326 en %s", integrated)
-
         conn.commit()
+
+        # Se actualiza geom por lotes para reducir picos de WAL, locks y crecimiento temporal.
+        while True:
+            result = conn.execute(
+                f'WITH batch AS ('
+                f'    SELECT ctid '
+                f'    FROM "{integrated}" '
+                f'    WHERE "geom" IS NULL '
+                f'      AND "decimallatitude" IS NOT NULL '
+                f'      AND "decimallongitude" IS NOT NULL '
+                f'    LIMIT {geom_batch_size}'
+                f') '
+                f'UPDATE "{integrated}" t '
+                f'SET "geom" = ST_SetSRID(ST_MakePoint(t."decimallongitude", t."decimallatitude"), 4326) '
+                f'FROM batch '
+                f'WHERE t.ctid = batch.ctid'
+            )
+            batch_updated = result.rowcount
+            conn.commit()
+            if batch_updated == 0:
+                break
+            total_updated += batch_updated
+            logger.info("Geom batch en %s: %s filas (acumulado %s)", integrated, f"{batch_updated:,}", f"{total_updated:,}")
+
+    logger.info("Columna geom creada con EPSG 4326 en %s (%s filas actualizadas)", integrated, f"{total_updated:,}")
+    _run_table_maintenance(db, integrated)
+    logger.info("Mantenimiento completado en %s (VACUUM ANALYZE)", integrated)
 
 
 def normalize_stateprovince_county(db, table_name):
