@@ -21,9 +21,9 @@ from psycopg2.extensions import connection as BaseConnection
 # Inicialización del logger
 logger = logging.getLogger('sintesis_biocifras')
 
-# Indica el número de filas que se van a cargar a la base de datos desde los archivos TSV de GBIF 
-# en cada batch para evitar bloqueos de memoria. 
-FLUSH_EVERY = 500_000
+# Indica el número de filas que se van a cargar a la base de datos desde los archivos TSV de GBIF
+# en cada batch para evitar bloqueos de memoria. Puede ajustarse con la variable de entorno FLUSH_EVERY.
+FLUSH_EVERY = int(os.getenv('FLUSH_EVERY', '500000'))
 
 
 class _Result:
@@ -414,24 +414,35 @@ def data_upload(db, filepath, table_name, columns):
 
     # Se crea una conexión raw para ejecutar el comando COPY de PostgreSQL usando psycopg2.
     raw_conn = db.raw_connection()
+    cur = None
     try:
         cur = raw_conn.cursor()
         cur.execute("SET synchronous_commit = OFF")
-        cur.execute("SET maintenance_work_mem = '4GB'")
+        # Parametros de sesion orientados a cargas masivas por COPY.
+        # maintenance_work_mem aporta sobre todo en CREATE INDEX, pero se deja configurable en .env.
+        cur.execute(f"SET maintenance_work_mem = '{os.getenv('MAINTENANCE_WORK_MEM', '2GB')}'")
+        cur.execute(f"SET work_mem = '{os.getenv('WORK_MEM', '64MB')}'")
         buffer = io.StringIO()
         writer = csv.writer(buffer, delimiter='\t', quoting=csv.QUOTE_MINIMAL)
         count = 0
         with open(filepath, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f, delimiter='\t', quoting=csv.QUOTE_NONE)
-            # Se lee la primera fila de nombres de columnas y se convierte a minúsculas para la ejecución del comando COPY de PostgreSQL.
-            reader.fieldnames = [name.lower() for name in reader.fieldnames]
+            reader = csv.reader(f, delimiter='\t', quoting=csv.QUOTE_NONE)
+            # Se arma una sola vez el mapeo columna -> posición para evitar overhead de DictReader por fila.
+            header = next(reader, None)
+            if not header:
+                raise ValueError(f"Archivo vacío o sin encabezado: {filepath}")
+            header_map = {name.lower(): idx for idx, name in enumerate(header)}
+            col_specs = []
+            for c in columns:
+                name = c.lower()
+                col_specs.append((header_map.get(name), name in _EPOCH_MS_COLS))
+
             for row in reader:
-                # Para cada fila, escribe en el buffer solo las columnas que necesita (las definidas en reader.fieldnames)
-                # Si la columna es de tipo timestamp (definida en _EPOCH_MS_COLS), convierte el epoch a ISO 8601.
+                # Para cada fila, escribe solo las columnas requeridas. Si falta columna o valor, usa cadena vacía.
                 writer.writerow([
-                    _epoch_ms_to_iso(row.get(c.lower(), '')) if c.lower() in _EPOCH_MS_COLS
-                    else row.get(c.lower(), '')
-                    for c in columns
+                    _epoch_ms_to_iso(row[idx]) if is_epoch and idx is not None and idx < len(row)
+                    else (row[idx] if idx is not None and idx < len(row) else '')
+                    for idx, is_epoch in col_specs
                 ])
                 count += 1
                 # Si el modulo de count con la variable FLUSH_EVERY se igual a 0 se envía el buffer a la base de datos
@@ -454,8 +465,10 @@ def data_upload(db, filepath, table_name, columns):
         raw_conn.rollback()
         raise
     finally:
-        cur.execute("RESET synchronous_commit")
-        cur.execute("RESET maintenance_work_mem")
+        if cur is not None:
+            cur.execute("RESET synchronous_commit")
+            cur.execute("RESET maintenance_work_mem")
+            cur.execute("RESET work_mem")
         raw_conn.close()
 
 
