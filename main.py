@@ -29,7 +29,7 @@ from utils.functions import (
     OCCURRENCE_COLS,
     VERBATIM_COLS,
     SQL_COLS,
-    get_engine,
+    get_db,
     check_connection,
     registry_table,
     datasets_table,
@@ -65,63 +65,63 @@ today = date.today()
 suffix = today.strftime('%Y%m%d')
 
 logger.info("Inicio del proceso de carga — sufijo: %s", suffix)
-# Obtener el motor de conexión a la base de datos PostgreSQL usando SQLAlchemy para crear el pool de conexiones
-engine = get_engine()
+# Obtener la conexión a la base de datos PostgreSQL usando psycopg2
+db = get_db()
 
-if not check_connection(engine):
+if not check_connection(db):
     logger.error("No se pudo conectar a la base de datos. Verifique los valores de conexión en .env")
     sys.exit(1)
 
 logger.info("Conectado a la base de datos.")
 
 try:
-    registry_table(engine)
-    datasets_table(engine)
-    publishers_table(engine)
+    registry_table(db)
+    datasets_table(db)
+    publishers_table(db)
 
     integrated_name = f'dwc_integrated_{suffix}'
 
     if UPLOAD_TYPE == "sql":
         table_names = timer(tables_operations, "Operaciones sobre la tabla de staging dwc_sql")(
-            engine, suffix, upload_type=UPLOAD_TYPE
+            db, suffix, upload_type=UPLOAD_TYPE
         )
         timer(data_upload, "Carga de datos desde SQL_FILE")(
-            engine, os.getenv('SQL_FILE'), table_names['sql'], SQL_COLS
+            db, os.getenv('SQL_FILE'), table_names['sql'], SQL_COLS
         )
         timer(rename_sql_columns, "Renombrando columnas verbatim en tabla SQL")(
-            engine, table_names['sql'], SQL_COLS
+            db, table_names['sql'], SQL_COLS
         )
         timer(rename_table, "Renombrando tabla SQL a integrated")(
-            engine, table_names['sql'], integrated_name
+            db, table_names['sql'], integrated_name
         )
         table_names = {'integrated': integrated_name}
         origin = 'sql download'
     else:
-        table_names = timer(tables_operations, "Operaciones sobre las tablas de staging dwc_occurrence y dwc_verbatim")(engine, suffix)
+        table_names = timer(tables_operations, "Operaciones sobre las tablas de staging dwc_occurrence y dwc_verbatim")(db, suffix)
         timer(data_upload, "Carga de datos desde occurrence.txt")(
-            engine, os.getenv('OCCURRENCE_FILE'), table_names['occurrence'], OCCURRENCE_COLS
+            db, os.getenv('OCCURRENCE_FILE'), table_names['occurrence'], OCCURRENCE_COLS
         )
         timer(data_upload, "Carga de datos desde verbatim.txt")(
-            engine, os.getenv('VERBATIM_FILE'), table_names['verbatim'], VERBATIM_COLS
+            db, os.getenv('VERBATIM_FILE'), table_names['verbatim'], VERBATIM_COLS
         )
-        timer(create_staging_indexes, "Creación de índices en las tablas de staging dwc_occurrence y dwc_verbatim")(engine, table_names)
-        timer(create_integrated_table, "Creación de la tabla integrada dwc_occurrence_integrated")(engine, table_names)
+        timer(create_staging_indexes, "Creación de índices en las tablas de staging dwc_occurrence y dwc_verbatim")(db, table_names)
+        timer(create_integrated_table, "Creación de la tabla integrada dwc_occurrence_integrated")(db, table_names)
         origin = 'regular download'
 
-    timer(fill_species_from_scientificname, "Completando campo species desde scientificname")(engine, table_names['integrated'])
-    timer(translate_taxonrank, "Traduciendo taxonrank a español en la tabla integrada")(engine, table_names['integrated'])
-    timer(prepare_integrated_columns, "Preparando columnas derivadas en la tabla integrada")(engine, table_names['integrated'])
-    timer(add_geometry_and_indexes, "Añadiendo PK y geometría base a la tabla integrada")(engine, table_names['integrated'])
-    timer(create_geom_index, "Creando índice espacial GIST en la tabla integrada")(engine, table_names['integrated'])
-    timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(engine, table_names['integrated'])
-    timer(normalize_stateprovince_county, "Normalizando stateprovince/county antes de validación")(engine, table_names['integrated'])
-    timer(validate_geography, "Validación geográfica")(engine, table_names['integrated'])
-    timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(engine, table_names['integrated'])
-    timer(taxonomic_joins, "Cruces taxonómicos con listados")(engine, table_names['integrated'])
-    timer(clean_threatstatus_fields, "Normalizando campos threatstatus antes de API")(engine, table_names['integrated'])
-    timer(gbif_api_calls, "Enriqueciendo metadatos de datasets y publicadores GBIF")(engine, table_names['integrated'])
+    timer(fill_species_from_scientificname, "Completando campo species desde scientificname")(db, table_names['integrated'])
+    timer(translate_taxonrank, "Traduciendo taxonrank a español en la tabla integrada")(db, table_names['integrated'])
+    timer(prepare_integrated_columns, "Preparando columnas derivadas en la tabla integrada")(db, table_names['integrated'])
+    timer(add_geometry_and_indexes, "Añadiendo PK y geometría base a la tabla integrada")(db, table_names['integrated'])
+    timer(create_geom_index, "Creando índice espacial GIST en la tabla integrada")(db, table_names['integrated'])
+    timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(db, table_names['integrated'])
+    timer(normalize_stateprovince_county, "Normalizando stateprovince/county antes de validación")(db, table_names['integrated'])
+    timer(validate_geography, "Validación geográfica")(db, table_names['integrated'])
+    timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(db, table_names['integrated'])
+    timer(taxonomic_joins, "Cruces taxonómicos con listados")(db, table_names['integrated'])
+    timer(clean_threatstatus_fields, "Normalizando campos threatstatus antes de API")(db, table_names['integrated'])
+    timer(gbif_api_calls, "Enriqueciendo metadatos de datasets y publicadores GBIF")(db, table_names['integrated'])
 
-    register_load(engine, table_names, today, origin)
+    register_load(db, table_names, today, origin)
     logger.info("Proceso completado.")
 
 except (FileNotFoundError, ValueError) as e:
@@ -132,4 +132,4 @@ except Exception as e:
     sys.exit(1)
 
 finally:
-    engine.dispose()
+    db.dispose()

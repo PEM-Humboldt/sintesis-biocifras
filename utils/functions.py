@@ -1,9 +1,7 @@
 # Autor: Diego Moreno-Vargas (github.com/damorenov)
 # Última modificación: 2026-03-04
-"""
-Este archivo contiene las funciones para la carga de datos desde GBIF a un servidor PostgreSQL + PostGIS
-para el proceso de análisis y síntesis de cifras para Biodiversidad en cifras.
-"""
+# Este archivo contiene las funciones para la carga de datos desde GBIF a un servidor PostgreSQL + PostGIS
+# para el proceso de análisis y síntesis de cifras para Biodiversidad en cifras.
 import csv
 import io
 import json
@@ -17,7 +15,8 @@ import urllib.error
 import urllib.request
 
 # Libreria para la conexión a la base de datos PostgreSQL y PostGIS
-from sqlalchemy import create_engine, inspect, text
+import psycopg2
+from psycopg2.extensions import connection as BaseConnection
 
 # Inicialización del logger
 logger = logging.getLogger('sintesis_biocifras')
@@ -25,6 +24,64 @@ logger = logging.getLogger('sintesis_biocifras')
 # Indica el número de filas que se van a cargar a la base de datos desde los archivos TSV de GBIF 
 # en cada batch para evitar bloqueos de memoria. 
 FLUSH_EVERY = 500_000
+
+
+class _Result:
+    def __init__(self, rows, rowcount):
+        self._rows = rows
+        self.rowcount = rowcount
+
+    def fetchall(self):
+        return self._rows
+
+
+class PsycopgConnection(BaseConnection):
+    def execute(self, sql, params=None):
+        with self.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall() if cur.description else []
+            return _Result(rows=rows, rowcount=cur.rowcount)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
+def _table_exists(db, table_name):
+    with db.connect() as conn:
+        result = conn.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name = %(table_name)s
+            )
+            """,
+            {'table_name': table_name},
+        )
+        row = result.fetchall()[0]
+        return bool(row[0])
+
+
+class PsycopgEngine:
+    def __init__(self, **conn_kwargs):
+        self._conn_kwargs = conn_kwargs
+
+    def connect(self):
+        return psycopg2.connect(
+            **self._conn_kwargs,
+            connection_factory=PsycopgConnection,
+        )
+
+    def raw_connection(self):
+        return psycopg2.connect(**self._conn_kwargs)
+
+    def dispose(self):
+        # Sin pool explícito: no hay recursos compartidos para liberar.
+        return None
 
 # ------------------------------------------------------------------------------------------------------------
 # Definición de listas y variables para el proceso de carga desde los archivos TSV de GBIF
@@ -34,7 +91,7 @@ FLUSH_EVERY = 500_000
 # Se pueden agregar más columnas si es necesario. Pero no olvidar agregar las columnas a las tablas de staging
 # en las listas _OCCURRENCE_TYPES, _VERBATIM_TYPES, _SQL_COL_TYPES.
 # Se decide usar este enfoque de listas para poder agregar o reducir el número de columnas de manera dinámica
-# sin tener que modificar directamente consultas SQL en RAW o a través de SQLAlchemy.
+# sin tener que modificar directamente consultas SQL en RAW.
 # ------------------------------------------------------------------------------------------------------------
 
 OCCURRENCE_COLS = [
@@ -130,22 +187,24 @@ _SQL_COL_TYPES = {
 # Funciones para la conexión y chequeo de conexión a la base de datos PostgreSQL
 # ------------------------------------------------------------------------------
 
-# Se crea el motor de conexión a la base de datos PostgreSQL usando SQLAlchemy para inicializar el pool de conexiones
-def get_engine():
-    url = (
-        f"postgresql+psycopg2://{os.getenv('DATABASE_USER')}:{os.getenv('DATABASE_PASS')}"
-        f"@{os.getenv('DATABASE_HOST')}:{os.getenv('DATABASE_PORT')}/{os.getenv('DATABASE_NAME')}"
+# Se crea el conector a la base de datos PostgreSQL usando psycopg2.
+def get_db():
+    return PsycopgEngine(
+        user=os.getenv('DATABASE_USER'),
+        password=os.getenv('DATABASE_PASS'),
+        host=os.getenv('DATABASE_HOST'),
+        port=os.getenv('DATABASE_PORT'),
+        dbname=os.getenv('DATABASE_NAME'),
     )
-    return create_engine(url)
 
 # Comprueba la conexión a la base de datos PostgreSQL a través de la ejecución de una consulta y la verificación de privilegio de creación de base de datos.
-def check_connection(engine):
+def check_connection(db):
     try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-            conn.execute(text(
+        with db.connect() as conn:
+            conn.execute("SELECT 1")
+            conn.execute(
                 "SELECT has_database_privilege(current_user, current_database(), 'CREATE')"
-            ))
+            )
         logger.info("Conexion exitosa a %s@%s:%s/%s",
                      os.getenv('DATABASE_USER'), os.getenv('DATABASE_HOST'),
                      os.getenv('DATABASE_PORT'), os.getenv('DATABASE_NAME'))
@@ -159,7 +218,7 @@ def check_connection(engine):
 # Creación de tablas de soporte y llenado de la tabla de registro de versiones de tablas (table_registry)
 # -------------------------------------------------------------------------------------------------------
 
-def registry_table(engine):
+def registry_table(db):
     ddl = """
     CREATE TABLE IF NOT EXISTS table_registry (
         id SERIAL PRIMARY KEY,
@@ -169,16 +228,16 @@ def registry_table(engine):
         is_latest BOOLEAN NOT NULL DEFAULT TRUE
     );
     """
-    with engine.connect() as conn:
-        conn.execute(text(ddl))
+    with db.connect() as conn:
+        conn.execute(ddl)
         conn.commit()
     logger.info("Tabla table_registry creada")
 
 
-def datasets_table(engine):
-    """Crea la tabla gbif_datasets para almacenar metadatos de datasets obtenidos desde la API de GBIF."""
-    with engine.connect() as conn:
-        conn.execute(text("""
+def datasets_table(db):
+    # Crea la tabla gbif_datasets para almacenar metadatos de datasets obtenidos desde la API de GBIF.
+    with db.connect() as conn:
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS gbif_datasets (
                 datasetkey TEXT PRIMARY KEY,
                 license TEXT,
@@ -188,55 +247,55 @@ def datasets_table(engine):
                 datatype TEXT,
                 created DATE
             );
-        """))
-        conn.execute(text("""
+        """)
+        conn.execute("""
             ALTER TABLE gbif_datasets
             ADD COLUMN IF NOT EXISTS created DATE;
-        """))
-        conn.execute(text("""
+        """)
+        conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_gbif_datasets_datasetkey
                 ON gbif_datasets USING BTREE (datasetkey);
-        """))
+        """)
         conn.commit()
     logger.info("Tabla gbif_datasets creada")
 
 
-def publishers_table(engine):
-    """Crea la tabla gbif_publishers para almacenar metadatos de publicadores obtenidos desde la API de GBIF."""
-    with engine.connect() as conn:
-        conn.execute(text("""
+def publishers_table(db):
+    # Crea la tabla gbif_publishers para almacenar metadatos de publicadores obtenidos desde la API de GBIF.
+    with db.connect() as conn:
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS gbif_publishers (
                 publishingorgkey TEXT PRIMARY KEY,
                 organization TEXT
             );
-        """))
-        conn.execute(text("""
+        """)
+        conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_gbif_publishers_publishingorgkey
                 ON gbif_publishers USING BTREE (publishingorgkey);
-        """))
+        """)
         conn.commit()
     logger.info("Tabla gbif_publishers creada")
 
 
 # Con la tabla table_registry se maneja el campo is_latest para indicar
 # la versión más reciente de las tablas de staging y la tabla integrada.
-def register_load(engine, table_names, created_at, origin):
+def register_load(db, table_names, created_at, origin):
     prefixes = {
         'occurrence': 'dwc_occurrence_%',
         'verbatim': 'dwc_verbatim_%',
         'integrated': 'dwc_integrated_%',
     }
-    with engine.connect() as conn:
+    with db.connect() as conn:
         for key, table_name in table_names.items():
             prefix = prefixes[key]
-            conn.execute(text(
+            conn.execute(
                 "UPDATE table_registry SET is_latest = FALSE "
-                "WHERE table_name LIKE :prefix AND is_latest = TRUE"
-            ), {'prefix': prefix})
-            conn.execute(text(
+                "WHERE table_name LIKE %(prefix)s AND is_latest = TRUE"
+            , {'prefix': prefix})
+            conn.execute(
                 "INSERT INTO table_registry (table_name, origin, created_at, is_latest) "
-                "VALUES (:table_name, :origin, :created_at, TRUE)"
-            ), {'table_name': table_name, 'origin': origin, 'created_at': created_at})
+                "VALUES (%(table_name)s, %(origin)s, %(created_at)s, TRUE)"
+            , {'table_name': table_name, 'origin': origin, 'created_at': created_at})
         conn.commit()
     logger.info("Datos cargados en table_registry.")
 
@@ -256,11 +315,10 @@ def _build_create_ddl(table_name, col_types):
     return f'CREATE UNLOGGED TABLE "{table_name}" ({cols});'
 
 # Para mantener un historial de las tablas de staging y la tabla integrada se utiliza un sufijo de fecha.
-def tables_operations(engine, suffix, upload_type="default"):
-    """Crea tablas con sufijo de fecha. Si ya existen, las elimina y vuelven a crear para garantizar una carga limpia. 
-    Retorna dict con nombres de las tablas para seguir el proceso de carga.
-    Se tienen el cuenta el tipo de carga: sql o regular.
-    """
+def tables_operations(db, suffix, upload_type="default"):
+    # Crea tablas con sufijo de fecha. Si ya existen, las elimina y vuelven a crear para garantizar una carga limpia.
+    # Retorna dict con nombres de las tablas para seguir el proceso de carga.
+    # Se tienen el cuenta el tipo de carga: sql o regular.
     if upload_type == "sql":
         table_names = {'sql': f'dwc_sql_{suffix}'}
         type_maps = {'sql': _SQL_COL_TYPES}
@@ -277,15 +335,14 @@ def tables_operations(engine, suffix, upload_type="default"):
         }
         keys = ('occurrence', 'verbatim')
 
-    insp = inspect(engine)
-    with engine.connect() as conn:
+    with db.connect() as conn:
         for key in keys:
             tname = table_names[key]
-            if insp.has_table(tname):
-                conn.execute(text(f'DROP TABLE "{tname}"'))
+            if _table_exists(db, tname):
+                conn.execute(f'DROP TABLE "{tname}"')
                 logger.info("DROP TABLE %s", tname)
             ddl = _build_create_ddl(tname, type_maps[key])
-            conn.execute(text(ddl))
+            conn.execute(ddl)
             logger.info("CREATE TABLE %s", tname)
         conn.commit()
     return table_names
@@ -302,15 +359,15 @@ def tables_operations(engine, suffix, upload_type="default"):
 
 # El otro punto importante es que al cargar los datos se utiliza copy_expert de psycopg2 ya que es más eficiente
 # al poder hacer cargas por batch y no tener que leer todo el archivo en memoria.
-# Ahora, por qué se utiliza copy_expert y no copy_from o directamente a través de SQLAlchemy.execute o una 
+# Ahora, por qué se utiliza copy_expert y no copy_from o directamente con execute o una 
 # consulta SQL en raw o con el comando COPY de PostgreSQL?
 # La principal son los caracteres especiales desde los archivos de GBIF, además de tener control sobre la cantidad
 # de filas a cargar por batch.
 # COPY si bien es más rápido, hay que procesar los caracteres especiales antes de la carga, pero sobre todo los
 # archivos deben estár en el mismo servidor de la base de datos, aunque puede solventarse con salida STDOUT.
-# SQLAlchemy.execute es más flexible, pero espera siempre que se retorne el resultado de la consulta, por lo que
+# execute es más flexible, pero espera siempre que se retorne el resultado de la consulta, por lo que
 # en procesos de carga masiva no es la mejor opción.
-# Por último, el comando de copy_expert de psycopg2 se ejecuta a través de la conexión raw de SQLAlchemy,
+# Por último, el comando de copy_expert de psycopg2 se ejecuta a través de la conexión raw de psycopg2,
 # que crea un cursor y se ejecuta el comando de copy_expert con el buffer de datos procesado por csv.writer.
 
 # Columnas cargadas desde los archivos TSV de GBIF que se deben convertir a ISO 8601 para columnas TIMESTAMPTZ
@@ -321,7 +378,7 @@ _EPOCH_MS_COLS = {'lastinterpreted', 'lastparsed'}
 
 # Función de apoyo para convertir epoch en milisegundos a ISO 8601 para columnas TIMESTAMPTZ.
 def _epoch_ms_to_iso(value):
-    """Convierte epoch en milisegundos a ISO 8601 para columnas TIMESTAMPTZ."""
+    # Convierte epoch en milisegundos a ISO 8601 para columnas TIMESTAMPTZ.
     if not value:
         return value
     try:
@@ -329,12 +386,12 @@ def _epoch_ms_to_iso(value):
     except (ValueError, OSError):
         return value
 
-def data_upload(engine, filepath, table_name, columns):
+def data_upload(db, filepath, table_name, columns):
     # Confirma que los archivos de datos definidos en el .env existen.
     # Si no existen, se retorna un error y se elimina la tabla de staging.
     if not filepath or not Path(filepath).is_file():
-        with engine.connect() as conn:
-            conn.execute(text(f'DROP TABLE IF EXISTS "{table_name}"'))
+        with db.connect() as conn:
+            conn.execute(f'DROP TABLE IF EXISTS "{table_name}"')
             conn.commit()
         logger.info("DROP TABLE %s (sin archivo de datos para cargar)", table_name)
         msg = (
@@ -355,8 +412,8 @@ def data_upload(engine, filepath, table_name, columns):
         f"FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t', NULL '')"
     )
 
-    # Se crea la conexión raw de SQLAlchemy para ejecutar el comando COPY de PostgreSQL usando psycopg2.
-    raw_conn = engine.raw_connection()
+    # Se crea una conexión raw para ejecutar el comando COPY de PostgreSQL usando psycopg2.
+    raw_conn = db.raw_connection()
     try:
         cur = raw_conn.cursor()
         cur.execute("SET synchronous_commit = OFF")
@@ -408,12 +465,12 @@ def data_upload(engine, filepath, table_name, columns):
 
 # Se renombra únicamente v_scientificname a verbatimscientificname.
 # Los demás campos con prefijo v_ ya no se conservan en el flujo actual.
-def rename_sql_columns(engine, table_name, columns):
-    """Renombra v_scientificname a verbatimscientificname """
-    with engine.connect() as conn:
-        conn.execute(text(
+def rename_sql_columns(db, table_name, columns):
+    # Renombra v_scientificname a verbatimscientificname.
+    with db.connect() as conn:
+        conn.execute(
             f'ALTER TABLE "{table_name}" RENAME COLUMN "v_scientificname" TO "verbatimscientificname"'
-        ))
+        )
         logger.info(
             "Columna renombrada: v_scientificname a verbatimscientificname en %s",
             table_name,
@@ -421,14 +478,13 @@ def rename_sql_columns(engine, table_name, columns):
         conn.commit()
 
 # Se renombra la tabla de staging dwc_sql a dwc_integrated para integridad en el flujo de carga.
-def rename_table(engine, old_name, new_name):
-    """Renombra una tabla en la base de datos. Si new_name ya existe, la elimina primero."""
-    insp = inspect(engine)
-    with engine.connect() as conn:
-        if insp.has_table(new_name):
-            conn.execute(text(f'DROP TABLE "{new_name}"'))
+def rename_table(db, old_name, new_name):
+    # Renombra una tabla en la base de datos. Si new_name ya existe, la elimina primero.
+    with db.connect() as conn:
+        if _table_exists(db, new_name):
+            conn.execute(f'DROP TABLE "{new_name}"')
             logger.info("DROP TABLE existente: %s", new_name)
-        conn.execute(text(f'ALTER TABLE "{old_name}" RENAME TO "{new_name}"'))
+        conn.execute(f'ALTER TABLE "{old_name}" RENAME TO "{new_name}"')
         conn.commit()
     logger.info("Tabla renombrada: %s → %s", old_name, new_name)
 
@@ -443,12 +499,12 @@ def rename_table(engine, old_name, new_name):
 # Sólo se crea el indice. Para las coordenadas no se crean indices en los staging ya que no se pueden
 # copiar directamente a la tabla integrada.
 
-def create_staging_indexes(engine, table_names):
-    with engine.connect() as conn:
+def create_staging_indexes(db, table_names):
+    with db.connect() as conn:
         for key in ('occurrence', 'verbatim'):
             tname = table_names[key]
             idx_name = f"idx_{tname}_gbifid"
-            conn.execute(text(f'CREATE INDEX "{idx_name}" ON "{tname}" ("gbifid")'))
+            conn.execute(f'CREATE INDEX "{idx_name}" ON "{tname}" ("gbifid")')
             logger.info("Indice creado: %s", idx_name)
         conn.commit()
 
@@ -465,7 +521,7 @@ def create_staging_indexes(engine, table_names):
 # FROM dwc_occurrence_fecha o
 # INNER JOIN dwc_verbatim_fecha v ON o.gbifID = v.gbifID;
 
-def create_integrated_table(engine, table_names):
+def create_integrated_table(db, table_names):
     occurrence = table_names['occurrence']
     verbatim = table_names['verbatim']
     integrated = table_names['integrated']
@@ -476,10 +532,9 @@ def create_integrated_table(engine, table_names):
     verbatim_cols = ', '.join(
         f'v."{c.lower()}"' for c in VERBATIM_COLS if c != 'gbifid'
     )
-    insp = inspect(engine)
-    with engine.connect() as conn:
-        if insp.has_table(integrated):
-            conn.execute(text(f'DROP TABLE "{integrated}"'))
+    with db.connect() as conn:
+        if _table_exists(db, integrated):
+            conn.execute(f'DROP TABLE "{integrated}"')
             logger.info("DROP TABLE existente: %s", integrated)
 
         sql = (
@@ -488,7 +543,7 @@ def create_integrated_table(engine, table_names):
             f'FROM "{occurrence}" o '
             f'INNER JOIN "{verbatim}" v ON o."gbifid" = v."gbifid"'
         )
-        conn.execute(text(sql))
+        conn.execute(sql)
         conn.commit()
     logger.info("Tabla integrada creada: %s", integrated)
 
@@ -515,9 +570,9 @@ _TAXONRANK_MAP = {
 # Se llena el campo species con las dos primeras palabras de scientificname cuando taxonrank es 'SPECIES' y species es nulo o vacío.
 # Es equivalente a ejecutar la siguiente consulta:
 # UPDATE "dwc_integrated_{fecha}}" SET "species" = TRIM(split_part("scientificname", ' ', 1) || ' ' || split_part("scientificname", ' ', 2)) WHERE UPPER("taxonrank") = 'SPECIES' AND ("species" IS NULL OR TRIM("species") = '')
-def fill_species_from_scientificname(engine, table_name):
-    """Llena el campo species con las dos primeras palabras de scientificname
-    cuando taxonrank es 'SPECIES' y species es nulo o vacío."""
+def fill_species_from_scientificname(db, table_name):
+    # Llena el campo species con las dos primeras palabras de scientificname
+    # cuando taxonrank es 'SPECIES' y species es nulo o vacío.
     sql = (
         f'UPDATE "{table_name}" '
         f'SET "species" = TRIM(split_part("scientificname", \' \', 1) '
@@ -525,8 +580,8 @@ def fill_species_from_scientificname(engine, table_name):
         f'WHERE UPPER("taxonrank") = \'SPECIES\' '
         f'AND ("species" IS NULL OR TRIM("species") = \'\')'
     )
-    with engine.connect() as conn:
-        result = conn.execute(text(sql))
+    with db.connect() as conn:
+        result = conn.execute(sql)
         conn.commit()
     logger.info("Campo species completado desde scientificname en %s (%s filas)", table_name, f"{result.rowcount:,}")
 
@@ -546,7 +601,7 @@ def fill_species_from_scientificname(engine, table_name):
 # WHEN 'UNRANKED' THEN ''
 # ELSE ''
 # END
-def translate_taxonrank(engine, table_name):
+def translate_taxonrank(db, table_name):
     cases = ' '.join(
         f"WHEN 'UNRANKED' THEN ''" if eng == 'UNRANKED'
         else f"WHEN '{eng}' THEN '{esp}'"
@@ -557,8 +612,8 @@ def translate_taxonrank(engine, table_name):
         f'SET "taxonrank" = CASE UPPER("taxonrank") {cases} '
         f"ELSE '' END"
     )
-    with engine.connect() as conn:
-        result = conn.execute(text(sql))
+    with db.connect() as conn:
+        result = conn.execute(sql)
         conn.commit()
     logger.info("Taxonrank traducido en %s (%s filas actualizadas)", table_name, f"{result.rowcount:,}")
 
@@ -568,39 +623,39 @@ def translate_taxonrank(engine, table_name):
 # -----------------------------------------------------------------------------------------------------
 
 # Se hace una verificación de la extensión postgis para evitar errores de carga.
-def add_geometry_and_indexes(engine, table_name):
+def add_geometry_and_indexes(db, table_name):
     integrated = table_name
-    with engine.connect() as conn:
-        conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
+    with db.connect() as conn:
+        conn.execute("CREATE EXTENSION IF NOT EXISTS postgis")
         logger.info("Chequeo de extension postgis")
 
-        conn.execute(text(
+        conn.execute(
             f'ALTER TABLE "{integrated}" ADD PRIMARY KEY ("gbifid")'
-        ))
+        )
         logger.info("PK a campo gbifid agregada a %s", integrated)
 
         # Se agrega la columna geom a la tabla con la proyección EPSG 4326 utilizando la función AddGeometryColumn de
         # PostGIS. El nombre de la columna es geom para asegurar consistencia con el uso de postgis versión >= 2.0
-        conn.execute(text(
-            "SELECT AddGeometryColumn(:table, 'geom', 4326, 'POINT', 2)"
-        ), {'table': integrated})
+        conn.execute(
+            "SELECT AddGeometryColumn(%(table)s, 'geom', 4326, 'POINT', 2)"
+        , {'table': integrated})
         # Se actualiza la columna geom con los valores de decimallongitude y decimallatitude para crear una geometría
         # teniendo en cuenta la condición de que las columnas decimallatitude y decimallongitude no sean nulas.
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" '
             f'SET geom = ST_SetSRID(ST_MakePoint("decimallongitude", "decimallatitude"), 4326) '
             f'WHERE "decimallatitude" IS NOT NULL AND "decimallongitude" IS NOT NULL'
-        ))
+        )
         logger.info("Columna geom creada con EPSG 4326 en %s", integrated)
 
         conn.commit()
 
 
-def prepare_integrated_columns(engine, table_name):
-    """Crea todas las columnas derivadas usadas por validaciones y cruces."""
+def prepare_integrated_columns(db, table_name):
+    # Crea todas las columnas derivadas usadas por validaciones y cruces.
     integrated = table_name
-    with engine.connect() as conn:
-        conn.execute(text(
+    with db.connect() as conn:
+        conn.execute(
             f'ALTER TABLE "{integrated}" '
             f'ADD COLUMN IF NOT EXISTS "verbatimstateprovince" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "verbatimcounty" TEXT, '
@@ -633,40 +688,40 @@ def prepare_integrated_columns(engine, table_name):
             f'ADD COLUMN IF NOT EXISTS "logourl" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "datatype" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "organization" TEXT'
-        ))
+        )
         conn.commit()
     logger.info("Columnas derivadas preparadas en %s", integrated)
 
 
-def normalize_stateprovince_county(engine, table_name):
-    """Normaliza stateprovince y preserva valores originales verbatim antes de validar geografía."""
+def normalize_stateprovince_county(db, table_name):
+    # Normaliza stateprovince y preserva valores originales verbatim antes de validar geografía.
     integrated = table_name
-    with engine.connect() as conn:
+    with db.connect() as conn:
         # Preserva valores originales una sola vez
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" '
             f'SET "verbatimstateprovince" = COALESCE("verbatimstateprovince", "stateprovince"), '
             f'    "verbatimcounty" = COALESCE("verbatimcounty", "county")'
-        ))
+        )
 
         # Normalización por alias: comparación case-insensitive con trim
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" i '
             f'SET "stateprovince" = a."validatedstateprovince" '
             f'FROM "geo_stateprovince_validation" a '
             f'WHERE UPPER(TRIM(i."stateprovince")) = UPPER(TRIM(a."originalstateprovince"))'
-        ))
+        )
 
         # Región marítima Invemar (post-join): si hay valor en narinomaritimeregion, departamento Nariño
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" '
             f'SET "stateprovince" = \'Nariño\' '
             f'WHERE NULLIF(TRIM(COALESCE("narinomaritimeregion", \'\')), \'\') IS NOT NULL'
-        ))
+        )
 
         # Asignación explícita por coordenada:
         # si stateprovince es nulo o no está en la lista validada, usar stateprovincemgn.
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" i '
             f'SET "stateprovince" = i."stateprovincemgn" '
             f'WHERE i."stateprovincemgn" IS NOT NULL '
@@ -678,18 +733,18 @@ def normalize_stateprovince_county(engine, table_name):
             f'        WHERE UPPER(TRIM(v."validatedstateprovince")) = UPPER(TRIM(i."stateprovince"))'
             f'    )'
             f')'
-        ))
+        )
 
         # Limpieza de espacios en stateprovince y county
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" '
             f'SET "stateprovince" = TRIM("stateprovince"), '
             f'    "county" = TRIM("county") '
             f'WHERE "stateprovince" IS NOT NULL OR "county" IS NOT NULL'
-        ))
+        )
 
         # Normalización slug de municipio:
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" '
             f'SET "countyslug" = NULLIF(TRIM(BOTH \'-\' FROM REGEXP_REPLACE('
             f'    REGEXP_REPLACE('
@@ -720,11 +775,11 @@ def normalize_stateprovince_county(engine, table_name):
             f'    ), '
             f'    \'-+\', \'-\', \'g\''
             f')), \'\')'
-        ))
+        )
 
 
         # stateprovinceslug desde geo_divipola para subtype = departamento
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" i '
             f'SET "stateprovinceslug" = d."slug" '
             f'FROM ('
@@ -734,20 +789,20 @@ def normalize_stateprovince_county(engine, table_name):
             f') d '
             f'WHERE i."stateprovince" IS NOT NULL '
             f'AND UPPER(TRIM(i."stateprovince")) = d."dept_name"'
-        ))
+        )
 
         # Reglas de validación de countyslug por utilizando stateprovinceslug
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" i '
             f'SET "countyslug" = o."countyslugresolved" '
             f'FROM "geo_countyslug_validation" o '
             f'WHERE i."stateprovinceslug" = o."stateprovinceslug" '
             f'AND i."countyslug" = o."countyslug" '
             f'AND i."countyslug" IS DISTINCT FROM o."countyslugresolved"'
-        ))
+        )
 
         # Actualiza county desde la divipola para subtype = municipio.
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" i '
             f'SET "county" = m."name", '
             f'    "countyslug" = m."slug" '
@@ -755,11 +810,11 @@ def normalize_stateprovince_county(engine, table_name):
             f'WHERE m."subtype" = \'municipio\' '
             f'AND m."parentslug" = i."stateprovinceslug" '
             f'AND m."slug" = i."countyslug"'
-        ))
+        )
 
         # Fallback: cruza por nombre del municipio derivado por coordenada (countymgn)
         # cuando no hubo match por slug.
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" i '
             f'SET "county" = m."name", '
             f'    "countyslug" = m."slug" '
@@ -768,31 +823,31 @@ def normalize_stateprovince_county(engine, table_name):
             f'AND m."parentslug" = i."stateprovinceslug" '
             f'AND i."countymgn" IS NOT NULL '
             f'AND UPPER(TRIM(m."name")) = UPPER(TRIM(i."countymgn"))'
-        ))
+        )
 
         # Regla: si el municipio no corresponde al departamento, se limpia county.
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" i '
             f'SET "county" = \'\' '
             f'FROM "geo_divipola" m '
             f'WHERE m."subtype" = \'municipio\' '
             f'AND m."slug" = i."countyslug" '
             f'AND m."parentslug" IS DISTINCT FROM i."stateprovinceslug"'
-        ))
+        )
 
         # Regla: si county queda vacío y el departamento textual coincide con el de coordenada,
         # usar municipio por coordenada (countymgn).
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" '
             f'SET "county" = "countymgn" '
             f'WHERE ("county" IS NULL OR TRIM("county") = \'\') '
             f'AND "countymgn" IS NOT NULL '
             f'AND UPPER(TRIM(COALESCE("stateprovince", \'\'))) = '
             f'    UPPER(TRIM(COALESCE("stateprovincemgn", \'\')))'
-        ))
+        )
 
         # Cruce final con DIVIPOLA: código DANE e indicador marino.
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" i '
             f'SET "codedane" = m."codedane", '
             f'    "ismarine" = m."ismarine" '
@@ -800,10 +855,10 @@ def normalize_stateprovince_county(engine, table_name):
             f'WHERE m."subtype" = \'municipio\' '
             f'AND m."parentslug" = i."stateprovinceslug" '
             f'AND m."slug" = i."countyslug"'
-        ))
+        )
 
         # Fallback cuando falta countyslug pero county quedó verbatim.
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" i '
             f'SET "codedane" = m."codedane", '
             f'    "ismarine" = m."ismarine" '
@@ -813,39 +868,39 @@ def normalize_stateprovince_county(engine, table_name):
             f'AND i."county" IS NOT NULL '
             f'AND UPPER(TRIM(m."name")) = UPPER(TRIM(i."county")) '
             f'AND (i."codedane" IS NULL OR i."ismarine" IS NULL)'
-        ))
+        )
 
         # Regla legado: para Bogotá se elimina el slug de municipio.
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" '
             f'SET "countyslug" = \'\' '
             f'WHERE "stateprovinceslug" = \'bogota-dc\''
-        ))
+        )
 
         conn.commit()
     logger.info("Normalización de stateprovince/county y slugs completada en %s", integrated)
 
 
-def create_geom_index(engine, table_name):
-    """Crea índice espacial GIST para optimizar cruces espaciales."""
+def create_geom_index(db, table_name):
+    # Crea índice espacial GIST para optimizar cruces espaciales.
     integrated = table_name
-    with engine.connect() as conn:
+    with db.connect() as conn:
         idx_geom = f"idx_{integrated}_geom"
-        conn.execute(text(
+        conn.execute(
             f'CREATE INDEX IF NOT EXISTS "{idx_geom}" ON "{integrated}" USING GIST (geom)'
-        ))
+        )
         logger.info("Indice GIST creado: %s", idx_geom)
         conn.commit()
 
 
-def create_species_index(engine, table_name):
-    """Crea índice BTREE sobre species para optimizar cruces taxonómicos."""
+def create_species_index(db, table_name):
+    # Crea índice BTREE sobre species para optimizar cruces taxonómicos.
     integrated = table_name
-    with engine.connect() as conn:
+    with db.connect() as conn:
         idx_species = f"idx_{integrated}_species"
-        conn.execute(text(
+        conn.execute(
             f'CREATE INDEX IF NOT EXISTS "{idx_species}" ON "{integrated}" USING BTREE ("species")'
-        ))
+        )
         logger.info("Indice BTREE creado: %s", idx_species)
         conn.commit()
 
@@ -859,40 +914,40 @@ def create_species_index(engine, table_name):
 # para estandarización de nombres. Por ejemplo, 'Norte De Santander' a 'Norte de Santander'.
 _LOWERCASE_WORDS = (' De ', ' Y ', ' Del ', ' La ')
 
-def spatials_joins(engine, table_name):
+def spatials_joins(db, table_name):
     # Cruza la tabla integrada con MGN_ADM_MPIO_2025 y Invemar_maritime_regions usando ST_Intersects
     # y aplica INITCAP a los campos de departamento y municipio para estandarización de nombres.
     integrated = table_name
-    with engine.connect() as conn:
-        conn.execute(text(
+    with db.connect() as conn:
+        conn.execute(
             f'UPDATE "{integrated}" i '
             f'SET "stateprovincemgn" = m."dpto_cnmbr", '
             f'    "countymgn" = m."mpio_cnmbr" '
             f'FROM "MGN_ADM_MPIO_2025" m '
             f'WHERE i.geom IS NOT NULL '
             f'AND ST_Intersects(i.geom, m.geom)'
-        ))
+        )
         logger.info("Cruce espacial con MGN_ADM_MPIO_2025 completado en %s", integrated)
 
 
 
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" i '
             f'SET "maritimeregion" = m."DESCRIP" '
             f'FROM "INVEMAR_MARITIME_REGIONS" m '
             f'WHERE i.geom IS NOT NULL '
             f'AND i."countymgn" IS NULL '
             f'AND ST_Intersects(i.geom, m.geom)'
-        ))
+        )
         logger.info("Cruce espacial con INVEMAR_MARITIME_REGIONS completado en %s", integrated)
 
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" i '
             f'SET "narinomaritimeregion" = m."Nombre" '
             f'FROM "NARINO_MARITIME_REGION" m '
             f'WHERE i.geom IS NOT NULL '
             f'AND ST_Intersects(i.geom, m.geom)'
-        ))
+        )
 
         logger.info("Cruce espacial con INVEMAR_MARITIME_REGIONS completado en %s", integrated)
 
@@ -904,10 +959,10 @@ def spatials_joins(engine, table_name):
             for word in _LOWERCASE_WORDS:
                 expr = f"REPLACE({expr}, '{word}', '{word.lower()}')"
 
-            conn.execute(text(
+            conn.execute(
                 f'UPDATE "{integrated}" SET "{col}" = {expr} '
                 f'WHERE "{col}" IS NOT NULL'
-            ))
+            )
 
             logger.info("INITCAP con estandarizaciones de nombres aplicado a %s en %s", col, integrated)
 
@@ -915,12 +970,12 @@ def spatials_joins(engine, table_name):
         # Bogotá, D.C. -> Bogotá, D. C.
         # Santiago de Cali -> Cali
 
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" '
             f'SET "stateprovincemgn" = \'Bogotá, D. C.\', '
             f'    "countymgn" = \'Bogotá, D. C.\' '
             f'WHERE "stateprovincemgn" = \'Bogotá, D.C.\' '
-        ))
+        )
 
         logger.info("Reemplazos manuales para mantener consistencia con la salida de sintesis de cifras de biodiversidad completados en %s", integrated)
         conn.commit()
@@ -930,7 +985,7 @@ def spatials_joins(engine, table_name):
 # --------------------------------------------------------------------------------------------------------------------------------------
 
 # Se valida el estado y el municipio contra los valores del cruce con capas MGN y Zonas marítimas
-def validate_geography(engine, table_name):
+def validate_geography(db, table_name):
     integrated = table_name
 
     val_case = (
@@ -950,11 +1005,11 @@ def validate_geography(engine, table_name):
     sp_case = val_case.format(orig='stateprovince', mgn='stateprovincemgn')
     co_case = val_case.format(orig='county', mgn='countymgn')
 
-    with engine.connect() as conn:
+    with db.connect() as conn:
         # Una sola pasada: calcula las validaciones booleanas y flaggeo simultáneamente.
         # flaggeo se deriva inline de las mismas expresiones CASE para evitar depender
         # de columnas que aún no tienen valor en esta misma sentencia.
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" SET '
             f'"stateprovincevalidation" = {sp_case}, '
             f'"countyvalidation" = {co_case}, '
@@ -973,7 +1028,7 @@ def validate_geography(engine, table_name):
             f'AND "decimallatitude" IS NULL AND "decimallongitude" IS NULL '
             f"THEN 'Sin coordenadas' "
             f'ELSE NULL END'
-        ))
+        )
         logger.info("Validación geográfica completada en %s", integrated)
 
         conn.commit()
@@ -1029,10 +1084,10 @@ _TAXONOMIC_JOINS = {
 }
 
 
-def taxonomic_joins(engine, table_name):
-    """Cruza la tabla integrada con tablas taxonómicas por el campo species."""
+def taxonomic_joins(db, table_name):
+    # Cruza la tabla integrada con tablas taxonómicas por el campo species.
     integrated = table_name
-    with engine.connect() as conn:
+    with db.connect() as conn:
         for src_table, config in _TAXONOMIC_JOINS.items():
             col_map = config['columns']
 
@@ -1049,25 +1104,25 @@ def taxonomic_joins(engine, table_name):
                 else:
                     set_parts.append(f'"{dest}" = t."{src}"')
             set_clause = ', '.join(set_parts)
-            conn.execute(text(
+            conn.execute(
                 f'UPDATE "{integrated}" i '
                 f'SET {set_clause} '
                 f'FROM "{src_table}" t '
                 f'WHERE i."species" = t."species"'
-            ))
+            )
             logger.info("Join con %s completado en %s", src_table, integrated)
 
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" '
             f"SET \"referencelist\" = 'Presente en lista taxonómica: ' || \"referencelist\" "
             f'WHERE "referencelist" IS NOT NULL'
-        ))
+        )
         logger.info("Campo referencelist actualizado en %s", integrated)
 
         classes_list = ', '.join(f"'{c}'" for c in _FLAGTAXO_CLASSES)
         orders_list = ', '.join(f"'{o}'" for o in _FLAGTAXO_ORDERS)
 
-        conn.execute(text(
+        conn.execute(
             f'UPDATE "{integrated}" SET "flagtaxo" = CASE '
             f'WHEN "referencelist" IS NULL AND "species" IS NOT NULL '
             f"AND \"transplanted\" = 'Trasplantada' "
@@ -1091,7 +1146,7 @@ def taxonomic_joins(engine, table_name):
             f'AND "order" IN ({orders_list}) '
             f"THEN 'Ausente en lista taxonómica' "
             f'ELSE NULL END'
-        ))
+        )
         logger.info("Campo flagtaxo completado en %s", integrated)
 
         conn.commit()
@@ -1100,17 +1155,17 @@ def taxonomic_joins(engine, table_name):
 # Normalización de campos threatstatus
 # --------------------------------------------------------------------------------------------------------------------------------------
 
-def clean_threatstatus_fields(engine, table_name):
-    """Normaliza threatstatus y agrega sufijos por fuente (IUCN/MADS)."""
+def clean_threatstatus_fields(db, table_name):
+    # Normaliza threatstatus y agrega sufijos por fuente (IUCN/MADS).
     integrated = table_name
-    with engine.connect() as conn:
-        conn.execute(text(
+    with db.connect() as conn:
+        conn.execute(
             f'UPDATE "{integrated}" '
             f'SET "threatstatusuicn" = NULLIF(TRIM("threatstatusuicn"), \'\'), '
             f'    "threatstatusmads" = NULLIF(TRIM("threatstatusmads"), \'\') '
             f'WHERE "threatstatusuicn" IS NOT NULL OR "threatstatusmads" IS NOT NULL'
-        ))
-        conn.execute(text(
+        )
+        conn.execute(
             f'UPDATE "{integrated}" '
             f'SET "threatstatusuicn" = CASE '
             f'    WHEN "threatstatusuicn" IS NULL THEN NULL '
@@ -1122,7 +1177,7 @@ def clean_threatstatus_fields(engine, table_name):
             f'    WHEN "threatstatusmads" LIKE \'%_MADS\' THEN "threatstatusmads" '
             f'    ELSE "threatstatusmads" || \'_MADS\' '
             f'END'
-        ))
+        )
         logger.info("Validación de threatstatus (vacíos/sufijos por fuente) completada en %s", integrated)
         conn.commit()
 
@@ -1162,7 +1217,7 @@ def _fetch_gbif_json(url, key, label, retries=5, backoff_factor=0.5):
 
 
 def _parse_gbif_created_date(value):
-    """Convierte el campo created de GBIF a date (YYYY-MM-DD)."""
+    # Convierte el campo created de GBIF a date (YYYY-MM-DD).
     if not value:
         return None
     if isinstance(value, datetime):
@@ -1184,10 +1239,10 @@ def _parse_gbif_created_date(value):
     return None
 
 
-def gbif_api_calls(engine, table_name):
-    """Enriquece la tabla integrada con metadatos de datasets y publicadores desde tablas locales y API GBIF."""
+def gbif_api_calls(db, table_name):
+    # Enriquece la tabla integrada con metadatos de datasets y publicadores desde tablas locales y API GBIF.
     integrated = table_name
-    with engine.connect() as conn:
+    with db.connect() as conn:
         dataset_refresh_sql = (
             f'UPDATE "{integrated}" i '
             f'SET "license" = d."license", '
@@ -1200,7 +1255,7 @@ def gbif_api_calls(engine, table_name):
         )
         dataset_upsert_sql = """
             INSERT INTO gbif_datasets (datasetkey, license, doi, datasettitle, logourl, datatype, created)
-            VALUES (:datasetkey, :license, :doi, :datasettitle, :logourl, :datatype, :created)
+            VALUES (%(datasetkey)s, %(license)s, %(doi)s, %(datasettitle)s, %(logourl)s, %(datatype)s, %(created)s)
             ON CONFLICT (datasetkey) DO UPDATE
             SET license = EXCLUDED.license,
                 doi = EXCLUDED.doi,
@@ -1211,12 +1266,12 @@ def gbif_api_calls(engine, table_name):
         """
 
         # Backfill local y detección de faltantes para datasets
-        conn.execute(text(dataset_refresh_sql))
-        dataset_rows = conn.execute(text(
+        conn.execute(dataset_refresh_sql)
+        dataset_rows = conn.execute(
             f'SELECT DISTINCT "datasetkey" '
             f'FROM "{integrated}" '
             f'WHERE "datasetkey" IS NOT NULL AND "datasettitle" IS NULL'
-        )).fetchall()
+        ).fetchall()
         missing_dataset_keys = [row[0] for row in dataset_rows if row[0]]
         logger.info(
             "Datasetkeys sin datasettitle en %s: %s",
@@ -1253,7 +1308,7 @@ def gbif_api_calls(engine, table_name):
                         continue
 
                     ds_fetched += 1
-                    conn.execute(text(dataset_upsert_sql), {
+                    conn.execute(dataset_upsert_sql, {
                         'datasetkey': data.get('key') or key,
                         'license': data.get('license'),
                         'doi': data.get('doi'),
@@ -1264,7 +1319,7 @@ def gbif_api_calls(engine, table_name):
                     })
                     ds_upserted += 1
                     time.sleep(0.002)
-        conn.execute(text(dataset_refresh_sql))
+        conn.execute(dataset_refresh_sql)
 
         publisher_refresh_sql = (
             f'UPDATE "{integrated}" i '
@@ -1274,18 +1329,18 @@ def gbif_api_calls(engine, table_name):
         )
         publisher_upsert_sql = """
             INSERT INTO gbif_publishers (publishingorgkey, organization)
-            VALUES (:publishingorgkey, :organization)
+            VALUES (%(publishingorgkey)s, %(organization)s)
             ON CONFLICT (publishingorgkey) DO UPDATE
             SET organization = EXCLUDED.organization
         """
 
         # Backfill local y detección de faltantes para publishers
-        conn.execute(text(publisher_refresh_sql))
-        publisher_rows = conn.execute(text(
+        conn.execute(publisher_refresh_sql)
+        publisher_rows = conn.execute(
             f'SELECT DISTINCT "publishingorgkey" '
             f'FROM "{integrated}" '
             f'WHERE "publishingorgkey" IS NOT NULL AND "organization" IS NULL'
-        )).fetchall()
+        ).fetchall()
         missing_publisher_keys = [row[0] for row in publisher_rows if row[0]]
         logger.info(
             "PublishingOrgKeys sin organization en %s: %s",
@@ -1322,13 +1377,13 @@ def gbif_api_calls(engine, table_name):
                         continue
 
                     pub_fetched += 1
-                    conn.execute(text(publisher_upsert_sql), {
+                    conn.execute(publisher_upsert_sql, {
                         'publishingorgkey': data.get('key') or key,
                         'organization': data.get('title'),
                     })
                     pub_upserted += 1
                     time.sleep(0.002)
-        conn.execute(text(publisher_refresh_sql))
+        conn.execute(publisher_refresh_sql)
 
         conn.commit()
 
