@@ -25,6 +25,7 @@ from datetime import date
 from dotenv import load_dotenv
 # Importar funciones de utils/logger.py y utils/functions.py
 from utils.logger import setup_logger, timer
+from utils.connection import get_db, check_connection
 
 load_dotenv()
 
@@ -32,8 +33,6 @@ from utils.functions import (
     OCCURRENCE_COLS,
     VERBATIM_COLS,
     SQL_COLS,
-    get_db,
-    check_connection,
     registry_table,
     datasets_table,
     publishers_table,

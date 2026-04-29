@@ -14,9 +14,7 @@ from pathlib import Path
 import urllib.error
 import urllib.request
 
-# Libreria para la conexión a la base de datos PostgreSQL y PostGIS
-import psycopg2
-from psycopg2.extensions import connection as BaseConnection
+from utils.connection import table_exists
 
 # Inicialización del logger
 logger = logging.getLogger('sintesis_biocifras')
@@ -25,63 +23,6 @@ logger = logging.getLogger('sintesis_biocifras')
 # en cada batch para evitar bloqueos de memoria. Puede ajustarse con la variable de entorno FLUSH_EVERY.
 FLUSH_EVERY = int(os.getenv('FLUSH_EVERY', '500000'))
 
-
-class _Result:
-    def __init__(self, rows, rowcount):
-        self._rows = rows
-        self.rowcount = rowcount
-
-    def fetchall(self):
-        return self._rows
-
-
-class PsycopgConnection(BaseConnection):
-    def execute(self, sql, params=None):
-        with self.cursor() as cur:
-            cur.execute(sql, params)
-            rows = cur.fetchall() if cur.description else []
-            return _Result(rows=rows, rowcount=cur.rowcount)
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        try:
-            return super().__exit__(exc_type, exc_value, traceback)
-        finally:
-            self.close()
-
-
-def _table_exists(db, table_name):
-    with db.connect() as conn:
-        result = conn.execute(
-            """
-            SELECT EXISTS (
-                SELECT 1
-                FROM information_schema.tables
-                WHERE table_schema = 'public'
-                  AND table_name = %(table_name)s
-            )
-            """,
-            {'table_name': table_name},
-        )
-        row = result.fetchall()[0]
-        return bool(row[0])
-
-
-class PsycopgEngine:
-    def __init__(self, **conn_kwargs):
-        self._conn_kwargs = conn_kwargs
-
-    def connect(self):
-        return psycopg2.connect(
-            **self._conn_kwargs,
-            connection_factory=PsycopgConnection,
-        )
-
-    def raw_connection(self):
-        return psycopg2.connect(**self._conn_kwargs)
-
-    def dispose(self):
-        # Sin pool explícito: no hay recursos compartidos para liberar.
-        return None
 
 # ------------------------------------------------------------------------------------------------------------
 # Definición de listas y variables para el proceso de carga desde los archivos TSV de GBIF
@@ -182,37 +123,6 @@ _SQL_COL_TYPES = {
     'repatriated': 'BOOLEAN', 'publishingcountry': 'TEXT',
     'lastinterpreted': 'TIMESTAMPTZ', 'lastparsed': 'TIMESTAMPTZ',
 }
-
-# ------------------------------------------------------------------------------
-# Funciones para la conexión y chequeo de conexión a la base de datos PostgreSQL
-# ------------------------------------------------------------------------------
-
-# Se crea el conector a la base de datos PostgreSQL usando psycopg2.
-def get_db():
-    return PsycopgEngine(
-        user=os.getenv('DATABASE_USER'),
-        password=os.getenv('DATABASE_PASS'),
-        host=os.getenv('DATABASE_HOST'),
-        port=os.getenv('DATABASE_PORT'),
-        dbname=os.getenv('DATABASE_NAME'),
-    )
-
-# Comprueba la conexión a la base de datos PostgreSQL a través de la ejecución de una consulta y la verificación de privilegio de creación de base de datos.
-def check_connection(db):
-    try:
-        with db.connect() as conn:
-            conn.execute("SELECT 1")
-            conn.execute(
-                "SELECT has_database_privilege(current_user, current_database(), 'CREATE')"
-            )
-        logger.info("Conexion exitosa a %s@%s:%s/%s",
-                     os.getenv('DATABASE_USER'), os.getenv('DATABASE_HOST'),
-                     os.getenv('DATABASE_PORT'), os.getenv('DATABASE_NAME'))
-        return True
-    except Exception as e:
-        logger.error("Fallo de conexion: %s", e)
-        return False
-
 
 # -------------------------------------------------------------------------------------------------------
 # Creación de tablas de soporte y llenado de la tabla de registro de versiones de tablas (table_registry)
@@ -338,7 +248,7 @@ def tables_operations(db, suffix, upload_type="default"):
     with db.connect() as conn:
         for key in keys:
             tname = table_names[key]
-            if _table_exists(db, tname):
+            if table_exists(db, tname):
                 conn.execute(f'DROP TABLE "{tname}"')
                 logger.info("DROP TABLE %s", tname)
             ddl = _build_create_ddl(tname, type_maps[key])
@@ -523,7 +433,7 @@ def finalize_sql_table(db, old_name, new_name):
             f'    "verbatimcounty" = "county" '
             f'WHERE "verbatimstateprovince" IS NULL OR "verbatimcounty" IS NULL'
         )
-        if _table_exists(db, new_name):
+        if table_exists(db, new_name):
             conn.execute(f'DROP TABLE "{new_name}"')
             logger.info("DROP TABLE existente: %s", new_name)
         conn.execute(f'ALTER TABLE "{old_name}" RENAME TO "{new_name}"')
@@ -575,7 +485,7 @@ def create_integrated_table(db, table_names):
         f'v."{c.lower()}"' for c in VERBATIM_COLS if c != 'gbifid'
     )
     with db.connect() as conn:
-        if _table_exists(db, integrated):
+        if table_exists(db, integrated):
             conn.execute(f'DROP TABLE "{integrated}"')
             logger.info("DROP TABLE existente: %s", integrated)
 
