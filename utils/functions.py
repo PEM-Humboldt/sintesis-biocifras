@@ -511,6 +511,18 @@ def finalize_sql_table(db, old_name, new_name):
             "Columna renombrada: v_scientificname a verbatimscientificname en %s",
             old_name,
         )
+        # En flujo SQL se preservan valores verbatim antes del rename final.
+        conn.execute(
+            f'ALTER TABLE "{old_name}" '
+            f'ADD COLUMN IF NOT EXISTS "verbatimstateprovince" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "verbatimcounty" TEXT'
+        )
+        conn.execute(
+            f'UPDATE "{old_name}" '
+            f'SET "verbatimstateprovince" = "stateprovince", '
+            f'    "verbatimcounty" = "county" '
+            f'WHERE "verbatimstateprovince" IS NULL OR "verbatimcounty" IS NULL'
+        )
         if _table_exists(db, new_name):
             conn.execute(f'DROP TABLE "{new_name}"')
             logger.info("DROP TABLE existente: %s", new_name)
@@ -569,7 +581,9 @@ def create_integrated_table(db, table_names):
 
         sql = (
             f'CREATE TABLE "{integrated}" AS '
-            f'SELECT {occurrence_cols}, {verbatim_cols} '
+            f'SELECT {occurrence_cols}, {verbatim_cols}, '
+            f'o."stateprovince" AS "verbatimstateprovince", '
+            f'v."county" AS "verbatimcounty" '
             f'FROM "{occurrence}" o '
             f'INNER JOIN "{verbatim}" v ON o."gbifid" = v."gbifid"'
         )
@@ -588,8 +602,6 @@ def create_join_validation_columns(db, table_name):
     with db.connect() as conn:
         conn.execute(
             f'ALTER TABLE "{integrated}" '
-            f'ADD COLUMN IF NOT EXISTS "verbatimstateprovince" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "verbatimcounty" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "codedane" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "stateprovincemgn" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "countymgn" TEXT, '
@@ -735,13 +747,6 @@ def normalize_stateprovince_county(db, table_name):
     # Normaliza stateprovince y preserva valores originales verbatim antes de validar geografía.
     integrated = table_name
     with db.connect() as conn:
-        # Preserva valores originales una sola vez
-        conn.execute(
-            f'UPDATE "{integrated}" '
-            f'SET "verbatimstateprovince" = COALESCE("verbatimstateprovince", "stateprovince"), '
-            f'    "verbatimcounty" = COALESCE("verbatimcounty", "county")'
-        )
-
         # Normalización por alias: comparación case-insensitive con trim
         conn.execute(
             f'UPDATE "{integrated}" i '
