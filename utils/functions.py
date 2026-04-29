@@ -376,6 +376,20 @@ def tables_operations(db, suffix, upload_type="default"):
 # por lo que se debe convertir a ISO 8601 para que sea legible y que se pueda cargar a la base de datos.
 _EPOCH_MS_COLS = {'lastinterpreted', 'lastparsed'}
 
+_TAXONRANK_TRANSLATION = {
+    'SPECIES': 'Especie',
+    'SUBSPECIES': 'Subespecie',
+    'GENUS': 'Género',
+    'FAMILY': 'Familia',
+    'ORDER': 'Orden',
+    'CLASS': 'Clase',
+    'PHYLUM': 'Filo',
+    'KINGDOM': 'Reino',
+    'FORM': 'Forma',
+    'VARIETY': 'Variedad',
+    'UNRANKED': '',
+}
+
 # Función de apoyo para convertir epoch en milisegundos a ISO 8601 para columnas TIMESTAMPTZ.
 def _epoch_ms_to_iso(value):
     # Convierte epoch en milisegundos a ISO 8601 para columnas TIMESTAMPTZ.
@@ -385,6 +399,15 @@ def _epoch_ms_to_iso(value):
         return datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc).isoformat()
     except (ValueError, OSError):
         return value
+
+
+def _translate_taxonrank_value(value):
+    if value is None:
+        return ''
+    normalized = str(value).strip().upper()
+    if not normalized:
+        return ''
+    return _TAXONRANK_TRANSLATION.get(normalized, '')
 
 def data_upload(db, filepath, table_name, columns):
     # Confirma que los archivos de datos definidos en el .env existen.
@@ -435,14 +458,15 @@ def data_upload(db, filepath, table_name, columns):
             col_specs = []
             for c in columns:
                 name = c.lower()
-                col_specs.append((header_map.get(name), name in _EPOCH_MS_COLS))
+                col_specs.append((header_map.get(name), name in _EPOCH_MS_COLS, name == 'taxonrank'))
 
             for row in reader:
                 # Para cada fila, escribe solo las columnas requeridas. Si falta columna o valor, usa cadena vacía.
                 writer.writerow([
                     _epoch_ms_to_iso(row[idx]) if is_epoch and idx is not None and idx < len(row)
+                    else _translate_taxonrank_value(row[idx]) if is_taxonrank and idx is not None and idx < len(row)
                     else (row[idx] if idx is not None and idx < len(row) else '')
-                    for idx, is_epoch in col_specs
+                    for idx, is_epoch, is_taxonrank in col_specs
                 ])
                 count += 1
                 # Si el modulo de count con la variable FLUSH_EVERY se igual a 0 se envía el buffer a la base de datos
@@ -624,37 +648,6 @@ def fill_species_from_scientificname(db, table_name):
         conn.commit()
     logger.info("Campo species completado desde scientificname en %s (%s filas)", table_name, f"{result.rowcount:,}")
 
-# Se traduce el valor de taxonrank a español con un CASE explícito para priorizar legibilidad.
-
-def translate_taxonrank(db, table_name):
-    sql = (
-        f'UPDATE "{table_name}" t '
-        'SET "taxonrank" = x."new_taxonrank" '
-        'FROM ('
-        f'    SELECT ctid, CASE UPPER(TRIM("taxonrank")) '
-        "    WHEN 'SPECIES' THEN 'Especie' "
-        "    WHEN 'SUBSPECIES' THEN 'Subespecie' "
-        "    WHEN 'GENUS' THEN 'Género' "
-        "    WHEN 'FAMILY' THEN 'Familia' "
-        "    WHEN 'ORDER' THEN 'Orden' "
-        "    WHEN 'CLASS' THEN 'Clase' "
-        "    WHEN 'PHYLUM' THEN 'Filo' "
-        "    WHEN 'KINGDOM' THEN 'Reino' "
-        "    WHEN 'FORM' THEN 'Forma' "
-        "    WHEN 'VARIETY' THEN 'Variedad' "
-        "    WHEN 'UNRANKED' THEN '' "
-        "    ELSE '' END AS \"new_taxonrank\" "
-        f'    FROM "{table_name}" '
-        '    WHERE "taxonrank" IS NOT NULL'
-        ') x '
-        'WHERE t.ctid = x.ctid '
-        'AND t."taxonrank" IS DISTINCT FROM x."new_taxonrank"'
-    )
-    with db.connect() as conn:
-        result = conn.execute(sql)
-        conn.commit()
-    logger.info("Taxonrank traducido en %s (%s filas actualizadas)", table_name, f"{result.rowcount:,}")
-
 # -----------------------------------------------------------------------------------------------------
 # Ejecución de mantenimiento posterior a actualizaciones masivas
 # -----------------------------------------------------------------------------------------------------
@@ -723,6 +716,16 @@ def add_geometry_and_indexes(db, table_name):
     _run_table_maintenance(db, integrated)
     logger.info("Mantenimiento completado en %s (VACUUM ANALYZE)", integrated)
 
+def create_geom_index(db, table_name):
+    # Crea índice espacial GIST para optimizar cruces espaciales.
+    integrated = table_name
+    with db.connect() as conn:
+        idx_geom = f"idx_{integrated}_geom"
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS "{idx_geom}" ON "{integrated}" USING GIST (geom)'
+        )
+        conn.commit()
+    logger.info("Indice GIST creado en %s", idx_geom)
 
 # -----------------------------------------------------------------------------------------------------
 # Normalización de stateprovince y county en la tabla integrada
@@ -914,19 +917,6 @@ def normalize_stateprovince_county(db, table_name):
 
         conn.commit()
     logger.info("Normalización de stateprovince/county y slugs completada en %s", integrated)
-
-
-def create_geom_index(db, table_name):
-    # Crea índice espacial GIST para optimizar cruces espaciales.
-    integrated = table_name
-    with db.connect() as conn:
-        idx_geom = f"idx_{integrated}_geom"
-        conn.execute(
-            f'CREATE INDEX IF NOT EXISTS "{idx_geom}" ON "{integrated}" USING GIST (geom)'
-        )
-        logger.info("Indice GIST creado: %s", idx_geom)
-        conn.commit()
-
 
 def create_species_index(db, table_name):
     # Crea índice BTREE sobre species para optimizar cruces taxonómicos.

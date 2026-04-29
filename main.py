@@ -25,6 +25,9 @@ from datetime import date
 from dotenv import load_dotenv
 # Importar funciones de utils/logger.py y utils/functions.py
 from utils.logger import setup_logger, timer
+
+load_dotenv()
+
 from utils.functions import (
     OCCURRENCE_COLS,
     VERBATIM_COLS,
@@ -41,7 +44,6 @@ from utils.functions import (
     create_staging_indexes,
     create_integrated_table,
     fill_species_from_scientificname,
-    translate_taxonrank,
     add_geometry_and_indexes,
     create_join_validation_columns,
     create_geom_index,
@@ -55,8 +57,6 @@ from utils.functions import (
 )
 
 UPLOAD_TYPE = "sql"
-
-load_dotenv()
 
 logger = setup_logger(os.getenv('LOG_FILE_PATH'))
 today = date.today()
@@ -106,16 +106,15 @@ try:
 
     timer(create_join_validation_columns, "Crando columnas para cruces y validaciones en la tabla integrada")(db, table_names['integrated'])
     timer(fill_species_from_scientificname, "Completando campo species desde scientificname")(db, table_names['integrated'])
-    timer(translate_taxonrank, "Traduciendo taxonrank a español en la tabla integrada")(db, table_names['integrated'])
-    timer(add_geometry_and_indexes, "Añadiendo PK y geometría base a la tabla integrada")(db, table_names['integrated'])
-    timer(create_geom_index, "Creando índice espacial GIST en la tabla integrada")(db, table_names['integrated'])
-    timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(db, table_names['integrated'])
-    timer(normalize_stateprovince_county, "Normalizando stateprovince/county antes de validación")(db, table_names['integrated'])
-    timer(validate_geography, "Validación geográfica")(db, table_names['integrated'])
-    timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(db, table_names['integrated'])
-    timer(taxonomic_joins, "Cruces taxonómicos con listados")(db, table_names['integrated'])
-    timer(clean_threatstatus_fields, "Normalizando campos threatstatus antes de API")(db, table_names['integrated'])
-    timer(gbif_api_calls, "Enriqueciendo metadatos de datasets y publicadores GBIF")(db, table_names['integrated'])
+    #timer(add_geometry_and_indexes, "Añadiendo PK y geometría base a la tabla integrada")(db, table_names['integrated'])
+    #timer(create_geom_index, "Creando índice espacial GIST en la tabla integrada")(db, table_names['integrated'])
+    #timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(db, table_names['integrated'])
+    #timer(normalize_stateprovince_county, "Normalizando stateprovince/county antes de validación")(db, table_names['integrated'])
+    #timer(validate_geography, "Validación geográfica")(db, table_names['integrated'])
+    #timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(db, table_names['integrated'])
+    #timer(taxonomic_joins, "Cruces taxonómicos con listados")(db, table_names['integrated'])
+    #timer(clean_threatstatus_fields, "Normalizando campos threatstatus antes de API")(db, table_names['integrated'])
+    #timer(gbif_api_calls, "Enriqueciendo metadatos de datasets y publicadores GBIF")(db, table_names['integrated'])
 
     register_load(db, table_names, today, origin)
     logger.info("Proceso completado.")
