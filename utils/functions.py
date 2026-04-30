@@ -679,6 +679,133 @@ def add_geometry_and_indexes(db, table_name):
     _run_table_maintenance(db, integrated)
     logger.info("Vacuum completado en %s", integrated)
 
+# --------------------------------------------------------------------------------------------------------------------------------------
+# Cruces espaciales con la tabla MGN_ADM_MPIO_2025 (división político-administrativa) e Invemar_maritime_regions (regiones marítimas)
+# --------------------------------------------------------------------------------------------------------------------------------------
+
+
+# Palabras que se deben convertir a minúsculas después de INITCAP en los campos de departamento y municipio
+# para estandarización de nombres. Por ejemplo, 'Norte De Santander' a 'Norte de Santander'.
+_LOWERCASE_WORDS = (' De ', ' Y ', ' Del ', ' La ')
+
+def spatials_joins(db, table_name):
+    # Cruza la tabla integrada con MGN_ADM_MPIO_2025 y Invemar_maritime_regions usando ST_Intersects
+    # y aplica INITCAP a los campos de departamento y municipio para estandarización de nombres.
+    # Parámetros:
+    # - db: Conexión al pool de conexiones de PostgreSQL.
+    # - table_name: Nombre de la tabla integrada dwc_integrated.
+    # Retorna:
+    # - None: No retorna nada.
+    integrated = table_name
+    spatial_batch_size = int(os.getenv('GEOM_UPDATE_BATCH', '1000000'))
+    with db.connect() as conn:
+        total_mgn = 0
+        while True:
+            result = conn.execute(
+                f'WITH batch AS ('
+                f'    SELECT ctid '
+                f'    FROM "{integrated}" '
+                f'    WHERE geom IS NOT NULL '
+                f'      AND "stateprovincemgn" IS NULL '
+                f'    LIMIT {spatial_batch_size}'
+                f') '
+                f'UPDATE "{integrated}" i '
+                f'SET "stateprovincemgn" = m."dpto_cnmbr", '
+                f'    "countymgn" = m."mpio_cnmbr" '
+                f'FROM batch b, "MGN_ADM_MPIO_2025" m '
+                f'WHERE i.ctid = b.ctid '
+                f'AND ST_Intersects(i.geom, m.geom)'
+            )
+            batch_updated = result.rowcount
+            conn.commit()
+            if batch_updated == 0:
+                break
+            total_mgn += batch_updated
+            logger.info("Cruce MGN batch en %s: %s filas (total %s)", integrated, f"{batch_updated:,}", f"{total_mgn:,}")
+        logger.info("Cruce espacial con MGN_ADM_MPIO_2025 completado en %s (%s filas)", integrated, f"{total_mgn:,}")
+
+        total_invemar = 0
+        while True:
+            result = conn.execute(
+                f'WITH batch AS ('
+                f'    SELECT ctid '
+                f'    FROM "{integrated}" '
+                f'    WHERE geom IS NOT NULL '
+                f'      AND "countymgn" IS NULL '
+                f'      AND "maritimeregion" IS NULL '
+                f'    LIMIT {spatial_batch_size}'
+                f') '
+                f'UPDATE "{integrated}" i '
+                f'SET "maritimeregion" = m."DESCRIP" '
+                f'FROM batch b, "INVEMAR_MARITIME_REGIONS" m '
+                f'WHERE i.ctid = b.ctid '
+                f'AND ST_Intersects(i.geom, m.geom)'
+            )
+            batch_updated = result.rowcount
+            conn.commit()
+            if batch_updated == 0:
+                break
+            total_invemar += batch_updated
+            logger.info("Cruce INVEMAR batch en %s: %s filas (total %s)", integrated, f"{batch_updated:,}", f"{total_invemar:,}")
+        logger.info("Cruce espacial con INVEMAR_MARITIME_REGIONS completado en %s (%s filas)", integrated, f"{total_invemar:,}")
+
+        total_narino = 0
+        while True:
+            result = conn.execute(
+                f'WITH batch AS ('
+                f'    SELECT ctid '
+                f'    FROM "{integrated}" '
+                f'    WHERE geom IS NOT NULL '
+                f'      AND "narinomaritimeregion" IS NULL '
+                f'    LIMIT {spatial_batch_size}'
+                f') '
+                f'UPDATE "{integrated}" i '
+                f'SET "narinomaritimeregion" = m."Nombre" '
+                f'FROM batch b, "NARINO_MARITIME_REGION" m '
+                f'WHERE i.ctid = b.ctid '
+                f'AND ST_Intersects(i.geom, m.geom)'
+            )
+            batch_updated = result.rowcount
+            conn.commit()
+            if batch_updated == 0:
+                break
+            total_narino += batch_updated
+            logger.info("Cruce Nariño batch en %s: %s filas (total %s)", integrated, f"{batch_updated:,}", f"{total_narino:,}")
+        logger.info("Cruce espacial con NARINO_MARITIME_REGION completado en %s (%s filas)", integrated, f"{total_narino:,}")
+
+        # Se aplica INITCAP a los campos de departamento y municipio para estandarización de nombres.
+        for col in ('stateprovincemgn', 'countymgn'):
+            expr = f'INITCAP("{col}")'
+            # Se reemplazan las palabras que se deben convertir a minúsculas después de INITCAP en los campos de departamento y municipio
+            # Cada palabra en _LOWERCASE_WORDS se formatea para que sea un replace en SQL.
+            for word in _LOWERCASE_WORDS:
+                expr = f"REPLACE({expr}, '{word}', '{word.lower()}')"
+
+            conn.execute(
+                f'UPDATE "{integrated}" SET "{col}" = {expr} '
+                f'WHERE "{col}" IS NOT NULL'
+            )
+            conn.commit()
+
+            logger.info("INITCAP con estandarizaciones de nombres aplicado a %s en %s", col, integrated)
+
+        # Reemplazos manuales para mantener consistencia con la salida de sintesis de cifras de biodiversidad
+        # Bogotá, D.C. -> Bogotá, D. C.
+        # Santiago de Cali -> Cali
+
+        conn.execute(
+            f'UPDATE "{integrated}" '
+            f'SET "stateprovincemgn" = \'Bogotá, D. C.\', '
+            f'    "countymgn" = \'Bogotá, D. C.\' '
+            f'WHERE "stateprovincemgn" = \'Bogotá, D.C.\' '
+        )
+        conn.commit()
+
+        logger.info("Reemplazos manuales para mantener consistencia con la salida de sintesis de cifras de biodiversidad completados en %s", integrated)
+
+    _run_table_maintenance(db, integrated)
+    logger.info("Vacuum completado en %s tras cruces espaciales", integrated)
+
 # -----------------------------------------------------------------------------------------------------
 # Normalización de stateprovince y county en la tabla integrada
 # -----------------------------------------------------------------------------------------------------
@@ -878,82 +1005,6 @@ def create_species_index(db, table_name):
             f'CREATE INDEX IF NOT EXISTS "{idx_species}" ON "{integrated}" USING BTREE ("species")'
         )
         logger.info("Indice BTREE creado: %s", idx_species)
-        conn.commit()
-
-
-# --------------------------------------------------------------------------------------------------------------------------------------
-# Cruces espaciales con la tabla MGN_ADM_MPIO_2025 (división político-administrativa) e Invemar_maritime_regions (regiones marítimas)
-# --------------------------------------------------------------------------------------------------------------------------------------
-
-
-# Palabras que se deben convertir a minúsculas después de INITCAP en los campos de departamento y municipio
-# para estandarización de nombres. Por ejemplo, 'Norte De Santander' a 'Norte de Santander'.
-_LOWERCASE_WORDS = (' De ', ' Y ', ' Del ', ' La ')
-
-def spatials_joins(db, table_name):
-    # Cruza la tabla integrada con MGN_ADM_MPIO_2025 y Invemar_maritime_regions usando ST_Intersects
-    # y aplica INITCAP a los campos de departamento y municipio para estandarización de nombres.
-    integrated = table_name
-    with db.connect() as conn:
-        conn.execute(
-            f'UPDATE "{integrated}" i '
-            f'SET "stateprovincemgn" = m."dpto_cnmbr", '
-            f'    "countymgn" = m."mpio_cnmbr" '
-            f'FROM "MGN_ADM_MPIO_2025" m '
-            f'WHERE i.geom IS NOT NULL '
-            f'AND ST_Intersects(i.geom, m.geom)'
-        )
-        logger.info("Cruce espacial con MGN_ADM_MPIO_2025 completado en %s", integrated)
-
-
-
-        conn.execute(
-            f'UPDATE "{integrated}" i '
-            f'SET "maritimeregion" = m."DESCRIP" '
-            f'FROM "INVEMAR_MARITIME_REGIONS" m '
-            f'WHERE i.geom IS NOT NULL '
-            f'AND i."countymgn" IS NULL '
-            f'AND ST_Intersects(i.geom, m.geom)'
-        )
-        logger.info("Cruce espacial con INVEMAR_MARITIME_REGIONS completado en %s", integrated)
-
-        conn.execute(
-            f'UPDATE "{integrated}" i '
-            f'SET "narinomaritimeregion" = m."Nombre" '
-            f'FROM "NARINO_MARITIME_REGION" m '
-            f'WHERE i.geom IS NOT NULL '
-            f'AND ST_Intersects(i.geom, m.geom)'
-        )
-
-        logger.info("Cruce espacial con INVEMAR_MARITIME_REGIONS completado en %s", integrated)
-
-        # Se aplica INITCAP a los campos de departamento y municipio para estandarización de nombres.
-        for col in ('stateprovincemgn', 'countymgn'):
-            expr = f'INITCAP("{col}")'
-            # Se reemplazan las palabras que se deben convertir a minúsculas después de INITCAP en los campos de departamento y municipio
-            # Cada palabra en _LOWERCASE_WORDS se formatea para que sea un replace en SQL.
-            for word in _LOWERCASE_WORDS:
-                expr = f"REPLACE({expr}, '{word}', '{word.lower()}')"
-
-            conn.execute(
-                f'UPDATE "{integrated}" SET "{col}" = {expr} '
-                f'WHERE "{col}" IS NOT NULL'
-            )
-
-            logger.info("INITCAP con estandarizaciones de nombres aplicado a %s en %s", col, integrated)
-
-        # Reemplazos manuales para mantener consistencia con la salida de sintesis de cifras de biodiversidad
-        # Bogotá, D.C. -> Bogotá, D. C.
-        # Santiago de Cali -> Cali
-
-        conn.execute(
-            f'UPDATE "{integrated}" '
-            f'SET "stateprovincemgn" = \'Bogotá, D. C.\', '
-            f'    "countymgn" = \'Bogotá, D. C.\' '
-            f'WHERE "stateprovincemgn" = \'Bogotá, D.C.\' '
-        )
-
-        logger.info("Reemplazos manuales para mantener consistencia con la salida de sintesis de cifras de biodiversidad completados en %s", integrated)
         conn.commit()
 
 # --------------------------------------------------------------------------------------------------------------------------------------
