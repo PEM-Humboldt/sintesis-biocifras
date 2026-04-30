@@ -15,7 +15,6 @@ para el proceso de análisis y síntesis de cifras para Biodiversidad en cifras.
 - fill_species_from_scientificname: Función para llenar el campo species con las dos primeras palabras de scientificname.
 - add_geometry_and_indexes: Función para añadir geometría y índices a la tabla integrada.
 - create_join_validation_columns: Crea todas las columnas derivadas usadas por validaciones y cruces.
-- create_geom_index: Función para crear índice espacial GIST para optimizar cruces espaciales.
 - create_species_index: Función para crear índice BTREE sobre species para optimizar cruces taxonómicos.
 - spatials_joins: Cruza la tabla integrada con MGN_ADM_MPIO_2025 y Invemar_maritime_regions usando ST_Intersects.
 - normalize_stateprovince_county: Normaliza stateprovince y preserva valores originales verbatim antes de validar geografía.
@@ -609,7 +608,7 @@ def _run_table_maintenance(db, table_name):
         raw_conn.close()
 
 # -----------------------------------------------------------------------------------------------------
-# Creación de indices y geometrías en la tabla integrada
+# Creación de indice primary key y campo de geometría en la tabla integrada
 # -----------------------------------------------------------------------------------------------------
 
 def add_geometry_and_indexes(db, table_name):
@@ -667,21 +666,18 @@ def add_geometry_and_indexes(db, table_name):
             total_updated += batch_updated
             logger.info("Geom batch en %s: %s filas (total %s)", integrated, f"{batch_updated:,}", f"{total_updated:,}")
 
-    logger.info("Columna geom creada con EPSG 4326 en %s (%s filas actualizadas)", integrated, f"{total_updated:,}")
-    # Se ejecuta el vacuum y analyze para mantener la tabla optimizada.
-    _run_table_maintenance(db, integrated)
-    logger.info("Mantenimiento completado en %s (VACUUM ANALYZE)", integrated)
-
-def create_geom_index(db, table_name):
-    # Crea índice espacial GIST para optimizar cruces espaciales.
-    integrated = table_name
-    with db.connect() as conn:
+        # Se crea el índice espacial GIST después de poblar geom para optimizar los cruces espaciales.
         idx_geom = f"idx_{integrated}_geom"
         conn.execute(
             f'CREATE INDEX IF NOT EXISTS "{idx_geom}" ON "{integrated}" USING GIST (geom)'
         )
+        logger.info("Indice GIST creado en %s", idx_geom)
         conn.commit()
-    logger.info("Indice GIST creado en %s", idx_geom)
+
+    logger.info("Columna geom creada con EPSG 4326 en %s (%s filas actualizadas)", integrated, f"{total_updated:,}")
+    # Se ejecuta el vacuum y analyze para mantener la tabla optimizada.
+    _run_table_maintenance(db, integrated)
+    logger.info("Vacuum completado en %s", integrated)
 
 # -----------------------------------------------------------------------------------------------------
 # Normalización de stateprovince y county en la tabla integrada
