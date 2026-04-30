@@ -42,9 +42,8 @@ from utils.connection import table_exists
 # Inicialización del logger
 logger = logging.getLogger('sintesis_biocifras')
 
-# Indica el número de filas que se van a cargar a la base de datos desde los archivos TSV de GBIF
-# en cada batch para evitar bloqueos de memoria. Puede ajustarse con la variable de entorno FLUSH_EVERY.
-FLUSH_EVERY = int(os.getenv('FLUSH_EVERY', '500000'))
+# Valor por defecto de filas por batch en cargas COPY.
+DEFAULT_FLUSH_EVERY = 500000
 
 
 # ------------------------------------------------------------------------------------------------------------
@@ -279,7 +278,7 @@ def _translate_taxonrank_value(value):
         return ''
     return _TAXONRANK_TRANSLATION.get(normalized, '')
 
-def data_upload(db, filepath, table_name, columns):
+def data_upload(db, filepath, table_name, columns, flush_every=None):
     # Confirma que los archivos de datos definidos en el .env existen.
     # Si no existen, se retorna un error y se elimina la tabla de staging.
     if not filepath or not Path(filepath).is_file():
@@ -308,6 +307,7 @@ def data_upload(db, filepath, table_name, columns):
     # Se crea una conexión raw para ejecutar el comando COPY de PostgreSQL usando psycopg2.
     raw_conn = db.raw_connection()
     cur = None
+    flush_size = int(flush_every) if flush_every else DEFAULT_FLUSH_EVERY
     try:
         cur = raw_conn.cursor()
         cur.execute("SET synchronous_commit = OFF")
@@ -339,8 +339,8 @@ def data_upload(db, filepath, table_name, columns):
                     for idx, is_epoch, is_taxonrank in col_specs
                 ])
                 count += 1
-                # Si el modulo de count con la variable FLUSH_EVERY se igual a 0 se envía el buffer a la base de datos
-                if count % FLUSH_EVERY == 0:
+                # Si el modulo de count con flush_size se iguala a 0 se envía el buffer a la base de datos.
+                if count % flush_size == 0:
                     buffer.seek(0)
                     cur.copy_expert(copy_sql, buffer)
                     raw_conn.commit()
