@@ -1,7 +1,30 @@
 # Autor: Diego Moreno-Vargas (github.com/damorenov)
 # Última modificación: 2026-03-04
-# Este archivo contiene las funciones para la carga de datos desde GBIF a un servidor PostgreSQL + PostGIS
-# para el proceso de análisis y síntesis de cifras para Biodiversidad en cifras.
+"""
+Este archivo contiene las funciones para la carga de datos desde GBIF a un servidor PostgreSQL + PostGIS
+para el proceso de análisis y síntesis de cifras para Biodiversidad en cifras.
+- OCCURRENCE_COLS: Lista de columnas de la tabla dwc_occurrence.
+- VERBATIM_COLS: Lista de columnas de la tabla dwc_verbatim.
+- SQL_COLS: Lista de columnas de la tabla dwc_sql.
+- register_load: Función para registrar la carga de datos en la tabla table_registry.
+- tables_operations: Función para crear/truncar las tablas de staging (dwc_occurrence y dwc_verbatim) y la tabla integrada (dwc_integrated).
+- data_upload: Función para cargar los datos desde los archivos TSV de GBIF a las tablas de staging.
+- finalize_sql_table: Función para renombrar la columna v_scientificname y la tabla de staging dwc_sql a dwc_integrated.
+- create_staging_indexes: Función para crear índices en las tablas de staging.
+- create_integrated_table: Función para crear la tabla integrada con las columnas de las tablas de staging.
+- fill_species_from_scientificname: Función para llenar el campo species con las dos primeras palabras de scientificname.
+- add_geometry_and_indexes: Función para añadir geometría y índices a la tabla integrada.
+- create_join_validation_columns: Crea todas las columnas derivadas usadas por validaciones y cruces.
+- create_geom_index: Función para crear índice espacial GIST para optimizar cruces espaciales.
+- create_species_index: Función para crear índice BTREE sobre species para optimizar cruces taxonómicos.
+- spatials_joins: Cruza la tabla integrada con MGN_ADM_MPIO_2025 y Invemar_maritime_regions usando ST_Intersects.
+- normalize_stateprovince_county: Normaliza stateprovince y preserva valores originales verbatim antes de validar geografía.
+- validate_geography: Valida la geografía de la tabla integrada.
+- taxonomic_joins: Cruza la tabla integrada con tablas taxonómicas por el campo species.
+- clean_threatstatus_fields: Normaliza threatstatus y agrega sufijos por fuente (IUCN/MADS).
+- gbif_api_calls: Enriquece la tabla integrada con metadatos de datasets y publicadores desde tablas locales y API GBIF.
+"""
+
 import csv
 import io
 import json
