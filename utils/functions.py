@@ -49,10 +49,10 @@ DEFAULT_FLUSH_EVERY = 500000
 # ------------------------------------------------------------------------------------------------------------
 # Definición de listas y variables para el proceso de carga desde los archivos TSV de GBIF
 # 
-# Para el process de carga desde los archivos occurrence.txt, verbatim.txt y sql.csv se definen únicamente las columnas 
-# con listas que se van a utilizar para evitar cargar datos innecesarios y optimizar el proceso de carga.
-# Se pueden agregar más columnas si es necesario. Pero no olvidar agregar las columnas a las tablas de staging
-# en las listas _OCCURRENCE_TYPES, _VERBATIM_TYPES, _SQL_COL_TYPES.
+# Para el process de carga desde los archivos integrated.csv, ocurrence.txt y sql.csv se definen únicamente 
+# las columnas con listas que se van a utilizar para evitar cargar datos innecesarios y optimizar el 
+# proceso de carga. Se pueden agregar más columnas si es necesario. Pero no olvidar agregar las columnas a las 
+# tablas de staging en las listas _OCCURRENCE_TYPES, _VERBATIM_TYPES, _SQL_COL_TYPES.
 # Se decide usar este enfoque de listas para poder agregar o reducir el número de columnas de manera dinámica
 # sin tener que modificar directamente consultas SQL en RAW.
 # ------------------------------------------------------------------------------------------------------------
@@ -87,7 +87,7 @@ SQL_COLS = [
     'county', 'municipality', 'repatriated', 'publishingcountry', 'lastparsed',
 ]
 
-# Mapeo de columnas tipo SQL para CREATE TABLE dinamico
+# Mapeo de columnas tipo SQL para CREATE TABLE dinámico
 _OCCURRENCE_TYPES = {
     'gbifid': 'BIGINT',
     'occurrenceid': 'TEXT', 'basisofrecord': 'TEXT',
@@ -146,31 +146,8 @@ _SQL_COL_TYPES = {
     'lastinterpreted': 'TIMESTAMPTZ', 'lastparsed': 'TIMESTAMPTZ',
 }
 
-# Con la tabla table_registry se maneja el campo is_latest para indicar
-# la versión más reciente de las tablas de staging y la tabla integrada.
-def register_load(db, table_names, created_at, origin):
-    prefixes = {
-        'occurrence': 'dwc_occurrence_%',
-        'verbatim': 'dwc_verbatim_%',
-        'integrated': 'dwc_integrated_%',
-    }
-    with db.connect() as conn:
-        for key, table_name in table_names.items():
-            prefix = prefixes[key]
-            conn.execute(
-                "UPDATE table_registry SET is_latest = FALSE "
-                "WHERE table_name LIKE %(prefix)s AND is_latest = TRUE"
-            , {'prefix': prefix})
-            conn.execute(
-                "INSERT INTO table_registry (table_name, origin, created_at, is_latest) "
-                "VALUES (%(table_name)s, %(origin)s, %(created_at)s, TRUE)"
-            , {'table_name': table_name, 'origin': origin, 'created_at': created_at})
-        conn.commit()
-    logger.info("Datos cargados en table_registry.")
-
-
 # -------------------------------------------------------------------------------------------------------------------------
-# Creacion / truncado de tablas de staging (dwc_occurrence y dwc_verbatim) y la tabla integrada (dwc_integrated)
+# Creacion / truncado de tablas de staging (integrates y ocurrence) y la tabla integrada (dwc_integrated)
 # -------------------------------------------------------------------------------------------------------------------------
 
 def _build_create_ddl(table_name, col_types):
@@ -180,14 +157,31 @@ def _build_create_ddl(table_name, col_types):
     # col_types es uno de los diccionarios: _OCCURRENCE_TYPES, _VERBATIM_TYPES, _SQL_COL_TYPES
     # Es equivalente a ejecutar la siguiente consulta:
     # CREATE TABLE "tabla_fecha" ("columna1" tipo1, "columna2" tipo2, ...);
+    # Parámetros:
+    # - table_name: Nombre de la tabla a crear.
+    # - col_types: Diccionario con los tipos de columnas para la tabla: _OCCURRENCE_TYPES, _VERBATIM_TYPES, _SQL_COL_TYPES
+    # Retorna:
+    # - ddl: Sentencia CREATE TABLE para la tabla.
     cols = ', '.join(f'"{col}" {dtype}' for col, dtype in col_types.items())
     return f'CREATE UNLOGGED TABLE "{table_name}" ({cols});'
 
 # Para mantener un historial de las tablas de staging y la tabla integrada se utiliza un sufijo de fecha.
-def tables_operations(db, suffix, upload_type="default"):
+def tables_operations(db, suffix, upload_type=None):
     # Crea tablas con sufijo de fecha. Si ya existen, las elimina y vuelven a crear para garantizar una carga limpia.
-    # Retorna dict con nombres de las tablas para seguir el proceso de carga.
     # Se tienen el cuenta el tipo de carga: sql o regular.
+    # Parámetros:
+    # - db: Conexión al pool de conexiones de PostgreSQL.
+    # - suffix: Sufijo de fecha para las tablas de staging y la tabla integrada.
+    # - upload_type: Tipo de carga: sql o regular.
+    # Retorna:
+    # - table_names: Diccionario con los nombres de las tablas de staging y la tabla integrada.
+    # - type_maps: Diccionario con los tipos de columnas para las tablas de staging y la tabla integrada.
+    # - keys: Tupla con los nombres de las tablas de staging y la tabla integrada.
+    if upload_type not in {"sql", "regular"}:
+        raise ValueError(
+            f"upload_type inválido: {upload_type}. Debe ser 'sql' o 'regular'."
+        )
+
     if upload_type == "sql":
         table_names = {'sql': f'dwc_sql_{suffix}'}
         type_maps = {'sql': _SQL_COL_TYPES}
@@ -216,6 +210,38 @@ def tables_operations(db, suffix, upload_type="default"):
         conn.commit()
     return table_names
 
+# -------------------------------------------------------------------------------------------------------------------------
+# Actualización tabla de registro
+# -------------------------------------------------------------------------------------------------------------------------
+
+def register_load(db, table_names, created_at, origin):
+    # Actualiza el campo is_latest de las tablas de staging y la tabla integrada.
+    # Parámetros:
+    # - db: Conexión al pool de conexiones de PostgreSQL.
+    # - table_names: Diccionario con los nombres de las tablas de staging y la tabla integrada.
+    # - created_at: Fecha de creación de la tabla.
+    # - origin: Origen de la carga: SQL o DwC-A.
+    # Retorna:
+    # - None: No retorna nada.
+    prefixes = {
+        'occurrence': 'dwc_occurrence_%',
+        'verbatim': 'dwc_verbatim_%',
+        'integrated': 'dwc_integrated_%',
+    }
+    with db.connect() as conn:
+        for key, table_name in table_names.items():
+            prefix = prefixes[key]
+            conn.execute(
+                "UPDATE table_registry SET is_latest = FALSE "
+                "WHERE table_name LIKE %(prefix)s AND is_latest = TRUE"
+            , {'prefix': prefix})
+            conn.execute(
+                "INSERT INTO table_registry (table_name, origin, created_at, is_latest) "
+                "VALUES (%(table_name)s, %(origin)s, %(created_at)s, TRUE)"
+            , {'table_name': table_name, 'origin': origin, 'created_at': created_at})
+        conn.commit()
+    logger.info("Datos cargados en table_registry.")
+
 
 # ------------------------------------------------------------------------------------------------------------
 # Carga masiva de datos desde los archivos TSV de GBIF a las tablas de staging
@@ -234,17 +260,18 @@ def tables_operations(db, suffix, upload_type="default"):
 # de filas a cargar por batch.
 # COPY si bien es más rápido, hay que procesar los caracteres especiales antes de la carga, pero sobre todo los
 # archivos deben estár en el mismo servidor de la base de datos, aunque puede solventarse con salida STDOUT.
-# execute es más flexible, pero espera siempre que se retorne el resultado de la consulta, por lo que
+# EXECUTE es más flexible, pero espera siempre que se retorne el resultado de la consulta, por lo que
 # en procesos de carga masiva no es la mejor opción.
 # Por último, el comando de copy_expert de psycopg2 se ejecuta a través de la conexión raw de psycopg2,
 # que crea un cursor y se ejecuta el comando de copy_expert con el buffer de datos procesado por csv.writer.
 
-# Columnas cargadas desde los archivos TSV de GBIF que se deben convertir a ISO 8601 para columnas TIMESTAMPTZ
+# También se debe manejar fechas desde los archivos TSV de GBIF que se deben convertir a ISO 8601 para columnas TIMESTAMPTZ
 # Bug que apareció al cargar los datos descargados en formato GBIF SQL
 # El EPOCH es el número de milisegundos desde el 1 de enero de 1970 00:00:00 UTC, pero no es legible como el timestamp
 # por lo que se debe convertir a ISO 8601 para que sea legible y que se pueda cargar a la base de datos.
 _EPOCH_MS_COLS = {'lastinterpreted', 'lastparsed'}
 
+# En el mismo proceso de carga se hace la traducción de taxonrank a español para la columna taxonRank.
 _TAXONRANK_TRANSLATION = {
     'SPECIES': 'Especie',
     'SUBSPECIES': 'Subespecie',
@@ -259,9 +286,12 @@ _TAXONRANK_TRANSLATION = {
     'UNRANKED': '',
 }
 
-# Función de apoyo para convertir epoch en milisegundos a ISO 8601 para columnas TIMESTAMPTZ.
 def _epoch_ms_to_iso(value):
     # Convierte epoch en milisegundos a ISO 8601 para columnas TIMESTAMPTZ.
+    # Parámetros:
+    # - value: Valor a convertir.
+    # Retorna:
+    # - value: Valor convertido a ISO 8601.
     if not value:
         return value
     try:
@@ -271,6 +301,11 @@ def _epoch_ms_to_iso(value):
 
 
 def _translate_taxonrank_value(value):
+    # Traducción de taxonrank a español para la columna taxonRank.
+    # Parámetros:
+    # - value: Valor a traducir.
+    # Retorna:
+    # - value: Valor traducido a español.
     if value is None:
         return ''
     normalized = str(value).strip().upper()
@@ -281,11 +316,19 @@ def _translate_taxonrank_value(value):
 def data_upload(db, filepath, table_name, columns, flush_every=None):
     # Confirma que los archivos de datos definidos en el .env existen.
     # Si no existen, se retorna un error y se elimina la tabla de staging.
+    # Parámetros:
+    # - db: Conexión al pool de conexiones de PostgreSQL.
+    # - filepath: Ruta del archivo a cargar.
+    # - table_name: Nombre de la tabla a cargar.
+    # - columns: Columnas a cargar.
+    # - flush_every: Tamaño del buffer para la carga de datos.
+    # Retorna:
+    # - None: No retorna nada.
     if not filepath or not Path(filepath).is_file():
         with db.connect() as conn:
             conn.execute(f'DROP TABLE IF EXISTS "{table_name}"')
             conn.commit()
-        logger.info("DROP TABLE %s (sin archivo de datos para cargar)", table_name)
+        logger.info("DROP TABLE %s", table_name)
         msg = (
             f"No se definió la ruta del archivo en el .env para la tabla {table_name}"
             if not filepath
@@ -295,7 +338,8 @@ def data_upload(db, filepath, table_name, columns, flush_every=None):
         raise FileNotFoundError(msg)
 
     # Se generan las columnas de la tabla de staging en minúsculas para la ejecución del comando COPY de PostgreSQL.
-    # Primero se generan las columnas en minúsculas y luego se generan las columnas entre comillas dobles para la ejecución del comando COPY de PostgreSQL.
+    # Primero se generan las columnas en minúsculas y luego se generan las columnas entre comillas dobles para la ejecución 
+    # del comando COPY de PostgreSQL.
     # Se ejecuta el comando COPY de PostgreSQL con el formato csv, el delimitador E'\\t' y el null '' para evitar errores de carga.
     db_cols = [c.lower() for c in columns]
     quoted_cols = ', '.join(f'"{c}"' for c in db_cols)
@@ -305,6 +349,7 @@ def data_upload(db, filepath, table_name, columns, flush_every=None):
     )
 
     # Se crea una conexión raw para ejecutar el comando COPY de PostgreSQL usando psycopg2.
+    # El flush_size es el tamaño del buffer para la carga de datos en .env. Si no se define, se usa el valor por defecto.
     raw_conn = db.raw_connection()
     cur = None
     flush_size = int(flush_every) if flush_every else DEFAULT_FLUSH_EVERY
@@ -332,6 +377,8 @@ def data_upload(db, filepath, table_name, columns, flush_every=None):
 
             for row in reader:
                 # Para cada fila, escribe solo las columnas requeridas. Si falta columna o valor, usa cadena vacía.
+                # Si la columna es de tipo TIMESTAMPTZ, se convierte a ISO 8601.
+                # Si la columna es de tipo taxonrank, se traduce a español.
                 writer.writerow([
                     _epoch_ms_to_iso(row[idx]) if is_epoch and idx is not None and idx < len(row)
                     else _translate_taxonrank_value(row[idx]) if is_taxonrank and idx is not None and idx < len(row)
@@ -339,7 +386,7 @@ def data_upload(db, filepath, table_name, columns, flush_every=None):
                     for idx, is_epoch, is_taxonrank in col_specs
                 ])
                 count += 1
-                # Si el modulo de count con flush_size se iguala a 0 se envía el buffer a la base de datos.
+                # Si el modulo de count con flush_size es igual a 0, se envía el buffer a la base de datos.
                 if count % flush_size == 0:
                     buffer.seek(0)
                     cur.copy_expert(copy_sql, buffer)
@@ -359,6 +406,7 @@ def data_upload(db, filepath, table_name, columns, flush_every=None):
         raw_conn.rollback()
         raise
     finally:
+        # Se resetean los parámetros de sesión orientados a cargas masivas por COPY.
         if cur is not None:
             cur.execute("RESET synchronous_commit")
             cur.execute("RESET maintenance_work_mem")
@@ -367,12 +415,18 @@ def data_upload(db, filepath, table_name, columns, flush_every=None):
 
 
 # -----------------------------------------------------------------------------------------------------
-# Renombrado de la tabla de staging dwc_sql
+# Operaciones sobre la tabla de staging dwc_sql
 # -----------------------------------------------------------------------------------------------------
 
-# Se renombra la columna v_scientificname y la tabla de staging dwc_sql a dwc_integrated
-# para mantener integridad del flujo SQL en una sola transacción.
 def finalize_sql_table(db, old_name, new_name):
+    # Renombra la columna v_scientificname y la tabla de staging dwc_sql a dwc_integrated
+    # para mantener integridad del flujo definido en main.py.
+    # Parámetros:
+    # - db: Conexión al pool de conexiones de PostgreSQL.
+    # - old_name: Nombre de la tabla de staging dwc_sql.
+    # - new_name: Nombre de la tabla integrada dwc_integrated.
+    # Retorna:
+    # - None: No retorna nada.
     with db.connect() as conn:
         conn.execute(
             f'ALTER TABLE "{old_name}" RENAME COLUMN "v_scientificname" TO "verbatimscientificname"'
@@ -381,18 +435,7 @@ def finalize_sql_table(db, old_name, new_name):
             "Columna renombrada: v_scientificname a verbatimscientificname en %s",
             old_name,
         )
-        # En flujo SQL se preservan valores verbatim antes del rename final.
-        conn.execute(
-            f'ALTER TABLE "{old_name}" '
-            f'ADD COLUMN IF NOT EXISTS "verbatimstateprovince" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "verbatimcounty" TEXT'
-        )
-        conn.execute(
-            f'UPDATE "{old_name}" '
-            f'SET "verbatimstateprovince" = "stateprovince", '
-            f'    "verbatimcounty" = "county" '
-            f'WHERE "verbatimstateprovince" IS NULL OR "verbatimcounty" IS NULL'
-        )
+
         if table_exists(db, new_name):
             conn.execute(f'DROP TABLE "{new_name}"')
             logger.info("DROP TABLE existente: %s", new_name)
@@ -400,18 +443,17 @@ def finalize_sql_table(db, old_name, new_name):
         conn.commit()
     logger.info("Tabla SQL finalizada: %s → %s", old_name, new_name)
 
-
 # -----------------------------------------------------------------------------------------------------
 # Creación de índices en las tablas de staging dwc_occurrence y dwc_verbatim
 # -----------------------------------------------------------------------------------------------------
 
-# Se crea un índice en la columna gbifID para facilitar el JOIN entre las tablas de staging.
-# Es equivalente a ejecutar la siguiente consulta:
-# CREATE INDEX idx_tabla_fecha_gbifid ON tabla_fecha (gbifID);
-# Sólo se crea el indice. Para las coordenadas no se crean indices en los staging ya que no se pueden
-# copiar directamente a la tabla integrada.
-
 def create_staging_indexes(db, table_names):
+    # Crea un índice en la columna gbifID para facilitar el JOIN entre las tablas de staging.
+    # Parámetros:
+    # - db: Conexión al pool de conexiones de PostgreSQL.
+    # - table_names: Diccionario con los nombres de las tablas de staging dwc_occurrence y dwc_verbatim.
+    # Retorna:
+    # - None: No retorna nada.
     with db.connect() as conn:
         for key in ('occurrence', 'verbatim'):
             tname = table_names[key]
@@ -425,15 +467,19 @@ def create_staging_indexes(db, table_names):
 # Creación de la tabla integrada dwc_occurrence_integrated desde las tablas de staging 
 # -----------------------------------------------------------------------------------------------------
 
-# Se crea la tabla integrada dwc_occurrence_integrated desde las tablas de staging dwc_occurrence y dwc_verbatim
-# mediante un JOIN por la columna gbifID.
-# Es equivalente a ejecutar la siguiente consulta:
-# CREATE TABLE dwc_occurrence_integrated AS
-# SELECT o.*, v.*
-# FROM dwc_occurrence_fecha o
-# INNER JOIN dwc_verbatim_fecha v ON o.gbifID = v.gbifID;
-
 def create_integrated_table(db, table_names):
+    # Se crea la tabla integrada dwc_occurrence_integrated desde las tablas de staging dwc_occurrence y dwc_verbatim
+    # mediante un JOIN por la columna gbifID.
+    # Es equivalente a ejecutar la siguiente consulta:
+    # CREATE TABLE dwc_occurrence_integrated AS
+    # SELECT o.*, v.*
+    # FROM dwc_occurrence_fecha o
+    # INNER JOIN dwc_verbatim_fecha v ON o.gbifID = v.gbifID;
+    # Parámetros:
+    # - db: Conexión al pool de conexiones de PostgreSQL.
+    # - table_names: Diccionario con los nombres de las tablas de staging dwc_occurrence y dwc_verbatim.
+    # Retorna:
+    # - None: No retorna nada.
     occurrence = table_names['occurrence']
     verbatim = table_names['verbatim']
     integrated = table_names['integrated']
@@ -461,17 +507,23 @@ def create_integrated_table(db, table_names):
         conn.commit()
     logger.info("Tabla integrada creada: %s", integrated)
 
-
 # -----------------------------------------------------------------------------------------------------
 # Creación de columnas a usar en las validaciones y cruces en la tabla integrada
 # -----------------------------------------------------------------------------------------------------
 
 def create_join_validation_columns(db, table_name):
     # Crea todas las columnas derivadas usadas por validaciones y cruces.
+    # Parámetros:
+    # - db: Conexión al pool de conexiones de PostgreSQL.
+    # - table_name: Nombre de la tabla integrada dwc_integrated.
+    # Retorna:
+    # - None: No retorna nada.
     integrated = table_name
     with db.connect() as conn:
         conn.execute(
             f'ALTER TABLE "{integrated}" '
+            f'ADD COLUMN IF NOT EXISTS "verbatimstateprovince" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "verbatimcounty" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "codedane" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "stateprovincemgn" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "countymgn" TEXT, '
@@ -506,41 +558,51 @@ def create_join_validation_columns(db, table_name):
     logger.info("Columnas derivadas preparadas en %s", integrated)
 
 # -----------------------------------------------------------------------------------------------------
-# Preparación y traducción de valores de taxonrank y revisión de casos de nombres científicos vacíos en la tabla integrada
+# Revisión de casos de nombres científicos vacíos en la tabla integrada
 # -----------------------------------------------------------------------------------------------------
 
-# Se llena el campo species con las dos primeras palabras de scientificname cuando taxonrank es
-# 'SPECIES' o 'Especie' y species es nulo o vacío.
-# Es equivalente a ejecutar la siguiente consulta:
-# UPDATE "dwc_integrated_{fecha}}" SET "species" = TRIM(split_part("scientificname", ' ', 1) || ' ' || split_part("scientificname", ' ', 2)) WHERE UPPER("taxonrank") = 'SPECIES' AND ("species" IS NULL OR TRIM("species") = '')
 def fill_species_from_scientificname(db, table_name):
-    # Llena el campo species con las dos primeras palabras de scientificname
-    # cuando taxonrank es 'SPECIES' o 'Especie' y species es nulo o vacío.
-    sql = (
-        f'UPDATE "{table_name}" '
-        f'SET "species" = TRIM(split_part("scientificname", \' \', 1) '
-        f"|| ' ' || split_part(\"scientificname\", ' ', 2)) "
-        f'WHERE UPPER(TRIM("taxonrank")) IN (\'SPECIES\', \'ESPECIE\') '
-        f'AND "scientificname" IS NOT NULL '
-        f'AND TRIM("scientificname") <> \'\' '
-        f'AND ("species" IS NULL OR TRIM("species") = \'\')'
-    )
+    # Se llena el campo species con las dos primeras palabras de scientificname cuando taxonrank es
+    # 'SPECIES' o 'Especie' y species es nulo o vacío.
+    # Es equivalente a ejecutar la siguiente consulta:
+    # UPDATE "dwc_integrated_{fecha}}" SET "species" = TRIM(split_part("scientificname", ' ', 1) || ' ' || split_part("scientificname", ' ', 2)) WHERE UPPER("taxonrank") = 'SPECIES' AND ("species" IS NULL OR TRIM("species") = '')
+    # Parámetros:   
+    # - db: Conexión al pool de conexiones de PostgreSQL.
+    # - table_name: Nombre de la tabla integrada dwc_integrated.
+    # Retorna:
+    # - None: No retorna nada.
     with db.connect() as conn:
-        result = conn.execute(sql)
+        result = conn.execute(f"""
+            UPDATE "{table_name}"
+            SET "species" = TRIM(
+                split_part("scientificname", ' ', 1) || ' ' ||
+                split_part("scientificname", ' ', 2)
+            )
+            WHERE TRIM("taxonrank") = 'Especie'
+            AND "scientificname" IS NOT NULL
+            AND TRIM("scientificname") <> ''
+            AND ("species" IS NULL OR TRIM("species") = '');
+            """)
         conn.commit()
     logger.info("Campo species completado desde scientificname en %s (%s filas)", table_name, f"{result.rowcount:,}")
 
 # -----------------------------------------------------------------------------------------------------
-# Ejecución de mantenimiento posterior a actualizaciones masivas
+# Mantenimiento posterior a actualizaciones masivas
 # -----------------------------------------------------------------------------------------------------
 
-# Ejecuta mantenimiento posterior a actualizaciones masivas.
 def _run_table_maintenance(db, table_name):
+    # Se ejecuta el comando VACUUM (ANALYZE) y/o VACUUM (FULL, ANALYZE) para mantener la tabla optimizada.
+    # Parámetros:
+    # - db: Conexión al pool de conexiones de PostgreSQL.
+    # - table_name: Nombre de la tabla a mantener.
+    # Retorna:
+    # - None: No retorna nada.
     raw_conn = db.raw_connection()
     try:
         raw_conn.autocommit = True
         with raw_conn.cursor() as cur:
             cur.execute(f'VACUUM (ANALYZE) "{table_name}"')
+            # Si la variable de entorno RUN_VACUUM_FULL es true, se ejecuta el comando VACUUM (FULL, ANALYZE).
             if os.getenv('RUN_VACUUM_FULL', 'false').lower() == 'true':
                 cur.execute(f'VACUUM (FULL, ANALYZE) "{table_name}"')
     finally:
@@ -550,15 +612,26 @@ def _run_table_maintenance(db, table_name):
 # Creación de indices y geometrías en la tabla integrada
 # -----------------------------------------------------------------------------------------------------
 
-# Se hace una verificación de la extensión postgis para evitar errores de carga.
 def add_geometry_and_indexes(db, table_name):
+    # Se agrega la columna geom de tipo Point, SRID 4326 de PostGIS y se crea un índice espacial GIST para la columna geom.
+    # Parámetros:
+    # - db: Conexión al pool de conexiones de PostgreSQL.
+    # - table_name: Nombre de la tabla integrada dwc_integrated.
+    # Retorna:
+    # - None: No retorna nada.
     integrated = table_name
+    # El geom_batch_size es el tamaño del lote para la actualización de la columna geom.
+    # Si no se define en el .env, se usa el valor por defecto.
     geom_batch_size = int(os.getenv('GEOM_UPDATE_BATCH', '1000000'))
+    # Se inicializa el contador de filas actualizadas.
     total_updated = 0
+
     with db.connect() as conn:
+        # Se crea la extensión PostGIS si no existe.
         conn.execute("CREATE EXTENSION IF NOT EXISTS postgis")
         logger.info("Chequeo de extension postgis")
-
+        
+        # Se agrega la Primary Key a la columna gbifid de la integrada
         conn.execute(
             f'ALTER TABLE "{integrated}" ADD PRIMARY KEY ("gbifid")'
         )
@@ -595,6 +668,7 @@ def add_geometry_and_indexes(db, table_name):
             logger.info("Geom batch en %s: %s filas (total %s)", integrated, f"{batch_updated:,}", f"{total_updated:,}")
 
     logger.info("Columna geom creada con EPSG 4326 en %s (%s filas actualizadas)", integrated, f"{total_updated:,}")
+    # Se ejecuta el vacuum y analyze para mantener la tabla optimizada.
     _run_table_maintenance(db, integrated)
     logger.info("Mantenimiento completado en %s (VACUUM ANALYZE)", integrated)
 
@@ -617,6 +691,12 @@ def normalize_stateprovince_county(db, table_name):
     # Normaliza stateprovince y preserva valores originales verbatim antes de validar geografía.
     integrated = table_name
     with db.connect() as conn:
+        conn.execute(
+            f'UPDATE "{table_name}" '
+            f'SET "verbatimstateprovince" = "stateprovince", '
+            f'    "verbatimcounty" = "county" '
+            f'WHERE "verbatimstateprovince" IS NULL OR "verbatimcounty" IS NULL'
+        )
         # Normalización por alias: comparación case-insensitive con trim
         conn.execute(
             f'UPDATE "{integrated}" i '
