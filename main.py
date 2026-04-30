@@ -73,7 +73,7 @@ if not check_connection(db):
 logger.info("Conectado a la base de datos.")
 
 try:
-    integrated_name = f'dwc_integrated_{suffix}'
+    table_integrated_name = f'dwc_integrated_{suffix}'
 
     if UPLOAD_TYPE == "sql":
         table_names = timer(tables_operations, "Operaciones sobre la tabla de staging dwc_sql")(
@@ -83,10 +83,10 @@ try:
             db, os.getenv('SQL_FILE'), table_names['sql'], SQL_COLS, FLUSH_EVERY
         )
         timer(finalize_sql_table, "Renombrando campos y tabla SQL a integrated")(
-            db, table_names['sql'], integrated_name
+            db, table_names['sql'], table_integrated_name
         )
-        table_names = {'integrated': integrated_name}
-        origin = 'sql download'
+        table_names = {'integrated': table_integrated_name}
+        origin = 'SQL download'
     else:
         table_names = timer(tables_operations, "Operaciones sobre las tablas de staging dwc_occurrence y dwc_verbatim")(db, suffix)
         timer(data_upload, "Carga de datos desde occurrence.txt")(
@@ -97,7 +97,7 @@ try:
         )
         timer(create_staging_indexes, "Creación de índices en las tablas de staging dwc_occurrence y dwc_verbatim")(db, table_names)
         timer(create_integrated_table, "Creación de la tabla integrada dwc_occurrence_integrated")(db, table_names)
-        origin = 'regular download'
+        origin = 'DwC-A download'
 
     timer(create_join_validation_columns, "Crando columnas para cruces y validaciones en la tabla integrada")(db, table_names['integrated'])
     timer(fill_species_from_scientificname, "Completando campo species desde scientificname")(db, table_names['integrated'])
@@ -114,6 +114,7 @@ try:
     register_load(db, table_names, today, origin)
     logger.info("Proceso completado.")
 
+# Captura de errores generales del proceso.
 except (FileNotFoundError, ValueError) as e:
     logger.error("Error durante el proceso: %s", e)
     sys.exit(1)
