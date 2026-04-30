@@ -33,9 +33,6 @@ from utils.functions import (
     OCCURRENCE_COLS,
     VERBATIM_COLS,
     SQL_COLS,
-    registry_table,
-    datasets_table,
-    publishers_table,
     register_load,
     tables_operations,
     data_upload,
@@ -73,10 +70,6 @@ if not check_connection(db):
 logger.info("Conectado a la base de datos.")
 
 try:
-    registry_table(db)
-    datasets_table(db)
-    publishers_table(db)
-
     integrated_name = f'dwc_integrated_{suffix}'
 
     if UPLOAD_TYPE == "sql":

@@ -124,69 +124,6 @@ _SQL_COL_TYPES = {
     'lastinterpreted': 'TIMESTAMPTZ', 'lastparsed': 'TIMESTAMPTZ',
 }
 
-# -------------------------------------------------------------------------------------------------------
-# Creación de tablas de soporte y llenado de la tabla de registro de versiones de tablas (table_registry)
-# -------------------------------------------------------------------------------------------------------
-
-def registry_table(db):
-    ddl = """
-    CREATE TABLE IF NOT EXISTS table_registry (
-        id SERIAL PRIMARY KEY,
-        table_name TEXT NOT NULL,
-        origin TEXT,
-        created_at DATE NOT NULL,
-        is_latest BOOLEAN NOT NULL DEFAULT TRUE
-    );
-    """
-    with db.connect() as conn:
-        conn.execute(ddl)
-        conn.commit()
-    logger.info("Tabla table_registry creada")
-
-
-def datasets_table(db):
-    # Crea la tabla gbif_datasets para almacenar metadatos de datasets obtenidos desde la API de GBIF.
-    with db.connect() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS gbif_datasets (
-                datasetkey TEXT PRIMARY KEY,
-                license TEXT,
-                doi TEXT,
-                datasettitle TEXT,
-                logourl TEXT,
-                datatype TEXT,
-                created DATE
-            );
-        """)
-        conn.execute("""
-            ALTER TABLE gbif_datasets
-            ADD COLUMN IF NOT EXISTS created DATE;
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_gbif_datasets_datasetkey
-                ON gbif_datasets USING BTREE (datasetkey);
-        """)
-        conn.commit()
-    logger.info("Tabla gbif_datasets creada")
-
-
-def publishers_table(db):
-    # Crea la tabla gbif_publishers para almacenar metadatos de publicadores obtenidos desde la API de GBIF.
-    with db.connect() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS gbif_publishers (
-                publishingorgkey TEXT PRIMARY KEY,
-                organization TEXT
-            );
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_gbif_publishers_publishingorgkey
-                ON gbif_publishers USING BTREE (publishingorgkey);
-        """)
-        conn.commit()
-    logger.info("Tabla gbif_publishers creada")
-
-
 # Con la tabla table_registry se maneja el campo is_latest para indicar
 # la versión más reciente de las tablas de staging y la tabla integrada.
 def register_load(db, table_names, created_at, origin):
