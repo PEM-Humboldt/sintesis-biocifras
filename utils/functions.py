@@ -773,6 +773,20 @@ def spatials_joins(db, table_name):
             logger.info("Cruce Nariño batch en %s: %s filas (total %s)", integrated, f"{batch_updated:,}", f"{total_narino:,}")
         logger.info("Cruce espacial con NARINO_MARITIME_REGION completado en %s (%s filas)", integrated, f"{total_narino:,}")
 
+        # Indices para joins
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS "idx_{integrated}_stateprovincemgn" ON "{integrated}" USING BTREE ("stateprovincemgn")'
+        )
+        conn.commit()
+        logger.info("Indice creado idx_%s_stateprovincemgn", integrated)
+
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS "idx_{integrated}_countymgn" ON "{integrated}" USING BTREE ("countymgn")'
+        )
+        conn.commit()
+
+        logger.info("Indice creado idx_%s_countymgn", integrated)
+
         # Se aplica INITCAP a los campos de departamento y municipio para estandarización de nombres.
         for col in ('stateprovincemgn', 'countymgn'):
             expr = f'INITCAP("{col}")'
@@ -783,7 +797,8 @@ def spatials_joins(db, table_name):
 
             conn.execute(
                 f'UPDATE "{integrated}" SET "{col}" = {expr} '
-                f'WHERE "{col}" IS NOT NULL'
+                f'WHERE "{col}" IS NOT NULL '
+                f'AND "{col}" IS DISTINCT FROM {expr}'
             )
             conn.commit()
 
