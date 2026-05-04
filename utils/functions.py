@@ -270,20 +270,6 @@ def register_load(db, table_names, created_at, origin):
 # por lo que se debe convertir a ISO 8601 para que sea legible y que se pueda cargar a la base de datos.
 _EPOCH_MS_COLS = {'lastinterpreted', 'lastparsed'}
 
-# En el mismo proceso de carga se hace la traducción de taxonrank a español para la columna taxonRank.
-_TAXONRANK_TRANSLATION = {
-    'SPECIES': 'Especie',
-    'SUBSPECIES': 'Subespecie',
-    'GENUS': 'Género',
-    'FAMILY': 'Familia',
-    'ORDER': 'Orden',
-    'CLASS': 'Clase',
-    'PHYLUM': 'Filo',
-    'KINGDOM': 'Reino',
-    'FORM': 'Forma',
-    'VARIETY': 'Variedad',
-    'UNRANKED': '',
-}
 
 def _epoch_ms_to_iso(value):
     # Convierte epoch en milisegundos a ISO 8601 para columnas TIMESTAMPTZ.
@@ -298,19 +284,6 @@ def _epoch_ms_to_iso(value):
     except (ValueError, OSError):
         return value
 
-
-def _translate_taxonrank_value(value):
-    # Traducción de taxonrank a español para la columna taxonRank.
-    # Parámetros:
-    # - value: Valor a traducir.
-    # Retorna:
-    # - value: Valor traducido a español.
-    if value is None:
-        return ''
-    normalized = str(value).strip().upper()
-    if not normalized:
-        return ''
-    return _TAXONRANK_TRANSLATION.get(normalized, '')
 
 def data_upload(db, filepath, table_name, columns, flush_every=None):
     # Confirma que los archivos de datos definidos en el .env existen.
@@ -372,17 +345,15 @@ def data_upload(db, filepath, table_name, columns, flush_every=None):
             col_specs = []
             for c in columns:
                 name = c.lower()
-                col_specs.append((header_map.get(name), name in _EPOCH_MS_COLS, name == 'taxonrank'))
+                col_specs.append((header_map.get(name), name in _EPOCH_MS_COLS))
 
             for row in reader:
                 # Para cada fila, escribe solo las columnas requeridas. Si falta columna o valor, usa cadena vacía.
                 # Si la columna es de tipo TIMESTAMPTZ, se convierte a ISO 8601.
-                # Si la columna es de tipo taxonrank, se traduce a español.
                 writer.writerow([
                     _epoch_ms_to_iso(row[idx]) if is_epoch and idx is not None and idx < len(row)
-                    else _translate_taxonrank_value(row[idx]) if is_taxonrank and idx is not None and idx < len(row)
                     else (row[idx] if idx is not None and idx < len(row) else '')
-                    for idx, is_epoch, is_taxonrank in col_specs
+                    for idx, is_epoch in col_specs
                 ])
                 count += 1
                 # Si el modulo de count con flush_size es igual a 0, se envía el buffer a la base de datos.
@@ -562,9 +533,9 @@ def create_join_validation_columns(db, table_name):
 
 def fill_species_from_scientificname(db, table_name):
     # Se llena el campo species con las dos primeras palabras de scientificname cuando taxonrank es
-    # 'SPECIES' o 'Especie' y species es nulo o vacío.
+    # SPECIES (valor típico de GBIF) y species es nulo o vacío.
     # Es equivalente a ejecutar la siguiente consulta:
-    # UPDATE "dwc_integrated_{fecha}}" SET "species" = TRIM(split_part("scientificname", ' ', 1) || ' ' || split_part("scientificname", ' ', 2)) WHERE UPPER("taxonrank") = 'SPECIES' AND ("species" IS NULL OR TRIM("species") = '')
+    # UPDATE "dwc_integrated_{fecha}}" SET "species" = TRIM(split_part("scientificname", ' ', 1) || ' ' || split_part("scientificname", ' ', 2)) WHERE UPPER(TRIM("taxonrank")) = 'SPECIES' AND ("species" IS NULL OR TRIM("species") = '')
     # Parámetros:   
     # - db: Conexión al pool de conexiones de PostgreSQL.
     # - table_name: Nombre de la tabla integrada dwc_integrated.
@@ -577,7 +548,7 @@ def fill_species_from_scientificname(db, table_name):
                 split_part("scientificname", ' ', 1) || ' ' ||
                 split_part("scientificname", ' ', 2)
             )
-            WHERE TRIM("taxonrank") = 'Especie'
+            WHERE UPPER(TRIM("taxonrank")) = 'SPECIES'
             AND "scientificname" IS NOT NULL
             AND TRIM("scientificname") <> ''
             AND ("species" IS NULL OR TRIM("species") = '');
