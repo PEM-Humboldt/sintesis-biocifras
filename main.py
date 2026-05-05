@@ -42,6 +42,7 @@ from utils.functions import (
     fill_species_from_scientificname,
     link_taxonrank_reference,
     add_geometry_and_indexes,
+    create_locations_table,
     create_join_validation_columns,
     create_species_index,
     spatials_joins,
@@ -105,6 +106,7 @@ try:
     timer(add_geometry_and_indexes, "Añadiendo PK y geometría base a la tabla integrada")(db, table_names['integrated'])
     timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(db, table_names['integrated'])
     timer(normalize_stateprovince_county, "Normalizando stateprovince/county antes de validación")(db, table_names['integrated'])
+    timer(create_locations_table, "Creando tabla de localidades únicas y referencia en integrada")(db, table_names['integrated'])
     timer(validate_geography, "Validación geográfica")(db, table_names['integrated'])
     timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(db, table_names['integrated'])
     timer(taxonomic_joins, "Cruces taxonómicos con listados")(db, table_names['integrated'])

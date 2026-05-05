@@ -738,7 +738,6 @@ def add_geometry_and_indexes(db, table_name):
 # Cruces espaciales con la tabla MGN_ADM_MPIO_2025 (división político-administrativa) e Invemar_maritime_regions (regiones marítimas)
 # --------------------------------------------------------------------------------------------------------------------------------------
 
-
 # Palabras que se deben convertir a minúsculas después de INITCAP en los campos de departamento y municipio
 # para estandarización de nombres. Por ejemplo, 'Norte De Santander' a 'Norte de Santander'.
 _LOWERCASE_WORDS = (' De ', ' Y ', ' Del ', ' La ')
@@ -1076,6 +1075,87 @@ def create_species_index(db, table_name):
         )
         logger.info("Indice BTREE creado: %s", idx_species)
         conn.commit()
+
+# --------------------------------------------------------------------------------------------------------------------------------------
+# Tabla de localidades únicas y referencia desde la integrada
+# --------------------------------------------------------------------------------------------------------------------------------------
+
+def create_locations_table(db, table_name):
+    # Crea una tabla de localidades únicas a partir de (decimallatitude, decimallongitude, county, stateprovince),
+    # agrega un id surrogate y vincula la tabla integrada con location_id por llave foránea nullable.
+    # Parámetros:
+    # - db: Conexión al pool de conexiones de PostgreSQL.
+    # - table_name: Nombre de la tabla integrada dwc_integrated.
+    # Retorna:
+    # - locations_table: Nombre de la tabla de localidades únicas creada.
+    integrated = table_name
+    locations_table = integrated.replace('dwc_integrated_', 'dwc_locations_')
+    fk_name = f"fk_{integrated}_location_id"
+
+    with db.connect() as conn:
+        conn.execute(
+            f'ALTER TABLE "{integrated}" '
+            f'ADD COLUMN IF NOT EXISTS "location_id" BIGINT'
+        )
+
+        if table_exists(db, locations_table):
+            conn.execute(f'DROP TABLE "{locations_table}"')
+            logger.info("DROP TABLE existente: %s", locations_table)
+
+        conn.execute(
+            f'CREATE TABLE "{locations_table}" AS '
+            f'SELECT DISTINCT '
+            f'"decimallatitude", '
+            f'"decimallongitude", '
+            f'"county", '
+            f'"stateprovince" '
+            f'FROM "{integrated}"'
+        )
+        conn.commit()
+
+        conn.execute(
+            f'ALTER TABLE "{locations_table}" '
+            f'ADD COLUMN "id" BIGSERIAL PRIMARY KEY'
+        )
+        conn.execute(
+            f'CREATE UNIQUE INDEX "idx_{locations_table}_uniq" '
+            f'ON "{locations_table}" ("decimallatitude", "decimallongitude", "county", "stateprovince")'
+        )
+        conn.execute(
+            f'CREATE INDEX "idx_{locations_table}_id" '
+            f'ON "{locations_table}" USING BTREE ("id")'
+        )
+        conn.commit()
+
+        conn.execute(
+            f'UPDATE "{integrated}" i '
+            f'SET "location_id" = l."id" '
+            f'FROM "{locations_table}" l '
+            f'WHERE i."decimallatitude" IS NOT DISTINCT FROM l."decimallatitude" '
+            f'AND i."decimallongitude" IS NOT DISTINCT FROM l."decimallongitude" '
+            f'AND i."county" IS NOT DISTINCT FROM l."county" '
+            f'AND i."stateprovince" IS NOT DISTINCT FROM l."stateprovince"'
+        )
+        conn.commit()
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS "idx_{integrated}_location_id" '
+            f'ON "{integrated}" USING BTREE ("location_id")'
+        )
+        conn.commit()
+        conn.execute(f'ALTER TABLE "{integrated}" DROP CONSTRAINT IF EXISTS "{fk_name}"')
+        conn.execute(
+            f'ALTER TABLE "{integrated}" '
+            f'ADD CONSTRAINT "{fk_name}" '
+            f'FOREIGN KEY ("location_id") '
+            f'REFERENCES "{locations_table}" ("id") '
+            f'ON UPDATE CASCADE '
+            f'ON DELETE SET NULL '
+            f'NOT VALID'
+        )
+        conn.commit()
+        logger.info("Tabla de localidades únicas creada")
+
+    return locations_table
 
 # --------------------------------------------------------------------------------------------------------------------------------------
 # Validaciones geográficas
