@@ -145,6 +145,28 @@ _SQL_COL_TYPES = {
     'lastinterpreted': 'TIMESTAMPTZ', 'lastparsed': 'TIMESTAMPTZ',
 }
 
+# -----------------------------------------------------------------------------------------------------
+# Mantenimiento posterior a actualizaciones masivas, función helper
+# -----------------------------------------------------------------------------------------------------
+
+def _run_table_maintenance(db, table_name):
+    # Se ejecuta el comando VACUUM (ANALYZE) y/o VACUUM (FULL, ANALYZE) para mantener la tabla optimizada.
+    # Parámetros:
+    # - db: Conexión al pool de conexiones de PostgreSQL.
+    # - table_name: Nombre de la tabla a mantener.
+    # Retorna:
+    # - None: No retorna nada.
+    raw_conn = db.raw_connection()
+    try:
+        raw_conn.autocommit = True
+        with raw_conn.cursor() as cur:
+            cur.execute(f'VACUUM (ANALYZE) "{table_name}"')
+            # Si la variable de entorno RUN_VACUUM_FULL es true, se ejecuta el comando VACUUM (FULL, ANALYZE).
+            if os.getenv('RUN_VACUUM_FULL', 'false').lower() == 'true':
+                cur.execute(f'VACUUM (FULL, ANALYZE) "{table_name}"')
+    finally:
+        raw_conn.close()
+
 # -------------------------------------------------------------------------------------------------------------------------
 # Creacion / truncado de tablas de staging (integrates y ocurrence) y la tabla integrada (dwc_integrated)
 # -------------------------------------------------------------------------------------------------------------------------
@@ -535,7 +557,7 @@ def fill_species_from_scientificname(db, table_name):
     # Se llena el campo species con las dos primeras palabras de scientificname cuando taxonrank es
     # SPECIES (valor típico de GBIF) y species es nulo o vacío.
     # Es equivalente a ejecutar la siguiente consulta:
-    # UPDATE "dwc_integrated_{fecha}}" SET "species" = TRIM(split_part("scientificname", ' ', 1) || ' ' || split_part("scientificname", ' ', 2)) WHERE UPPER(TRIM("taxonrank")) = 'SPECIES' AND ("species" IS NULL OR TRIM("species") = '')
+    # UPDATE "dwc_integrated_{fecha}}" SET "species" = TRIM(split_part("scientificname", ' ', 1) || ' ' || split_part("scientificname", ' ', 2)) WHERE "taxonrank" = 'SPECIES' AND ("species" IS NULL OR TRIM("species") = '')
     # Parámetros:   
     # - db: Conexión al pool de conexiones de PostgreSQL.
     # - table_name: Nombre de la tabla integrada dwc_integrated.
@@ -548,7 +570,7 @@ def fill_species_from_scientificname(db, table_name):
                 split_part("scientificname", ' ', 1) || ' ' ||
                 split_part("scientificname", ' ', 2)
             )
-            WHERE UPPER(TRIM("taxonrank")) = 'SPECIES'
+            WHERE "taxonrank" = 'SPECIES'
             AND "scientificname" IS NOT NULL
             AND TRIM("scientificname") <> ''
             AND ("species" IS NULL OR TRIM("species") = '');
@@ -556,27 +578,98 @@ def fill_species_from_scientificname(db, table_name):
         conn.commit()
     logger.info("Campo species completado desde scientificname en %s (%s filas)", table_name, f"{result.rowcount:,}")
 
-# -----------------------------------------------------------------------------------------------------
-# Mantenimiento posterior a actualizaciones masivas
-# -----------------------------------------------------------------------------------------------------
 
-def _run_table_maintenance(db, table_name):
-    # Se ejecuta el comando VACUUM (ANALYZE) y/o VACUUM (FULL, ANALYZE) para mantener la tabla optimizada.
+def link_taxonrank_reference(db, table_name):
+    # Vincula taxonrank con la tabla catálogo taxonomic_taxon_rank y crea integridad referencial.
+    # El proceso se ejecuta por lotes para evitar locks largos y picos de WAL en tablas grandes.
     # Parámetros:
     # - db: Conexión al pool de conexiones de PostgreSQL.
-    # - table_name: Nombre de la tabla a mantener.
+    # - table_name: Nombre de la tabla integrada dwc_integrated.
     # Retorna:
     # - None: No retorna nada.
-    raw_conn = db.raw_connection()
-    try:
-        raw_conn.autocommit = True
-        with raw_conn.cursor() as cur:
-            cur.execute(f'VACUUM (ANALYZE) "{table_name}"')
-            # Si la variable de entorno RUN_VACUUM_FULL es true, se ejecuta el comando VACUUM (FULL, ANALYZE).
-            if os.getenv('RUN_VACUUM_FULL', 'false').lower() == 'true':
-                cur.execute(f'VACUUM (FULL, ANALYZE) "{table_name}"')
-    finally:
-        raw_conn.close()
+    integrated = table_name
+    batch_size = int(os.getenv('FLUSH_EVERY', '500000'))
+    tmp_idx_integrated = f"idx_tmp_{integrated}_taxonrank"
+    fk_name = f"fk_{integrated}_taxonrank_id"
+    total_updated = 0
+
+    with db.connect() as conn:
+        conn.execute(
+            f'ALTER TABLE "{integrated}" '
+            f'ADD COLUMN IF NOT EXISTS "taxonrank_id" INTEGER'
+        )
+        conn.commit()
+        logger.info("Columna taxonrank_id preparada en %s", integrated)
+
+        # Índice temporal de apoyo para acelerar el join por taxonrank.
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS "{tmp_idx_integrated}" '
+            f'ON "{integrated}" ("taxonrank")'
+        )
+        conn.commit()
+        logger.info("Indice temporal creado: %s", tmp_idx_integrated)
+
+        while True:
+            result = conn.execute(
+                f'WITH batch AS ('
+                f'    SELECT i.ctid, t."id" AS taxonrank_id '
+                f'    FROM "{integrated}" i '
+                f'    JOIN "taxonomic_taxon_rank" t '
+                f'      ON i."taxonrank" = t."taxonrank" '
+                f'    WHERE i."taxonrank_id" IS NULL '
+                f'      AND i."taxonrank" IS NOT NULL '
+                f'    LIMIT {batch_size}'
+                f') '
+                f'UPDATE "{integrated}" i '
+                f'SET "taxonrank_id" = b.taxonrank_id '
+                f'FROM batch b '
+                f'WHERE i.ctid = b.ctid'
+            )
+            batch_updated = result.rowcount
+            conn.commit()
+            if batch_updated == 0:
+                break
+            total_updated += batch_updated
+            logger.info(
+                "Vinculación taxonrank batch en %s: %s filas (total %s)",
+                integrated,
+                f"{batch_updated:,}",
+                f"{total_updated:,}",
+            )
+
+        # Índice final para consultas por llave foránea.
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS "idx_{integrated}_taxonrank_id" '
+            f'ON "{integrated}" USING BTREE ("taxonrank_id")'
+        )
+        conn.commit()
+
+        # FK nullable: permite huérfanos (taxonrank_id = NULL) cuando no hay match en catálogo.
+        conn.execute(f'ALTER TABLE "{integrated}" DROP CONSTRAINT IF EXISTS "{fk_name}"')
+        conn.execute(
+            f'ALTER TABLE "{integrated}" '
+            f'ADD CONSTRAINT "{fk_name}" '
+            f'FOREIGN KEY ("taxonrank_id") '
+            f'REFERENCES "taxonomic_taxon_rank" ("id") '
+            f'ON UPDATE CASCADE '
+            f'ON DELETE SET NULL '
+            f'NOT VALID'
+        )
+        conn.execute(f'ALTER TABLE "{integrated}" VALIDATE CONSTRAINT "{fk_name}"')
+        conn.commit()
+        logger.info("Integridad referencial creada: %s", fk_name)
+
+        # Limpieza de índice temporal.
+        conn.execute(f'DROP INDEX IF EXISTS "{tmp_idx_integrated}"')
+        conn.commit()
+        logger.info("Indice temporal eliminado: %s", tmp_idx_integrated)
+
+    logger.info(
+        "Vinculación de taxonrank completada en %s (%s filas con taxonrank_id)",
+        integrated,
+        f"{total_updated:,}",
+    )
+
 
 # -----------------------------------------------------------------------------------------------------
 # Creación de indice primary key y campo de geometría en la tabla integrada

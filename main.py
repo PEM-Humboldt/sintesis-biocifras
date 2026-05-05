@@ -40,6 +40,7 @@ from utils.functions import (
     create_staging_indexes,
     create_integrated_table,
     fill_species_from_scientificname,
+    link_taxonrank_reference,
     add_geometry_and_indexes,
     create_join_validation_columns,
     create_species_index,
@@ -100,6 +101,7 @@ try:
 
     timer(create_join_validation_columns, "Crando columnas para cruces y validaciones en la tabla integrada")(db, table_names['integrated'])
     timer(fill_species_from_scientificname, "Completando campo species desde scientificname")(db, table_names['integrated'])
+    timer(link_taxonrank_reference, "Vinculando taxonrank con catálogo de referencia")(db, table_names['integrated'])
     timer(add_geometry_and_indexes, "Añadiendo PK y geometría base a la tabla integrada")(db, table_names['integrated'])
     timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(db, table_names['integrated'])
     timer(normalize_stateprovince_county, "Normalizando stateprovince/county antes de validación")(db, table_names['integrated'])
