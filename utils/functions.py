@@ -578,6 +578,9 @@ def fill_species_from_scientificname(db, table_name):
         conn.commit()
     logger.info("Campo species completado desde scientificname en %s (%s filas)", table_name, f"{result.rowcount:,}")
 
+# -----------------------------------------------------------------------------------------------------
+# Vinculación de taxonrank con la tabla catálogo taxonomic_taxon_rank y creación de integridad referencial
+# -----------------------------------------------------------------------------------------------------
 
 def link_taxonrank_reference(db, table_name):
     # Vincula taxonrank con la tabla catálogo taxonomic_taxon_rank y crea integridad referencial.
@@ -588,10 +591,8 @@ def link_taxonrank_reference(db, table_name):
     # Retorna:
     # - None: No retorna nada.
     integrated = table_name
-    batch_size = int(os.getenv('FLUSH_EVERY', '500000'))
     tmp_idx_integrated = f"idx_tmp_{integrated}_taxonrank"
     fk_name = f"fk_{integrated}_taxonrank_id"
-    total_updated = 0
 
     with db.connect() as conn:
         conn.execute(
@@ -609,33 +610,23 @@ def link_taxonrank_reference(db, table_name):
         conn.commit()
         logger.info("Indice temporal creado: %s", tmp_idx_integrated)
 
-        while True:
-            result = conn.execute(
-                f'WITH batch AS ('
-                f'    SELECT i.ctid, t."id" AS taxonrank_id '
-                f'    FROM "{integrated}" i '
-                f'    JOIN "taxonomic_taxon_rank" t '
-                f'      ON i."taxonrank" = t."taxonrank" '
-                f'    WHERE i."taxonrank_id" IS NULL '
-                f'      AND i."taxonrank" IS NOT NULL '
-                f'    LIMIT {batch_size}'
-                f') '
-                f'UPDATE "{integrated}" i '
-                f'SET "taxonrank_id" = b.taxonrank_id '
-                f'FROM batch b '
-                f'WHERE i.ctid = b.ctid'
-            )
-            batch_updated = result.rowcount
-            conn.commit()
-            if batch_updated == 0:
-                break
-            total_updated += batch_updated
-            logger.info(
-                "Vinculación taxonrank batch en %s: %s filas (total %s)",
-                integrated,
-                f"{batch_updated:,}",
-                f"{total_updated:,}",
-            )
+        # Actualización en una sola pasada: suele escalar mejor que re-escanear por lotes
+        # cuando el catálogo de referencia (taxonomic_taxon_rank) es pequeño.
+        result = conn.execute(
+            f'UPDATE "{integrated}" i '
+            f'SET "taxonrank_id" = t."id" '
+            f'FROM "taxonomic_taxon_rank" t '
+            f'WHERE i."taxonrank" = t."taxonrank" '
+            f'AND i."taxonrank_id" IS NULL '
+            f'AND i."taxonrank" IS NOT NULL'
+        )
+        total_updated = result.rowcount
+        conn.commit()
+        logger.info(
+            "Vinculación taxonrank en %s: %s filas actualizadas",
+            integrated,
+            f"{total_updated:,}",
+        )
 
         # Índice final para consultas por llave foránea.
         conn.execute(
