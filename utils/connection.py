@@ -17,6 +17,25 @@ from psycopg2.extensions import connection as BaseConnection
 # Se conecta con el logger para tracking de eventos de conexión.
 logger = logging.getLogger('sintesis_biocifras')
 
+_REQUIRED_REFERENCE_TABLES = (
+    'INVEMAR_MARITIME_REGIONS',
+    'MGN_ADM_MPIO_2025',
+    'NARINO_MARITIME_REGION',
+    'gbif_datasets',
+    'gbif_publishers',
+    'geo_countyslug_validation',
+    'geo_divipola',
+    'geo_stateprovince_validation',
+    'table_registry',
+    'taxonomic_cites',
+    'taxonomic_col_list',
+    'taxonomic_invasive_exotic',
+    'taxonomic_migratory',
+    'taxonomic_taxon_rank',
+    'taxonomic_threat_mads',
+    'taxonomic_threat_uicn',
+)
+
 
 class _Result:
     def __init__(self, rows, rowcount):
@@ -109,24 +128,47 @@ def check_connection(db):
 
 
 def table_exists(db, table_name):
-    # Consulta information_schema para validar si una tabla existe en schema public.
+    # Consulta information_schema para validar:
+    # - existencia de la tabla solicitada en schema public
+    # - existencia de tablas de referencia requeridas por el pipeline
+    # También valida la existencia de la extensión postgis.
     # Parámetros:
     # - db: Conexión al pool de conexiones creado con get_db().
     # - table_name: nombre de la tabla a verificar.
     # Retorna:
-    # - True: si la tabla existe.
-    # - False: si la tabla no existe.
+    # - True: si existe la tabla solicitada y el set requerido (tablas + postgis).
+    # - False: si falta cualquiera de los componentes requeridos.
     with db.connect() as conn:
-        result = conn.execute(
+        existing_tables_rows = conn.execute(
             """
-            SELECT EXISTS (
-                SELECT 1
-                FROM information_schema.tables
-                WHERE table_schema = 'public'
-                  AND table_name = %(table_name)s
-            )
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name = ANY(%(table_names)s)
             """,
-            {'table_name': table_name},
+            {'table_names': [table_name, *_REQUIRED_REFERENCE_TABLES]},
         )
-        row = result.fetchall()[0]
-        return bool(row[0])
+        existing_tables = {row[0] for row in existing_tables_rows.fetchall()}
+
+        postgis_exists = bool(
+            conn.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_extension
+                    WHERE extname = 'postgis'
+                )
+                """
+            ).fetchall()[0][0]
+        )
+
+        missing_tables = [
+            tname for tname in (table_name, *_REQUIRED_REFERENCE_TABLES)
+            if tname not in existing_tables
+        ]
+        if missing_tables:
+            logger.warning("Tablas faltantes detectadas: %s", ', '.join(missing_tables))
+        if not postgis_exists:
+            logger.warning("Extensión faltante detectada: postgis")
+
+        return (table_name in existing_tables) and (not missing_tables) and postgis_exists
