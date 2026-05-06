@@ -489,9 +489,7 @@ def create_integrated_table(db, table_names):
 
         sql = (
             f'CREATE TABLE "{integrated}" AS '
-            f'SELECT {occurrence_cols}, {verbatim_cols}, '
-            f'o."stateprovince" AS "verbatimstateprovince", '
-            f'v."county" AS "verbatimcounty" '
+            f'SELECT {occurrence_cols}, {verbatim_cols} '
             f'FROM "{occurrence}" o '
             f'INNER JOIN "{verbatim}" v ON o."gbifid" = v."gbifid"'
         )
@@ -514,8 +512,6 @@ def create_join_validation_columns(db, table_name):
     with db.connect() as conn:
         conn.execute(
             f'ALTER TABLE "{integrated}" '
-            f'ADD COLUMN IF NOT EXISTS "verbatimstateprovince" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "verbatimcounty" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "codedane" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "stateprovincemgn" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "countymgn" TEXT, '
@@ -880,15 +876,9 @@ def spatials_joins(db, table_name):
 # -----------------------------------------------------------------------------------------------------
 
 def normalize_stateprovince_county(db, table_name):
-    # Normaliza stateprovince y preserva valores originales verbatim antes de validar geografía.
+    # Normaliza stateprovince y county antes de validar geografía.
     integrated = table_name
     with db.connect() as conn:
-        conn.execute(
-            f'UPDATE "{table_name}" '
-            f'SET "verbatimstateprovince" = "stateprovince", '
-            f'    "verbatimcounty" = "county" '
-            f'WHERE "verbatimstateprovince" IS NULL OR "verbatimcounty" IS NULL'
-        )
         # Normalización por alias: comparación case-insensitive con trim
         conn.execute(
             f'UPDATE "{integrated}" i '
@@ -1080,7 +1070,7 @@ def create_species_index(db, table_name):
 # Tabla de localidades únicas y referencia desde la integrada
 # --------------------------------------------------------------------------------------------------------------------------------------
 
-def create_locations_table(db, table_name):
+def validate_localities(db, table_name):
     # Mantiene una tabla de localidades únicas a partir de los campos
     # decimallatitude, decimallongitude, county, stateprovince, e inserta
     # nuevas combinaciones desde la tabla integrada actual.
