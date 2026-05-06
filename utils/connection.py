@@ -25,6 +25,7 @@ _REQUIRED_REFERENCE_TABLES = (
     'gbif_publishers',
     'geo_countyslug_validation',
     'geo_divipola',
+    'geo_locality_validation',
     'geo_stateprovince_validation',
     'table_registry',
     'taxonomic_cites',

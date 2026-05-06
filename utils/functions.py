@@ -1081,49 +1081,48 @@ def create_species_index(db, table_name):
 # --------------------------------------------------------------------------------------------------------------------------------------
 
 def create_locations_table(db, table_name):
-    # Crea una tabla de localidades únicas a partir de (decimallatitude, decimallongitude, county, stateprovince),
-    # agrega un id surrogate y vincula la tabla integrada con location_id por llave foránea nullable.
+    # Mantiene una tabla de localidades únicas a partir de los campos
+    # decimallatitude, decimallongitude, county, stateprovince, e inserta
+    # nuevas combinaciones desde la tabla integrada actual.
+    # Luego vincula la integrada con location_id por llave foránea nullable.
     # Parámetros:
     # - db: Conexión al pool de conexiones de PostgreSQL.
     # - table_name: Nombre de la tabla integrada dwc_integrated.
     # Retorna:
-    # - locations_table: Nombre de la tabla de localidades únicas creada.
+    # - locations_table: Nombre de la tabla persistente de localidades.
     integrated = table_name
-    locations_table = integrated.replace('dwc_integrated_', 'dwc_locations_')
+    locations_table = 'geo_locality_validation'
     fk_name = f"fk_{integrated}_location_id"
 
     with db.connect() as conn:
         conn.execute(
             f'ALTER TABLE "{integrated}" '
-            f'ADD COLUMN IF NOT EXISTS "location_id" BIGINT'
+            f'ADD COLUMN IF NOT EXISTS "location_id" INT4'
         )
 
-        if table_exists(db, locations_table):
-            conn.execute(f'DROP TABLE "{locations_table}"')
-            logger.info("DROP TABLE existente: %s", locations_table)
-
         conn.execute(
-            f'CREATE TABLE "{locations_table}" AS '
-            f'SELECT DISTINCT '
-            f'"decimallatitude", '
-            f'"decimallongitude", '
-            f'"county", '
-            f'"stateprovince" '
-            f'FROM "{integrated}"'
-        )
-        conn.commit()
-
-        conn.execute(
-            f'ALTER TABLE "{locations_table}" '
-            f'ADD COLUMN "id" BIGSERIAL PRIMARY KEY'
-        )
-        conn.execute(
-            f'CREATE UNIQUE INDEX "idx_{locations_table}_uniq" '
+            f'CREATE INDEX IF NOT EXISTS "idx_{locations_table}" '
             f'ON "{locations_table}" ("decimallatitude", "decimallongitude", "county", "stateprovince")'
         )
+
+        # Inserta únicamente combinaciones no existentes, comparando con null-safe equality.
         conn.execute(
-            f'CREATE INDEX "idx_{locations_table}_id" '
-            f'ON "{locations_table}" USING BTREE ("id")'
+            f'INSERT INTO "{locations_table}" '
+            f'("decimallatitude", "decimallongitude", "county", "stateprovince") '
+            f'SELECT DISTINCT '
+            f'i."decimallatitude", '
+            f'i."decimallongitude", '
+            f'i."county", '
+            f'i."stateprovince" '
+            f'FROM "{integrated}" i '
+            f'WHERE NOT EXISTS ('
+            f'    SELECT 1 '
+            f'    FROM "{locations_table}" l '
+            f'    WHERE l."decimallatitude" IS NOT DISTINCT FROM i."decimallatitude" '
+            f'      AND l."decimallongitude" IS NOT DISTINCT FROM i."decimallongitude" '
+            f'      AND l."county" IS NOT DISTINCT FROM i."county" '
+            f'      AND l."stateprovince" IS NOT DISTINCT FROM i."stateprovince"'
+            f')'
         )
         conn.commit()
 
@@ -1153,7 +1152,7 @@ def create_locations_table(db, table_name):
             f'NOT VALID'
         )
         conn.commit()
-        logger.info("Tabla de localidades únicas creada")
+        logger.info("Tabla de localidades persistente actualizada: %s", locations_table)
 
     return locations_table
 
