@@ -12,7 +12,7 @@ El script sigue los siguientes pasos:
 4. Cargar los datos desde occurrence.txt y verbatim.txt desde archivos descomprimidos de GBIF (utils/functions.py -> data_upload).
 5. Crear índices en las tablas de staging para el campo gbifID (utils/functions.py -> create_staging_indexes).
 6. Crear la tabla integrada con las columnas de las tablas de staging (utils/functions.py -> create_integrated_table).
-7. Añadir geometría con base a las coordenadas decimales y índices a la tabla integrada (utils/functions.py -> add_geometry_and_indexes).
+7. Añadir PK sobre gbifid en la tabla integrada (utils/functions.py -> add_gbifid_index).
 8. Registrar la carga en la tabla de registro de versiones de tablas (table_registry) (utils/functions.py -> register_load).
 9. Registrar el fin del proceso (utils/logger.py -> logger.info).
 """
@@ -41,7 +41,7 @@ from utils.functions import (
     create_integrated_table,
     fill_species_from_scientificname,
     link_taxonrank_reference,
-    add_geometry_and_indexes,
+    add_gbifid_index,
     validate_localities,
     create_join_validation_columns,
     create_species_index,
@@ -103,15 +103,15 @@ try:
     timer(create_join_validation_columns, "Crando columnas para cruces y validaciones en la tabla integrada")(db, table_names['integrated'])
     timer(fill_species_from_scientificname, "Completando campo species desde scientificname")(db, table_names['integrated'])
     timer(link_taxonrank_reference, "Vinculando taxonrank con catálogo de referencia")(db, table_names['integrated'])
-    timer(add_geometry_and_indexes, "Añadiendo PK y geometría base a la tabla integrada")(db, table_names['integrated'])
+    timer(add_gbifid_index, "Añadiendo PK la tabla integrada")(db, table_names['integrated'])
+    timer(validate_localities, "Creando tabla de localidades únicas y referencia en integrada")(db, table_names['integrated'])
     timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(db, table_names['integrated'])
     timer(normalize_stateprovince_county, "Normalizando stateprovince/county antes de validación")(db, table_names['integrated'])
-    timer(validate_localities, "Creando tabla de localidades únicas y referencia en integrada")(db, table_names['integrated'])
-    timer(validate_geography, "Validación geográfica")(db, table_names['integrated'])
-    timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(db, table_names['integrated'])
-    timer(taxonomic_joins, "Cruces taxonómicos con listados")(db, table_names['integrated'])
-    timer(clean_threatstatus_fields, "Normalizando campos threatstatus antes de API")(db, table_names['integrated'])
-    timer(gbif_api_calls, "Enriqueciendo metadatos de datasets y publicadores GBIF")(db, table_names['integrated'])
+    #timer(validate_geography, "Validación geográfica")(db, table_names['integrated'])
+    #timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(db, table_names['integrated'])
+    #timer(taxonomic_joins, "Cruces taxonómicos con listados")(db, table_names['integrated'])
+    #timer(clean_threatstatus_fields, "Normalizando campos threatstatus antes de API")(db, table_names['integrated'])
+    #timer(gbif_api_calls, "Enriqueciendo metadatos de datasets y publicadores GBIF")(db, table_names['integrated'])
 
     register_load(db, table_names, today, origin)
     logger.info("Proceso completado.")
