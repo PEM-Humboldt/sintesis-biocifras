@@ -899,13 +899,13 @@ def normalize_stateprovince_county(db, table_name):
                 break
             total_v3 += n
             logger.info(
-                "Validación 3 (MGN respaldo) batch en %s: %s filas (total %s)",
+                "Validación 3 (MGN) batch en %s: %s filas (total %s)",
                 locality,
                 f"{n:,}",
                 f"{total_v3:,}",
             )
         logger.info(
-            "Validación 3 (MGN respaldo) completada en %s (%s filas)",
+            "Validación 3 (MGN) completada en %s (%s filas)",
             locality,
             f"{total_v3:,}",
         )
@@ -953,9 +953,42 @@ def normalize_stateprovince_county(db, table_name):
             f"{total_county_v1:,}",
         )
 
-        # Validación 2 (municipio): valida la pareja stateprovincevalidated + countyvalidated
-        # contra geo_divipola (municipio -> parent_id -> departamento). Si no hay match, limpia countyvalidated.
+        # Validación 2 (municipio): Valida con MGN cuando countyvalidated es NULL o vacío.
         total_county_v2 = 0
+        while True:
+            result = conn.execute(
+                f'WITH batch AS ('
+                f'    SELECT ctid '
+                f'    FROM "{locality}" '
+                f'    WHERE "countymgn" IS NOT NULL '
+                f'      AND "countyvalidated" IS NULL '
+                f'    LIMIT {batch_size}'
+                f') '
+                f'UPDATE "{locality}" i '
+                f'SET "countyvalidated" = TRIM(i."countymgn") '
+                f'FROM batch b '
+                f'WHERE i.ctid = b.ctid'
+            )
+            n = result.rowcount
+            conn.commit()
+            if n == 0:
+                break
+            total_county_v2 += n
+            logger.info(
+                "Validación 2 (MGN municipio) batch en %s: %s filas (total %s)",
+                locality,
+                f"{n:,}",
+                f"{total_county_v2:,}",
+            )
+        logger.info(
+            "Validación 2 (MGN municipio) completada en %s (%s filas)",
+            locality,
+            f"{total_county_v2:,}",
+        )
+
+        # Validación 3 (municipio): valida la pareja stateprovincevalidated + countyvalidated
+        # contra geo_divipola (municipio -> parent_id -> departamento). Si no hay match, limpia countyvalidated.
+        total_county_v3 = 0
         while True:
             result = conn.execute(
                 f'WITH batch AS ('
@@ -973,41 +1006,13 @@ def normalize_stateprovince_county(db, table_name):
                 f'    LIMIT {batch_size}'
                 f') '
                 f'UPDATE "{locality}" i '
-                f'SET "countyvalidated" = \'\' '
-                f'FROM batch b '
-                f'WHERE i.ctid = b.ctid'
-            )
-            n = result.rowcount
-            conn.commit()
-            if n == 0:
-                break
-            total_county_v2 += n
-            logger.info(
-                "Validación 2 (pareja depto/municipio validada) batch en %s: %s filas (total %s)",
-                locality,
-                f"{n:,}",
-                f"{total_county_v2:,}",
-            )
-        logger.info(
-            "Validación 2 (pareja depto/municipio validada) completada en %s (%s filas)",
-            locality,
-            f"{total_county_v2:,}",
-        )
-
-        # Validación 3 (municipio): último recurso con MGN cuando county es NULL.
-        total_county_v3 = 0
-        while True:
-            result = conn.execute(
-                f'WITH batch AS ('
-                f'    SELECT ctid '
-                f'    FROM "{locality}" '
-                f'    WHERE "countymgn" IS NOT NULL '
-                f'      AND "countyvalidated" IS NULL '
-                f'      AND NULLIF(BTRIM("county"), \'\') IS NULL '
-                f'    LIMIT {batch_size}'
-                f') '
-                f'UPDATE "{locality}" i '
-                f'SET "countyvalidated" = TRIM(i."countymgn") '
+                f'SET "countyvalidated" = CASE '
+                f'    WHEN NULLIF(BTRIM(i."countymgn"), \'\') IS NOT NULL '
+                f'     AND UPPER(TRIM(COALESCE(i."stateprovincemgn", \'\'))) = '
+                f'         UPPER(TRIM(COALESCE(i."stateprovincevalidated", \'\'))) '
+                f'    THEN TRIM(i."countymgn") '
+                f'    ELSE NULL '
+                f'END '
                 f'FROM batch b '
                 f'WHERE i.ctid = b.ctid'
             )
@@ -1017,18 +1022,18 @@ def normalize_stateprovince_county(db, table_name):
                 break
             total_county_v3 += n
             logger.info(
-                "Validación 3 (MGN respaldo municipio) batch en %s: %s filas (total %s)",
+                "Validación 3 (consistencia depto/municipio validado) batch en %s: %s filas (total %s)",
                 locality,
                 f"{n:,}",
                 f"{total_county_v3:,}",
             )
         logger.info(
-            "Validación 3 (MGN respaldo municipio) completada en %s (%s filas)",
+            "Validación 3 (consistencia depto/municipio validado) completada en %s (%s filas)",
             locality,
             f"{total_county_v3:,}",
         )
 
-        # # stateprovinceslug desde geo_divipola para subtype = departamento
+        # # SE HACE AL FINAL ------   stateprovinceslug desde geo_divipola para subtype = departamento
         # conn.execute(
         #     f'UPDATE "{locality}" i '
         #     f'SET "stateprovinceslug" = d."slug" '
@@ -1041,7 +1046,7 @@ def normalize_stateprovince_county(db, table_name):
         #     f'AND UPPER(TRIM(i."stateprovince")) = d."dept_name"'
         # )
 
-        # # Reglas de validación de countyslug por utilizando stateprovinceslug
+        # # SE HACE AL FINAL ------  Reglas de validación de countyslug por utilizando stateprovinceslug
         # conn.execute(
         #     f'UPDATE "{locality}" i '
         #     f'SET "countyslug" = o."countyslugresolved" '
@@ -1051,7 +1056,7 @@ def normalize_stateprovince_county(db, table_name):
         #     f'AND i."countyslug" IS DISTINCT FROM o."countyslugresolved"'
         # )
 
-        # # Actualiza county desde la divipola para subtype = municipio.
+        # # SE HACE AL FINAL ------  Actualiza county desde la divipola para subtype = municipio.
         # conn.execute(
         #     f'UPDATE "{locality}" i '
         #     f'SET "county" = m."name", '
@@ -1062,28 +1067,6 @@ def normalize_stateprovince_county(db, table_name):
         #     f'AND m."slug" = i."countyslug"'
         # )
 
-        # # Fallback: cruza por nombre del municipio derivado por coordenada (countymgn)
-        # # cuando no hubo match por slug.
-        # conn.execute(
-        #     f'UPDATE "{locality}" i '
-        #     f'SET "county" = m."name", '
-        #     f'    "countyslug" = m."slug" '
-        #     f'FROM "geo_divipola" m '
-        #     f'WHERE m."subtype" = \'municipio\' '
-        #     f'AND m."parentslug" = i."stateprovinceslug" '
-        #     f'AND i."countymgn" IS NOT NULL '
-        #     f'AND UPPER(TRIM(m."name")) = UPPER(TRIM(i."countymgn"))'
-        # )
-
-        # # Regla: si el municipio no corresponde al departamento, se limpia county.
-        # conn.execute(
-        #     f'UPDATE "{locality}" i '
-        #     f'SET "county" = \'\' '
-        #     f'FROM "geo_divipola" m '
-        #     f'WHERE m."subtype" = \'municipio\' '
-        #     f'AND m."slug" = i."countyslug" '
-        #     f'AND m."parentslug" IS DISTINCT FROM i."stateprovinceslug"'
-        # )
 
         # # Regla: si county queda vacío y el departamento textual coincide con el de coordenada,
         # # usar municipio por coordenada (countymgn).
