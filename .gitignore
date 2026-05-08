@@ -178,7 +178,7 @@ cython_debug/
 
 # R
 .Rproj.user
-**.Rproj
+**/**.Rproj
 **/.Renviron
 .Rhistory
 
