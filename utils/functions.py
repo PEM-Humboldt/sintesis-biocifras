@@ -953,6 +953,47 @@ def normalize_stateprovince_county(db, table_name):
             f"{total_county_v1:,}",
         )
 
+        # Validación 2 (municipio): valida la pareja stateprovincevalidated + countyvalidated
+        # contra geo_divipola (municipio -> parent_id -> departamento). Si no hay match, limpia countyvalidated.
+        total_county_v2 = 0
+        while True:
+            result = conn.execute(
+                f'WITH batch AS ('
+                f'    SELECT i.ctid '
+                f'    FROM "{locality}" i '
+                f'    WHERE NULLIF(BTRIM(i."countyvalidated"), \'\') IS NOT NULL '
+                f'      AND NOT EXISTS ('
+                f'          SELECT 1 '
+                f'          FROM "geo_divipola" m '
+                f'          INNER JOIN "geo_divipola" d ON d."id" = m."parent_id" '
+                f'          WHERE m."subtype" = \'municipio\' '
+                f'            AND UPPER(TRIM(m."name")) = UPPER(TRIM(i."countyvalidated")) '
+                f'            AND UPPER(TRIM(d."name")) = UPPER(TRIM(i."stateprovincevalidated"))'
+                f'      ) '
+                f'    LIMIT {batch_size}'
+                f') '
+                f'UPDATE "{locality}" i '
+                f'SET "countyvalidated" = \'\' '
+                f'FROM batch b '
+                f'WHERE i.ctid = b.ctid'
+            )
+            n = result.rowcount
+            conn.commit()
+            if n == 0:
+                break
+            total_county_v2 += n
+            logger.info(
+                "Validación 2 (pareja depto/municipio validada) batch en %s: %s filas (total %s)",
+                locality,
+                f"{n:,}",
+                f"{total_county_v2:,}",
+            )
+        logger.info(
+            "Validación 2 (pareja depto/municipio validada) completada en %s (%s filas)",
+            locality,
+            f"{total_county_v2:,}",
+        )
+
         # Validación 3 (municipio): último recurso con MGN cuando county es NULL.
         total_county_v3 = 0
         while True:
@@ -986,49 +1027,6 @@ def normalize_stateprovince_county(db, table_name):
             locality,
             f"{total_county_v3:,}",
         )
-
-        # # Limpieza de espacios en stateprovince y county
-        # conn.execute(
-        #     f'UPDATE "{locality}" '
-        #     f'SET "stateprovince" = TRIM("stateprovince"), '
-        #     f'    "county" = TRIM("county") '
-        #     f'WHERE "stateprovince" IS NOT NULL OR "county" IS NOT NULL'
-        # )
-
-        # # Normalización slug de municipio:
-        # conn.execute(
-        #     f'UPDATE "{locality}" '
-        #     f'SET "countyslug" = NULLIF(TRIM(BOTH \'-\' FROM REGEXP_REPLACE('
-        #     f'    REGEXP_REPLACE('
-        #     f'        REGEXP_REPLACE('
-        #     f'            TRANSLATE('
-        #     f'                LOWER(TRIM(COALESCE(NULLIF('
-        #     f'                    REGEXP_REPLACE('
-        #     f'                        REGEXP_REPLACE('
-        #     f'                            REGEXP_REPLACE(COALESCE("county", \'\'), \'d\\s*\\.\\s*c\\s*\\.\', \'dc\', \'gi\'), '
-        #     f'                            \'d\\s*\\.\\s*c\', \'dc\', \'gi\''
-        #     f'                        ), '
-        #     f'                        \'(municipio\\s+de|municipio|mpio\\.?\\s*de|mun\\.?|m\\.?\\s*de|no\\s+data|unknown|no\\s+reference\\s+available|distrito\\s+capital|southwestern|eastern|more\\s+info\\s+needed|northern|province|about|municipality|department|district|,n30km|\\(is\\.\\)|correg\\.?|\\.\\s*correg\\.?|mts|"+|,)\' , '
-        #     f'                        \' \', '
-        #     f'                        \'gi\''
-        #     f'                    ), '
-        #     f'                    \'\''
-        #     f'                ), REGEXP_REPLACE('
-        #     f'                    REGEXP_REPLACE(COALESCE("countymgn", \'\'), \'d\\s*\\.\\s*c\\s*\\.\', \'dc\', \'gi\'), '
-        #     f'                    \'d\\s*\\.\\s*c\', \'dc\', \'gi\''
-        #     f'                ), \'\'))), '
-        #     f'                \'áéíóúñüã√\', \'aeiounuao\''
-        #     f'            ), '
-        #     f'            \'[^a-z0-9\\s-]+\', '
-        #     f'            \' \', '
-        #     f'            \'g\''
-        #     f'        ), '
-        #     f'        \'\\s+\', \'-\', \'g\''
-        #     f'    ), '
-        #     f'    \'-+\', \'-\', \'g\''
-        #     f')), \'\')'
-        # )
-
 
         # # stateprovinceslug desde geo_divipola para subtype = departamento
         # conn.execute(
