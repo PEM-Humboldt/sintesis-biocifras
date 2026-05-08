@@ -1,6 +1,6 @@
-sqlalchemy
 psycopg2-binary
 python-dotenv
+requests
 pygbif
 pandas
 tabulate
