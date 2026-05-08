@@ -107,7 +107,7 @@ try:
     timer(validate_localities, "Creando tabla de localidades únicas y referencia en integrada")(db, table_names['integrated'])
     timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(db, table_names['integrated'])
     timer(normalize_stateprovince_county, "Normalizando stateprovince/county antes de validación")(db, table_names['integrated'])
-    #timer(validate_geography, "Validación geográfica")(db, table_names['integrated'])
+    timer(validate_geography, "Validación geográfica")(db, table_names['integrated'])
     #timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(db, table_names['integrated'])
     #timer(taxonomic_joins, "Cruces taxonómicos con listados")(db, table_names['integrated'])
     #timer(clean_threatstatus_fields, "Normalizando campos threatstatus antes de API")(db, table_names['integrated'])

@@ -18,7 +18,7 @@ para el proceso de análisis y síntesis de cifras para Biodiversidad en cifras.
 - create_species_index: Función para crear índice BTREE sobre species para optimizar cruces taxonómicos.
 - spatials_joins: Cruza geo_locality_validation con MGN_ADM_MPIO_2025 y capas marítimas usando ST_Intersects.
 - normalize_stateprovince_county: Normaliza stateprovince, county y slugs en geo_locality_validation antes de validar geografía.
-- validate_geography: Valida la geografía de la tabla integrada.
+- validate_geography: Valida la geografía sobre geo_locality_validation (validated vs MGN).
 - taxonomic_joins: Cruza la tabla integrada con tablas taxonómicas por el campo species.
 - clean_threatstatus_fields: Normaliza threatstatus y agrega sufijos por fuente (IUCN/MADS).
 - gbif_api_calls: Enriquece la tabla integrada con metadatos de datasets y publicadores desde tablas locales y API GBIF.
@@ -1123,7 +1123,6 @@ def normalize_stateprovince_county(db, table_name):
 # Creación de índice BTREE sobre species para optimizar cruces taxonómicos.
 # --------------------------------------------------------------------------------------------------------------------------------------
 
-
 def create_species_index(db, table_name):
     # Crea índice BTREE sobre species para optimizar cruces taxonómicos.
     integrated = table_name
@@ -1271,57 +1270,98 @@ def validate_localities(db, table_name):
 # Validaciones geográficas
 # --------------------------------------------------------------------------------------------------------------------------------------
 
-# Se valida el estado y el municipio contra los valores del cruce con capas MGN y Zonas marítimas
 def validate_geography(db, table_name):
-    # TODO: Esta validación asume columnas completadas por spatials_joins en integrada.
-    #       Ajustar cuando el cruce espacial se ejecute únicamente sobre geo_locality_validation.
-    integrated = table_name
+    # Campos validados vs MGN en geo_locality_validation (*validated vs *mgn).
+    # Por lotes; solo filas con validación pendiente persistente (*validation IS NULL).
+    # Una TEMP guarda ids ya tratados en esta corrida para no reprocesar filas donde el CASE
+    # puede dejar ambas validaciones NULL (sin eso el while no terminaría).
+    # Si cambian *validated en BD y debe recalcularse, vaciar antes esas columnas de validación.
+    _ = table_name  # firma mantenida para compatibilidad con el orquestador (main.timer).
+    locality_tbl = 'geo_locality_validation'
+    batch_size = int(os.getenv('FLUSH_EVERY', '500000'))
 
-    val_case = (
-        "CASE "
-        "WHEN UPPER(TRIM(\"{orig}\")) = UPPER(TRIM(\"{mgn}\")) THEN TRUE "
-        "WHEN \"{orig}\" IS NULL OR TRIM(\"{orig}\") = '' THEN NULL "
-        "WHEN \"decimallatitude\" IS NULL AND \"decimallongitude\" IS NULL THEN NULL "
-        "WHEN \"maritimeregion\" IS NOT NULL THEN NULL "
-        "ELSE FALSE END"
-    )
+    def _val_case(alias, orig_col, mgn_col):
+        a = alias
+        return (
+            f'CASE '
+            f'WHEN UPPER(TRIM({a}"{orig_col}")) = UPPER(TRIM({a}"{mgn_col}")) THEN TRUE '
+            f'WHEN {a}"{orig_col}" IS NULL OR TRIM({a}"{orig_col}") = \'\' THEN NULL '
+            f'WHEN {a}"decimallatitude" IS NULL AND {a}"decimallongitude" IS NULL THEN NULL '
+            f'WHEN {a}"maritimeregion" IS NOT NULL THEN NULL '
+            f'ELSE FALSE END'
+        )
 
-    validations = {
-        'stateprovincevalidation': ('stateprovince', 'stateprovincemgn'),
-        'countyvalidation': ('county', 'countymgn'),
-    }
-
-    sp_case = val_case.format(orig='stateprovince', mgn='stateprovincemgn')
-    co_case = val_case.format(orig='county', mgn='countymgn')
+    sp_case = _val_case('t.', 'stateprovincevalidated', 'stateprovincemgn')
+    co_case = _val_case('t.', 'countyvalidated', 'countymgn')
 
     with db.connect() as conn:
-        # Una sola pasada: calcula las validaciones booleanas y flaggeo simultáneamente.
-        # flaggeo se deriva inline de las mismas expresiones CASE para evitar depender
-        # de columnas que aún no tienen valor en esta misma sentencia.
+        conn.execute('DROP TABLE IF EXISTS _validate_geography_batch')
         conn.execute(
-            f'UPDATE "{integrated}" SET '
-            f'"stateprovincevalidation" = {sp_case}, '
-            f'"countyvalidation" = {co_case}, '
-            f'"flaggeo" = CASE '
-            f'WHEN ({sp_case}) IS TRUE  AND ({co_case}) IS TRUE  THEN NULL '
-            f'WHEN ({sp_case}) IS FALSE AND ({co_case}) IS FALSE '
-            f"THEN 'Departamento y municipio no coinciden con ubicación de la coordenada' "
-            f'WHEN ({sp_case}) IS TRUE  AND ({co_case}) IS FALSE '
-            f"THEN 'Municipio no coincide con ubicación de la coordenada' "
-            f'WHEN ({sp_case}) IS FALSE AND ({co_case}) IS TRUE '
-            f"THEN 'Departamento no coincide con ubicación de la coordenada' "
-            f'WHEN ({sp_case}) IS NULL  AND ({co_case}) IS NULL '
-            f'AND "maritimeregion" IS NOT NULL '
-            f"THEN 'Coordenada en área marítima' "
-            f'WHEN ({sp_case}) IS NULL  AND ({co_case}) IS NULL '
-            f'AND "decimallatitude" IS NULL AND "decimallongitude" IS NULL '
-            f"THEN 'Sin coordenadas' "
-            f'ELSE NULL END'
+            'CREATE TEMP TABLE _validate_geography_batch (lid INT PRIMARY KEY)'
         )
-        logger.info("Validación geográfica completada en %s", integrated)
-
         conn.commit()
 
+        total_rows = 0
+        while True:
+            peek = conn.execute(
+                f'SELECT "id" '
+                f'FROM "{locality_tbl}" '
+                f'WHERE "stateprovincevalidation" IS NULL '
+                f'  AND "countyvalidation" IS NULL '
+                f'  AND "id" NOT IN (SELECT lid FROM _validate_geography_batch) '
+                f'ORDER BY "id" '
+                f'LIMIT {batch_size}'
+            )
+            id_rows = peek.fetchall()
+            if not id_rows:
+                break
+            ids = [r[0] for r in id_rows]
+
+            result = conn.execute(
+                f'UPDATE "{locality_tbl}" t '
+                f'SET '
+                f'"stateprovincevalidation" = {sp_case}, '
+                f'"countyvalidation" = {co_case}, '
+                f'"flaggeo" = CASE '
+                f'WHEN ({sp_case}) IS TRUE  AND ({co_case}) IS TRUE  THEN NULL '
+                f'WHEN ({sp_case}) IS FALSE AND ({co_case}) IS FALSE '
+                f"THEN 'Departamento y municipio no coinciden con ubicación de la coordenada' "
+                f'WHEN ({sp_case}) IS TRUE  AND ({co_case}) IS FALSE '
+                f"THEN 'Municipio no coincide con ubicación de la coordenada' "
+                f'WHEN ({sp_case}) IS FALSE AND ({co_case}) IS TRUE '
+                f"THEN 'Departamento no coincide con ubicación de la coordenada' "
+                f'WHEN ({sp_case}) IS NULL  AND ({co_case}) IS NULL '
+                f'AND t."maritimeregion" IS NOT NULL '
+                f"THEN 'Coordenada en área marítima' "
+                f'WHEN ({sp_case}) IS NULL  AND ({co_case}) IS NULL '
+                f'AND t."decimallatitude" IS NULL AND t."decimallongitude" IS NULL '
+                f"THEN 'Sin coordenadas' "
+                f'ELSE NULL END '
+                f'WHERE t."id" = ANY(%s::INT[])',
+                (ids,),
+            )
+            conn.execute(
+                'INSERT INTO _validate_geography_batch (lid) '
+                'SELECT UNNEST(%s::INT[])',
+                (ids,),
+            )
+            n = result.rowcount
+            conn.commit()
+            if n == 0:
+                break
+            total_rows += n
+            logger.info(
+                "Validación geográfica batch en %s: %s filas (total %s)",
+                locality_tbl,
+                f"{n:,}",
+                f"{total_rows:,}",
+            )
+
+        logger.info(
+            "Validación geográfica completada en %s (%s filas)",
+            locality_tbl,
+            f"{total_rows:,}",
+        )
 
 # --------------------------------------------------------------------------------------------------------------------------------------
 # Cruces taxonómicos con listados de referencia
