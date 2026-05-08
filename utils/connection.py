@@ -23,6 +23,7 @@ _REQUIRED_REFERENCE_TABLES = (
     'NARINO_MARITIME_REGION',
     'gbif_datasets',
     'gbif_publishers',
+    'geo_county_validation',
     'geo_countyslug_validation',
     'geo_divipola',
     'geo_locality_validation',

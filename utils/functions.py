@@ -910,6 +910,83 @@ def normalize_stateprovince_county(db, table_name):
             f"{total_v3:,}",
         )
 
+# -----------------------------------------------------------------------------------------------------
+# Validación de municipio
+# -----------------------------------------------------------------------------------------------------
+
+        # Validación 1 (municipio): county original + catálogo de alias -> countyvalidated.
+        # Solo aplica cuando county en locality no es NULL.
+        total_county_v1 = 0
+        while True:
+            result = conn.execute(
+                f'WITH candidates AS ('
+                f'    SELECT DISTINCT i.ctid '
+                f'    FROM "{locality}" i '
+                f'    INNER JOIN "geo_county_validation" c '
+                f'      ON UPPER(TRIM(i."county")) = UPPER(TRIM(c."originalcounty")) '
+                f'    WHERE i."countyvalidated" IS NULL '
+                f'      AND i."county" IS NOT NULL '
+                f'      AND c."revisedcounty" IS NOT NULL'
+                f'), batch AS ('
+                f'    SELECT ctid FROM candidates LIMIT {batch_size}'
+                f') '
+                f'UPDATE "{locality}" i '
+                f'SET "countyvalidated" = TRIM(c."revisedcounty") '
+                f'FROM batch b, "geo_county_validation" c '
+                f'WHERE i.ctid = b.ctid '
+                f'AND UPPER(TRIM(i."county")) = UPPER(TRIM(c."originalcounty"))'
+            )
+            n = result.rowcount
+            conn.commit()
+            if n == 0:
+                break
+            total_county_v1 += n
+            logger.info(
+                "Validación 1 (alias municipio) batch en %s: %s filas (total %s)",
+                locality,
+                f"{n:,}",
+                f"{total_county_v1:,}",
+            )
+        logger.info(
+            "Validación 1 (alias municipio) completada en %s (%s filas)",
+            locality,
+            f"{total_county_v1:,}",
+        )
+
+        # Validación 3 (municipio): último recurso con MGN cuando county es NULL.
+        total_county_v3 = 0
+        while True:
+            result = conn.execute(
+                f'WITH batch AS ('
+                f'    SELECT ctid '
+                f'    FROM "{locality}" '
+                f'    WHERE "countymgn" IS NOT NULL '
+                f'      AND "countyvalidated" IS NULL '
+                f'      AND NULLIF(BTRIM("county"), \'\') IS NULL '
+                f'    LIMIT {batch_size}'
+                f') '
+                f'UPDATE "{locality}" i '
+                f'SET "countyvalidated" = TRIM(i."countymgn") '
+                f'FROM batch b '
+                f'WHERE i.ctid = b.ctid'
+            )
+            n = result.rowcount
+            conn.commit()
+            if n == 0:
+                break
+            total_county_v3 += n
+            logger.info(
+                "Validación 3 (MGN respaldo municipio) batch en %s: %s filas (total %s)",
+                locality,
+                f"{n:,}",
+                f"{total_county_v3:,}",
+            )
+        logger.info(
+            "Validación 3 (MGN respaldo municipio) completada en %s (%s filas)",
+            locality,
+            f"{total_county_v3:,}",
+        )
+
         # # Limpieza de espacios en stateprovince y county
         # conn.execute(
         #     f'UPDATE "{locality}" '
