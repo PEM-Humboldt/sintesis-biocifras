@@ -176,7 +176,9 @@ cython_debug/
 .cursor/
 .cursorrules/
 
-# R files
-**/**.Rproj
-.Renviron
+# R
+.Rproj.user
+**.Rproj
+**/.Renviron
+.Rhistory
 

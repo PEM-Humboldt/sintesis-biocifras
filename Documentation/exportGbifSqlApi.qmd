@@ -1,0 +1,114 @@
+---
+title: "Explorar la API SQL de Gbif para incorporar datos en la base de datos"
+author: "Marius Bottin"
+lang: es
+format: 
+  gfm:
+    df-print: kable
+knitr: 
+  opts_chunk: 
+    fig.path: "./Fig/sql_gbif"
+---
+
+
+
+Para descargar los datos de ocurencias que se van a analisar en las plataformas, una de las soluciones recientes es utilizar una nueva API de Gbif que permite el uso de un lenguaje SQL.
+La documentación precisa que esa funcionalidad es todavía experimental y que su codificación podría cambiar en los proximos meses.
+Sin embargo permite filtrar las columnas que se descargan, lo que presenta ventajas para las dificultades de memoria que tenemos en los scripts de `Biodiversidad en Cifras` y `Visor Geográfico`.
+
+
+
+Existen 2 paquetes que pueden servir de interfaz para la API SQL de Gbif:
+* `rgbif` es un paquete de R basado sobre las API de GBIF, desarrollado por el grupo [ROpenSci](https://ropensci.org/) (uno de los contributores mayores de ciencia abierta en R)
+* `pygbif` es un paquete Python  que tiene más o menos las mismas posibilidades que el paquete R, desarrollado directamente por los equipos de GBIF
+
+
+Para explorar las posibilidades de la API SQL, voy a utilizar en una primera instancia el paquete de R, sin embargo, en el futuro podríamos utilizar Python para integrar codigo en las funciones generales de este repositorio
+
+
+
+## Probar la API y `rgbif`
+
+### Configuración
+Para utilizar la API y el paquete, se necesita un usuario GBIF.
+
+Para pasar las información a R en su sesión por favor referirse a <https://docs.ropensci.org/rgbif/articles/gbif_credentials.html>.
+En nuestro caso, utilizamos un .Renviron file, a escala del proyecto R asociado con este repositorio.
+Para evitar dar nuestros credenciales al mundo, lo que hicimos es añadir la fila `**/.Renviron` al archivo .gitignore del repositorio.
+Lo que quiere decir es que no se va a compartir en el repositorio la configuración de credenciales de GBIF, y que las personas que quieren reproducir el codigo utilizado acá tienen que crear su propia configuración.
+
+### Test
+
+Para que funcione la importación de resultados desde una consulta SQL en la API de GBIF a traves del paquete de R, el proceso incluye varias etapas:
+
+1. probar de manera rapida que la consulta SQL es valida con `occ_download_sql_prep`
+1. enviar la consulta en GBIF con `occ_download_sql`
+1. GBIF prepara y corre la consulta en sus servidore, los usuarios pueden seguir el estado y esperar las respuesta con `occ_download_wait`
+1. cargar el resultado con `occ_download_import`
+
+```{r}
+library(rgbif)
+```
+
+
+```r
+test_countCol <- occ_download_sql_prep("SELECT count(gbifid) FROM occurrence WHERE countrycode='CO'")
+(countCol<-occ_download_sql("SELECT count(gbifid) FROM occurrence WHERE countrycode='CO'"))
+occ_download_wait(countCol)
+(res<-occ_download_import(countCol))
+```
+
+
+
+
+
+
+## Country code versus poligono: cuales son las diferencias
+En este proyecto, vamos a descargar datos continentales y marinos, es importante averiguar cuales son las implicaciones de descargar los datos desde un countrycode o un poligono que integra las zonas maritimas del país.
+
+Para hacer eso, descargamos los polígonos en una carpeta local (fuera del repositorio). Para reproducir este codigo es importante descargar las fuentes en una carpeta ubicada al mismo nivel que la carpeta del repositorio llamada `data_sintesis-biocifras`
+
+
+```{r}
+library(sf)
+DSN <- "../../data_sintesis-biocifras/"
+reg_mar<-st_read(dsn=DSN,layer = "RegionesMaritimas")
+depto<-st_read(dsn=DSN, layer="MGN_DPTO_POLITICO_2023")
+plot(c(st_geometry(st_union(st_make_valid(reg_mar))),st_geometry(st_union(st_make_valid(depto)))),col=c("blue","green"))
+```
+
+Exportar el WKT:
+
+```{r}
+all_col_poly<-st_simplify(st_union(st_union(st_make_valid(reg_mar)),st_union(st_make_valid(depto))),dTolerance=100)
+plot(st_geometry(all_col_poly))
+wkt_col<-st_as_text(all_col_poly)
+```
+
+```{r}
+valid_wkt<-check_wkt(wkt_col)
+```
+
+```{r}
+bb<-st_bbox(all_col_poly)
+
+```
+
+
+
+
+```{r}
+polyOrCountry_query<-paste0("SELECT countrycode,hasgeospatialissues,count(*) 
+       FROM occurrence 
+       WHERE countrycode='CO' 
+        OR 
+          (decimalLatitude <= ",bb["ymax"], " AND decimalLatitude >= ",bb["ymin"], " AND decimalLongitude <= ", bb["xmax"], " AND decimalLongitude >= ", bb["xmin"]," 
+          AND GBIF_WITHIN('",valid_wkt,"', decimalLatitude, decimalLongitude)
+          )
+       GROUP BY countrycode, hasgeospatialissues" )
+test_polyOrCountry<-occ_download_sql_prep(polyOrCountry_query)
+(polyOrCountry<-occ_download_sql(polyOrCountry_query))
+occ_download_wait(polyOrCountry)
+(res<-occ_download_get(polyOrCountry) %>% occ_download_import())
+```
+

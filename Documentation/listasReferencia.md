@@ -1,0 +1,310 @@
+# Listas de referencia: diagnostico de los problemas taxonomicos
+potenciales
+Marius Bottin
+
+## Cargar los paquetes y datos
+
+El paquete `rdsTaxVal` es un paquete que se creó para poder incorporar
+datos de biodiversidad en bases de datos relacionales que incluyen un
+sistema taxonómico interno (este tipo de bases de datos no permiten
+incluir taxonomías incoherentes).
+
+En este documento, simplemente lo vamos a utilizar las herramientas de
+diagnostico de `rdsTaxVal`
+
+Se puede instalar con
+
+``` r
+library(devtools)
+install_github("marbotte/rdsTaxVal")
+```
+
+``` r
+require(rdsTaxVal)
+```
+
+    Loading required package: rdsTaxVal
+
+``` r
+dir_referencias <- "../../data_sintesis-biocifras/"
+referencias=list()
+referencias$cites<-read.table(paste(dir_referencias,"Lista_CITES_20241231.tsv",sep="/"),
+                              sep="\t",h=T,quote="",comment.char = "")
+referencias$redlist<-read.table(paste(dir_referencias,"Lista_UICNRedList_2024T4.tsv",sep="/"),
+                                sep="\t",h=T,quote="",comment.char = "")
+referencias$invasive<-read.table(paste(dir_referencias,"lista-invasoras-exoticas-2024T4.tsv",sep="/"),
+                                 sep="\t",h=T,quote="",comment.char = "")
+referencias$threatened<-read.table(paste(dir_referencias,"ListaAmenazadasMADS_2024.tsv",sep="/"),
+                                   sep="\t",h=T,quote="",comment.char = "")
+referencias$taxonomica<-read.table(paste(dir_referencias,"Listas_taxonomicasCol_2024T4.tsv",sep="/"),
+                                   sep="\t",h=T,quote="",comment.char = "")
+```
+
+## Correr y guardar las tablas de diagnostico
+
+``` r
+ref_tax<-lapply(referencias,new_taxo_oneTab,currentFormat="oneTable",
+                taxonRanks_names=c(kingdom="kingdom",phylum="phylum",`class`="class",`order`="order",
+                                   family = "family", genus = "genus", species = "specificEpithet"))
+sapply(ref_tax,nrow)
+```
+
+         cites    redlist   invasive threatened taxonomica 
+          3688      15881       1506       2066      58279 
+
+``` r
+if(!file.exists(paste(dir_referencias,"citesFullDiag.RData",sep="/")))
+{
+  citesFullDiag<-fullTaxonomicDiagnostic(ref_tax$cites,checks=c("unicityInSuperiorRanks","gbif"))   
+  save(citesFullDiag,file=paste(dir_referencias,"citesFullDiag.RData",sep="/"))
+  Sys.sleep(60)
+}else{
+  load(file=paste(dir_referencias,"citesFullDiag.RData",sep="/"))
+}
+if(!file.exists(paste(dir_referencias,"redlistFullDiag.RData",sep="/")))
+{
+  redlistFullDiag<-fullTaxonomicDiagnostic(ref_tax$redlist,checks=c("unicityInSuperiorRanks","gbif"))   
+  save(redlistFullDiag,file=paste(dir_referencias,"redlistFullDiag.RData",sep="/"))
+  Sys.sleep(60)
+}else{
+  load(file=paste(dir_referencias,"redlistFullDiag.RData",sep="/"))
+}
+if(!file.exists(paste(dir_referencias,"invasiveFullDiag.RData",sep="/")))
+{
+  invasiveFullDiag<-fullTaxonomicDiagnostic(ref_tax$invasive,checks=c("unicityInSuperiorRanks","gbif"))   
+  save(invasiveFullDiag,file=paste(dir_referencias,"invasiveFullDiag.RData",sep="/"))
+  Sys.sleep(60)
+}else{
+  load(file=paste(dir_referencias,"invasiveFullDiag.RData",sep="/"))
+}
+if(!file.exists(paste(dir_referencias,"threatenedFullDiag.RData",sep="/")))
+{
+  threatenedFullDiag<-fullTaxonomicDiagnostic(ref_tax$threatened,checks=c("unicityInSuperiorRanks","gbif"))   
+  save(threatenedFullDiag,file=paste(dir_referencias,"threatenedFullDiag.RData",sep="/"))
+  Sys.sleep(60)
+}else{
+  load(file=paste(dir_referencias,"threatenedFullDiag.RData",sep="/"))
+}
+if(!file.exists(paste(dir_referencias,"taxonomicaFullDiag.RData",sep="/")))
+{
+  taxonomicaFullDiag<-fullTaxonomicDiagnostic(ref_tax$taxonomica,checks=c("unicityInSuperiorRanks","gbif"))   
+  save(taxonomicaFullDiag,file=paste(dir_referencias,"taxonomicaFullDiag.RData",sep="/"))
+}else{
+  load(file=paste(dir_referencias,"taxonomicaFullDiag.RData",sep="/"))
+}
+fullDiag<-list(cites=citesFullDiag, redlist=redlistFullDiag, invasive=invasiveFullDiag, threatened=threatenedFullDiag,
+               taxonomica=taxonomicaFullDiag)
+```
+
+## Analisis taxonomica y sistematica de las listas taxonómicas de referencia
+
+El diagnostico a través del paquete `rdsTaxVal` no es un diagnostico
+totalmente seguro. Incluso se podría decir que el backbone de GBIF (una
+de las bases taxonómica de `rdsTaxVal`) no está adaptado para buscar una
+forma de “verdad taxonómica”. El backbone de GBIF, como las herramientas
+del SiB Colombia, no pretenden llegar al nivel de minuciosidad en la
+expertisia taxónomica que pueden tener los publicadores de los checklist
+de referencia para Colombia: el objetivo acá es tener herramientas que
+permiten manejar grandes cantidades de datos para obtener un diagnostico
+de la diversidad, a escala nacional para el SiB Colombia, y a escala
+internacional de parte de GBIF. Sin embargo, la diferencia entre el
+backbone de GBIF y las listas taxonómicas que se utilizan para
+Biodiversidad en Cifras es tan grande que se vuelve problematico por el
+nivel de incertidumbre que implica sobre las cifras calculadas (ver
+<a href="#tbl-diagGbifMatch" class="quarto-xref">Tabla 1</a>).
+
+``` r
+problemQuantity<-as.data.frame(t(mapply(function(rt,fd)
+  {
+    fdpbCause=sapply(strsplit(fd$suggest$suggestDescription," -> "),function(x)x[[1]][1])
+    c(nbTot=nrow(rt),
+      noProblem=nrow(rt)-nrow(fd$suggest)+sum(grepl("exactMatch_synonym",fdpbCause)),
+      otherProblem=sum(grepl("unicity",fdpbCause))
+    )
+  },
+rt=ref_tax,fd=fullDiag)))
+nbMatchProblem<-problemQuantity$nbTot- problemQuantity$noProblem - problemQuantity$otherProblem
+percentMatchProblem <- (nbMatchProblem/(problemQuantity$nbTot-problemQuantity$otherProblem))*100
+problemQuantity$percentMatchProblem<-paste(round(percentMatchProblem,2),"%")
+colnames(problemQuantity)<-  c("Número de taxones","Acuerdo total con el backbone",
+                               "Acuerdo no evaluado (otros problemas)",
+                               "Porcentaje de desacuerdo con el Backbone")
+problemQuantity
+```
+
+<div id="tbl-diagGbifMatch">
+
+Tabla 1: *Evaluación del acuerdo entre las listas de referencia y el
+backbone de GBIF. En esta tabla se considera un acuerdo cuando el nombre
+del taxon y todos los rangos superiores corresponden a los nombres y
+rangos superiores en GBIF. Consideramos como desacuerdo todos taxones
+para los cuales al menos uno de los rangos taxonomico tiene un nombre
+diferente (o es faltante) entre el Backbone y la lista de referencia.
+Los desacuerdos de sinonimía no están considerados acá, es decir que si
+la lista considera que un nombre es un sinonimo, pero el backbone no lo
+considera sinonimo, o el contrario, no se cuenta como un desacuerdo. Los
+acuerdos no evaluados corresponden a los casos donde la evaluación de
+acuerdo con GBIF no está hecha porque el paquete detecta un problema más
+grave en una lista (por ejemplo un genero que está anotado en varias
+familias), por eso no entran en el calculo del porcentaje de desacuerdo
+con el backbone.*
+
+<div class="cell-output-display">
+
+|  | Número de taxones | Acuerdo total con el backbone | Acuerdo no evaluado (otros problemas) | Porcentaje de desacuerdo con el Backbone |
+|:---|---:|---:|---:|:---|
+| cites | 3688 | 1012 | 2 | 72.54 % |
+| redlist | 15881 | 15750 | 13 | 0.74 % |
+| invasive | 1506 | 1497 | 3 | 0.4 % |
+| threatened | 2066 | 1640 | 1 | 20.58 % |
+| taxonomica | 58279 | 31680 | 3011 | 42.68 % |
+
+</div>
+
+</div>
+
+## Problemas de coherencia sistematica en la taxonomía de las listas de referencia
+
+Puede causar problemas en la síntesis de cifras de biodiversidad, pero
+es totalmente legitimo que un experto taxonomista decida no seguir la
+misma sistemática que el backbone de GBIF, por razones de descripción de
+las especies locales y un conocimiento fino de la biodiversidad
+nacional. Sin embargo, todo sistema taxonómico tiene que seguir un
+ensamble de reglas mínima que permita obtener una descripción coherente
+de los taxones presentes en sus listas:
+
+- un taxón no puede ser clasificado en varios nombres de taxones
+  superiores (especies de un mismo genero no pueden pertenecer a
+  familias diferentes, por ejemplo)
+- un nombre de taxón no puede referenciar rangos taxonomicos diferentes
+  (*Magnoliopsida* no se puede utilizar como nombre de clase y nombre de
+  filo, por ejemplo)
+- un nombre de taxón debe estar utilizado en un solo clado de la
+  clasificación (un genero de animal no puede tener el mismo nombre que
+  un genero de planta)
+
+El problema es que esas reglas mínimas no están respetadas en varias
+listas de referencia utilizada para la validación taxonónica antes de la
+síntesis de cifras.
+
+``` r
+example_gnInFamRedList<-checkUnicityRankSup(ref_tax$redlist)$genus[1]
+ref_tax$redlist[ref_tax$redlist$genus==example_gnInFamRedList,
+                c("species","genus","family")]
+```
+
+<div id="tbl-exGnInFamPb">
+
+Tabla 2: *Ejemplo de problema de coherencia sistemática en la lista roja
+utilizada para la síntesis de cifras. Genero que pertenece a varias
+familias. Este tipo de problema corresponde a “Acuerdo no evaluado
+(otros problemas)” en las cifras de la
+<a href="#tbl-diagGbifMatch" class="quarto-xref">Tabla 1</a> .*
+
+<div class="cell-output-display">
+
+|       | species               | genus     | family       |
+|:------|:----------------------|:----------|:-------------|
+| 6666  | Loricaria thyoides    | Loricaria | Asteraceae   |
+| 9976  | Loricaria cataphracta | Loricaria | Loricariidae |
+| 9977  | Loricaria simillima   | Loricaria | Loricariidae |
+| 11541 | Loricaria clavipinna  | Loricaria | Loricariidae |
+
+</div>
+
+</div>
+
+``` r
+mat<-as.matrix(extract(ref_tax$taxonomica,parts="taxonRanks"))
+tabNameRank<-unique(data.frame(name=as.character(mat),col=colnames(mat)[col(mat)]))
+tabNameRank<-tabNameRank[!is.na(tabNameRank$name)&tabNameRank$name!="",]
+rankByNameList<-tapply(tabNameRank$col,tabNameRank$name,function(x)x)
+res<-rankByNameList[sapply(rankByNameList,length)>1]
+resdf<-data.frame(nombre=names(res),
+           rank=sapply(res,paste,collapse=", "))
+colnames(resdf)<-c("Nombre del taxón","Rangos taxonomicos")
+rownames(resdf)<-NULL
+resdf
+```
+
+<div id="tbl-nombreMultiRank">
+
+Tabla 3: *Ejemplo de problema de coherencia sistemática en la lista roja
+utilizada para la síntesis de cifras. Nombres de taxones que se utilizan
+en varios rangos en la lista taxonomica general.*
+
+<div class="cell-output-display">
+
+| Nombre del taxón | Rangos taxonomicos |
+|:-----------------|:-------------------|
+| Cycadopsida      | phylum, class      |
+| Dothideomycetes  | class, family      |
+| Gayoides         | family, genus      |
+| Magnoliopsida    | phylum, class      |
+| Rhytismatales    | order, family      |
+
+</div>
+
+</div>
+
+Lo que demostramos acá es que, además de los problemas potenciales de
+validación que corresponden a la diferencia de modelo taxonómico entre
+GBIF y las listas de referencia, las listas de referencia utilizadas
+*per se* no incluyen un modelo coherente que permitiría utilizarlas para
+dar un sentido taxonómico coherente a las cifras generadas (¿a que
+corresponde un número de especies cuando está definido sin repaldo
+taxonomico coherente?).
+
+## Problemas de sinonimia
+
+Las listas siguientes no contienen menciones de sinonimia:
+
+- Lista de la cites
+- Lista roja
+- Lista de especies invasoras
+- Lista de especies amenazadas
+
+Sin embargo, varios de los taxones de esas listas están considerados
+como sinonimos cuando se buscan en el backbone de gbif:
+
+``` r
+sapply(fullDiag[c("cites", "redlist", "invasive", "threatened")],function(x)
+  sum(grepl("synonym", x$suggest$suggestDescription))
+)
+```
+
+         cites    redlist   invasive threatened 
+            85        365        107        116 
+
+En la lista taxonómica, existen las menciones de sinonimia, pero existen
+discrepancias entre esas menciones y las búsquedas en el Backbone.
+
+``` r
+backboneSyno<-logical(nrow(ref_tax$taxonomica))
+backboneSyno[fullDiag$taxonomica$suggested$row]<-grepl("synonym",fullDiag$taxonomica$suggested$suggestDescription)
+backboneSyno[fullDiag$taxonomica$failed_step_2_gbif_species$row]<-NA
+table(
+  backboneSyno,
+  lista=ref_tax$taxonomica$taxonomicStatus == "Sinónimo",
+  useNA="ifany"
+)
+```
+
+                lista
+    backboneSyno FALSE  TRUE
+           FALSE 23498  1311
+           TRUE   2733 14109
+           <NA>  15502  1126
+
+Esas discrepancias son particularmente problemáticas porque la presencia
+de sinonimia en listas de especies influyen mucho el calculo de las
+cifras de biodiversidad.
+
+Existen varios métodos para evitar las repeticiones en las listas de
+referencia por causa de sinonimia, puede ser a través de un sistema
+sistematico y coherente de manejo taxonómico, o con la inclusión de
+todos los sinónimos en las listas mismas (solución problemática en
+términos de rigor científico). Sin embargo, sin tener un nivel mínimo de
+confianza sobre las definiciones de las sinonimias, este debate es
+fútil: aparece imposible garantizar que los números de especies no estén
+falsificados por las sinonimias.
