@@ -8,6 +8,9 @@ import time
 from datetime import datetime, timezone
 from dateutil import parser
 from zipfile import ZipFile
+import zlib
+import dotenv
+dotenv.load_dotenv()
 ################################################################################
 ### PARTE 1: Funciones genericas
 ################################################################################
@@ -49,16 +52,37 @@ def download_wait(key, freqTest=60):
       print("status:", currentStatus)
   return key
 
-def zip_exists(key, dir_zip=os.getenv("DIR_DOWNLOAD_ZIP")):
-  return os.path.exists(dir_zip + key + '.zip')
+def zip_exists(key_gbif, dir_zip=os.getenv("DIR_DOWNLOAD_ZIP")):
+  return os.path.exists(dir_zip + key_gbif + '.zip')
 
-def download_zip(key, checkExists=True, dir_zip=os.getenv("DIR_DOWNLOAD_ZIP")):
-  zipPath=dir_zip + key + '.zip'
-  if (checkExists and not zip_exists(key,dir_zip=dir_zip)) or not checkExists:
-    occ.download_get(key, path=dir_zip)
+def download_zip(key_gbif, checkExists=True, dir_zip=os.getenv("DIR_DOWNLOAD_ZIP")):
+  print("dir_zip:", dir_zip)
+  print("key_gbif:", key_gbif)
+  zipPath=dir_zip + key_gbif + '.zip'
+  if (checkExists and not zip_exists(key_gbif,dir_zip=dir_zip)) or not checkExists:
+    occ.download_get(key_gbif, path=dir_zip)
   return zipPath
 
-def extract_gbifZip(zipFile, nameInZip, destFile):
+def crc32_file_in_zip(zipFile,nameInZip):
+  with ZipFile(zipFile,mode="r") as archive:
+    info = archive.getinfo(nameInZip)
+  return format(info.CRC, '08x')
+
+def crc32(fileName):
+    with open(fileName, 'rb') as fh:
+        hash = 0
+        while True:
+            s = fh.read(65536)
+            if not s:
+                break
+            hash = zlib.crc32(s, hash)
+        return format(hash & 0xFFFFFFFF, '08x')
+
+def extract_gbifZip(zipFile, nameInZip, destFile, checkHash=True):
+  if checkHash:
+    if crc32_file_in_zip(zipFile,nameInZip) == crc32(destFile):
+      print("The current file has a corresponding hash to the one in the zip archive, skipping extraction")
+      return destFile
   dirzip=os.path.dirname(zipFile)
   with ZipFile(zipFile,mode="r") as archive:
     zipContent=archive.namelist()
@@ -73,12 +97,12 @@ def extract_gbifZip(zipFile, nameInZip, destFile):
 ### PARTE 2: descargar datos con la api classica de GBIF ###
 ################################################################################
 
-def download_gbif_predicates_files(predicates=default_predicates, maximum_time_s = 60*60*24*7, maximum_diff_time_s=60*60, limit = 20,  simple_csv_file=os.getenv('OCCURRENCE_FILE'), verbatim_dwca_file=os.getenv('VERBATIM_FILE'), user=os.getenv("GBIF_USER"), pwd=os.getenv("GBIF_PWD")):
+def download_gbif_predicates_files(predicates=default_predicates, maximum_time_s = 60*60*24*7, maximum_diff_time_s=60*60*24, limit = 20,  simple_csv_file=os.getenv('OCCURRENCE_FILE'), verbatim_dwca_file=os.getenv('VERBATIM_FILE'), user=os.getenv("GBIF_USER"), pwd=os.getenv("GBIF_PWD")):
   dwca_corres=corresponding_download_list(format_download= 'DWCA', predicates=predicates, maximum_time_s=maximum_time_s, limit=limit, user=user, pwd=pwd )
   simple_corres=corresponding_download_list(format_download='SIMPLE_CSV', predicates=predicates, maximum_time_s=maximum_time_s, limit=limit, user=user, pwd=pwd)
   preparedDownloadExists = dwca_corres.shape[0] > 0 and simple_corres.shape[0] > 0
   if preparedDownloadExists:
-    timeDiffBetweenFiles=abs(dwca_corres['created_seconds_from_now'].values[0] - simple_corres['created_seconds_from_now'].values[0])
+    timeDiffBetweenFiles=abs(parser.parse(dwca_corres['created'].values[0]) - parser.parse(simple_corres['created'].values[0])).total_seconds()
     if timeDiffBetweenFiles > maximum_diff_time_s:
       print("Too much time difference between simple and dwca download")
       needNew=True
@@ -115,7 +139,7 @@ def download_gbif_sql(query=default_sql_query, maximum_time_s = 60*60*24*7, limi
   needNew = (sql_corres.shape[0] == 0)
   if needNew:
     print('New download needs to be prepared')
-    sql_key = occ.download_sql(query, user=user, pwd=pwd)[0]
+    sql_key = occ.download_sql(query, user=user, pwd=pwd)
   else:
     print('SQL download is already prepared in user\'s GBIF API')
     sql_key = sql_corres['key'].values[0]
