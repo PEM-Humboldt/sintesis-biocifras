@@ -40,6 +40,7 @@ from utils.functions import (
     create_staging_indexes,
     create_integrated_table,
     fill_species_from_scientificname,
+    normalize_integrated_country,
     link_taxonrank_reference,
     add_gbifid_index,
     validate_localities,
@@ -103,6 +104,7 @@ try:
 
     timer(create_join_validation_columns, "Comprobación de modelo GBIF (sin columnas duplicadas en integrada)")(db, table_names['integrated'])
     timer(fill_species_from_scientificname, "Completando campo species desde scientificname")(db, table_names['integrated'])
+    timer(normalize_integrated_country, "Campo country (CO → Colombia) por lotes")(db, table_names['integrated'])
     timer(link_taxonrank_reference, "Vinculando taxonrank con catálogo de referencia")(db, table_names['integrated'])
     timer(add_gbifid_index, "Añadiendo PK la tabla integrada")(db, table_names['integrated'])
     timer(validate_taxonomic_species, "Tabla taxonomic_species_validation y FK taxonomic_species_id")(db, table_names['integrated'])

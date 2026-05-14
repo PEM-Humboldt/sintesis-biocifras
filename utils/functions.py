@@ -13,6 +13,7 @@ para el proceso de análisis y síntesis de cifras para Biodiversidad en cifras.
 - create_staging_indexes: Función para crear índices en las tablas de staging.
 - create_integrated_table: Función para crear la tabla integrada con las columnas de las tablas de staging.
 - fill_species_from_scientificname: Función para llenar el campo species con las dos primeras palabras de scientificname.
+- normalize_integrated_country: Campo country desde countrycode (CO → Colombia; resto NULL) por lotes sobre gbifid.
 - add_gbifid_index: Función para crear índice primary key sobre gbifid en la tabla integrada.
 - create_join_validation_columns: Reservado; metadatos GBIF solo en gbif_datasets / gbif_publishers (enlace por datasetkey y publishingorgkey en la integrada).
 - create_species_index: Función para crear índice BTREE sobre species para optimizar cruces taxonómicos.
@@ -542,6 +543,68 @@ def fill_species_from_scientificname(db, table_name):
             """)
         conn.commit()
     logger.info("Campo species completado desde scientificname en %s (%s filas)", table_name, f"{result.rowcount:,}")
+
+
+# -----------------------------------------------------------------------------------------------------
+# Nombre de país en integrada (DwC country) a partir de countrycode
+# -----------------------------------------------------------------------------------------------------
+
+def normalize_integrated_country(db, table_name):
+    # Añade si hace falta el campo country y lo rellena desde countrycode: ISO CO (insensible a mayúsculas
+    # y espacios) → 'Colombia'; cualquier otro código o vacío → NULL. Actualización por lotes sobre gbifid
+    # para tablas muy grandes (p. ej. decenas de millones de filas).
+    integrated = table_name
+    batch_size = int(os.getenv('COUNTRY_UPDATE_BATCH', os.getenv('FLUSH_EVERY', '500000')))
+    total = 0
+    with db.connect() as conn:
+        conn.execute(
+            f'ALTER TABLE "{integrated}" '
+            f'ADD COLUMN IF NOT EXISTS "country" TEXT'
+        )
+        conn.commit()
+
+        last_gbifid = 0
+        while True:
+            result = conn.execute(
+                f'WITH batch AS ('
+                f'    SELECT i.ctid '
+                f'    FROM "{integrated}" i '
+                f'    WHERE i."gbifid" > %s '
+                f'    ORDER BY i."gbifid" '
+                f'    LIMIT {batch_size}'
+                f') '
+                f'UPDATE "{integrated}" i SET '
+                f'  "country" = CASE '
+                f'    WHEN UPPER(BTRIM(COALESCE(i."countrycode", \'\'))) = \'CO\' '
+                f"    THEN 'Colombia' "
+                f'    ELSE NULL '
+                f'  END '
+                f'FROM batch b '
+                f'WHERE i.ctid = b.ctid '
+                f'RETURNING i."gbifid"',
+                (last_gbifid,),
+            )
+            batch_n = result.rowcount
+            id_rows = result.fetchall()
+            if batch_n == 0:
+                break
+            last_gbifid = max(r[0] for r in id_rows)
+            conn.commit()
+            total += batch_n
+            logger.info(
+                "normalize_integrated_country batch en %s: %s filas (total %s, hasta gbifid=%s)",
+                integrated,
+                f"{batch_n:,}",
+                f"{total:,}",
+                last_gbifid,
+            )
+        logger.info(
+            "Campo country normalizado en %s (%s filas; lotes de %s)",
+            integrated,
+            f"{total:,}",
+            f"{batch_size:,}",
+        )
+
 
 # -----------------------------------------------------------------------------------------------------
 # Vinculación de taxonrank con la tabla catálogo taxonomic_taxon_rank y creación de integridad referencial
