@@ -14,7 +14,7 @@ para el proceso de análisis y síntesis de cifras para Biodiversidad en cifras.
 - create_integrated_table: Función para crear la tabla integrada con las columnas de las tablas de staging.
 - fill_species_from_scientificname: Función para llenar el campo species con las dos primeras palabras de scientificname.
 - add_gbifid_index: Función para crear índice primary key sobre gbifid en la tabla integrada.
-- create_join_validation_columns: Crea columnas derivadas en la integrada (GBIF/metadata); los campos taxonómicos por especie viven en taxonomic_species_validation.
+- create_join_validation_columns: Reservado; metadatos GBIF solo en gbif_datasets / gbif_publishers (enlace por datasetkey y publishingorgkey en la integrada).
 - create_species_index: Función para crear índice BTREE sobre species para optimizar cruces taxonómicos.
 - validate_taxonomic_species: Tabla taxonomic_species_validation por species únicos, columnas taxonómicas y FK taxonomic_species_id en la integrada.
 - spatials_joins: Cruza geo_locality_validation con MGN_ADM_MPIO_2025 y capas marítimas usando ST_Intersects.
@@ -22,7 +22,7 @@ para el proceso de análisis y síntesis de cifras para Biodiversidad en cifras.
 - validate_geography: Valida geografía en geo_locality_validation (tres bloques con db.connect: depto, municipio, flaggeo).
 - taxonomic_joins: Cruza taxonomic_species_validation con tablas taxonómicas por species.
 - clean_threatstatus_fields: Normaliza threatstatus en taxonomic_species_validation (IUCN/MADS).
-- gbif_api_calls: Enriquece la tabla integrada con metadatos de datasets y publicadores desde tablas locales y API GBIF.
+- gbif_api_calls: Completa gbif_datasets y gbif_publishers desde tablas locales y API GBIF; añade FK NOT VALID desde la integrada hacia esas tablas (validar aparte con VALIDATE CONSTRAINT).
 """
 
 import csv
@@ -503,25 +503,16 @@ def create_integrated_table(db, table_names):
 # -----------------------------------------------------------------------------------------------------
 
 def create_join_validation_columns(db, table_name):
-    # Crea todas las columnas derivadas usadas por validaciones y cruces.
+    # Metadatos de dataset y publicador viven en gbif_datasets y gbif_publishers (claves TEXT
+    # alineadas con GBIF). La integrada ya trae datasetkey y publishingorgkey; no se duplican
+    # license, doi, título, etc. Las consultas deben hacer JOIN (o una vista) hacia esas tablas.
     # Parámetros:
-    # - db: Conexión al pool de conexiones de PostgreSQL.
+    # - db: Reservado por compatibilidad con el orquestador.
     # - table_name: Nombre de la tabla integrada dwc_integrated.
-    # Retorna:
-    # - None: No retorna nada.
-    integrated = table_name
-    with db.connect() as conn:
-        conn.execute(
-            f'ALTER TABLE "{integrated}" '
-            f'ADD COLUMN IF NOT EXISTS "license" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "doi" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "datasettitle" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "logourl" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "datatype" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "organization" TEXT'
-        )
-        conn.commit()
-    logger.info("Columnas derivadas preparadas en %s", integrated)
+    logger.info(
+        "Metadatos GBIF por relación (datasetkey, publishingorgkey); sin columnas extra en %s",
+        table_name,
+    )
 
 # -----------------------------------------------------------------------------------------------------
 # Revisión de casos de nombres científicos vacíos en la tabla integrada
@@ -1169,6 +1160,10 @@ def validate_taxonomic_species(db, table_name):
             f'CREATE INDEX IF NOT EXISTS "idx_{species_tbl}_species" '
             f'ON "{species_tbl}" USING BTREE ("species")'
         )
+        conn.execute(
+            f'ALTER TABLE "{integrated}" '
+            f'ADD COLUMN IF NOT EXISTS "taxonomic_species_id" INT4'
+        )
         conn.commit()
 
         if species_already:
@@ -1209,11 +1204,6 @@ def validate_taxonomic_species(db, table_name):
             f'ORDER BY i."species", i."gbifid"'
         )
         conn.commit()
-
-        conn.execute(
-            f'ALTER TABLE "{integrated}" '
-            f'ADD COLUMN IF NOT EXISTS "taxonomic_species_id" INT4'
-        )
 
         while True:
             result = conn.execute(
@@ -1774,19 +1764,17 @@ def _parse_gbif_created_date(value):
 
 
 def gbif_api_calls(db, table_name):
-    # Enriquece la tabla integrada con metadatos de datasets y publicadores desde tablas locales y API GBIF.
+    # Completa gbif_datasets y gbif_publishers desde tablas locales y API GBIF. La integrada solo
+    # aporta datasetkey y publishingorgkey; los campos descriptivos se leen con JOIN en consultas.
+    # Al final añade FK NOT VALID hacia gbif_datasets y gbif_publishers (claves TEXT). Las filas con
+    # clave NULL no participan en la FK. Huérfanos existentes siguen permitidos hasta
+    # ALTER TABLE ... VALIDATE CONSTRAINT ...; nuevas filas ya se validan contra el catálogo actual.
     integrated = table_name
+    fk_dataset = f"fk_{integrated}_gbif_datasetkey"
+    fk_publisher = f"fk_{integrated}_gbif_publishingorgkey"
+    missing_dataset_keys = []
+    missing_publisher_keys = []
     with db.connect() as conn:
-        dataset_refresh_sql = (
-            f'UPDATE "{integrated}" i '
-            f'SET "license" = d."license", '
-            f'    "doi" = d."doi", '
-            f'    "datasettitle" = d."datasettitle", '
-            f'    "logourl" = d."logourl", '
-            f'    "datatype" = d."datatype" '
-            f'FROM "gbif_datasets" d '
-            f'WHERE i."datasetkey" = d."datasetkey"'
-        )
         dataset_upsert_sql = """
             INSERT INTO gbif_datasets (datasetkey, license, doi, datasettitle, logourl, datatype, created)
             VALUES (%(datasetkey)s, %(license)s, %(doi)s, %(datasettitle)s, %(logourl)s, %(datatype)s, %(created)s)
@@ -1799,12 +1787,13 @@ def gbif_api_calls(db, table_name):
                 created = EXCLUDED.created
         """
 
-        # Backfill local y detección de faltantes para datasets
-        conn.execute(dataset_refresh_sql)
+        # Datasetkeys presentes en la integrada sin fila en catálogo o sin título en gbif_datasets.
         dataset_rows = conn.execute(
-            f'SELECT DISTINCT "datasetkey" '
-            f'FROM "{integrated}" '
-            f'WHERE "datasetkey" IS NOT NULL AND "datasettitle" IS NULL'
+            f'SELECT DISTINCT i."datasetkey" '
+            f'FROM "{integrated}" i '
+            f'LEFT JOIN "gbif_datasets" d ON i."datasetkey" = d."datasetkey" '
+            f'WHERE i."datasetkey" IS NOT NULL '
+            f'  AND (d."datasetkey" IS NULL OR d."datasettitle" IS NULL)'
         ).fetchall()
         missing_dataset_keys = [row[0] for row in dataset_rows if row[0]]
         logger.info(
@@ -1853,14 +1842,7 @@ def gbif_api_calls(db, table_name):
                     })
                     ds_upserted += 1
                     time.sleep(0.002)
-        conn.execute(dataset_refresh_sql)
 
-        publisher_refresh_sql = (
-            f'UPDATE "{integrated}" i '
-            f'SET "organization" = p."organization" '
-            f'FROM "gbif_publishers" p '
-            f'WHERE i."publishingorgkey" = p."publishingorgkey"'
-        )
         publisher_upsert_sql = """
             INSERT INTO gbif_publishers (publishingorgkey, organization)
             VALUES (%(publishingorgkey)s, %(organization)s)
@@ -1868,12 +1850,13 @@ def gbif_api_calls(db, table_name):
             SET organization = EXCLUDED.organization
         """
 
-        # Backfill local y detección de faltantes para publishers
-        conn.execute(publisher_refresh_sql)
+        # Publishingorgkeys en la integrada sin fila en catálogo o sin organization en gbif_publishers.
         publisher_rows = conn.execute(
-            f'SELECT DISTINCT "publishingorgkey" '
-            f'FROM "{integrated}" '
-            f'WHERE "publishingorgkey" IS NOT NULL AND "organization" IS NULL'
+            f'SELECT DISTINCT i."publishingorgkey" '
+            f'FROM "{integrated}" i '
+            f'LEFT JOIN "gbif_publishers" p ON i."publishingorgkey" = p."publishingorgkey" '
+            f'WHERE i."publishingorgkey" IS NOT NULL '
+            f'  AND (p."publishingorgkey" IS NULL OR p."organization" IS NULL)'
         ).fetchall()
         missing_publisher_keys = [row[0] for row in publisher_rows if row[0]]
         logger.info(
@@ -1917,7 +1900,38 @@ def gbif_api_calls(db, table_name):
                     })
                     pub_upserted += 1
                     time.sleep(0.002)
-        conn.execute(publisher_refresh_sql)
+
+        # Integridad referencial: FK sobre claves TEXT del catálogo (NOT VALID = no escanea huérfanos).
+        conn.execute(
+            f'ALTER TABLE "{integrated}" DROP CONSTRAINT IF EXISTS "{fk_dataset}"'
+        )
+        conn.execute(
+            f'ALTER TABLE "{integrated}" '
+            f'ADD CONSTRAINT "{fk_dataset}" '
+            f'FOREIGN KEY ("datasetkey") '
+            f'REFERENCES "gbif_datasets" ("datasetkey") '
+            f'ON UPDATE CASCADE '
+            f'ON DELETE NO ACTION '
+            f'NOT VALID'
+        )
+        conn.execute(
+            f'ALTER TABLE "{integrated}" DROP CONSTRAINT IF EXISTS "{fk_publisher}"'
+        )
+        conn.execute(
+            f'ALTER TABLE "{integrated}" '
+            f'ADD CONSTRAINT "{fk_publisher}" '
+            f'FOREIGN KEY ("publishingorgkey") '
+            f'REFERENCES "gbif_publishers" ("publishingorgkey") '
+            f'ON UPDATE CASCADE '
+            f'ON DELETE NO ACTION '
+            f'NOT VALID'
+        )
+        logger.info(
+            "FK NOT VALID añadidas en %s: %s, %s (VALIDATE CONSTRAINT cuando no queden huérfanos)",
+            integrated,
+            fk_dataset,
+            fk_publisher,
+        )
 
         conn.commit()
 
