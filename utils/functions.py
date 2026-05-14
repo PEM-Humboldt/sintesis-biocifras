@@ -14,13 +14,14 @@ para el proceso de análisis y síntesis de cifras para Biodiversidad en cifras.
 - create_integrated_table: Función para crear la tabla integrada con las columnas de las tablas de staging.
 - fill_species_from_scientificname: Función para llenar el campo species con las dos primeras palabras de scientificname.
 - add_gbifid_index: Función para crear índice primary key sobre gbifid en la tabla integrada.
-- create_join_validation_columns: Crea todas las columnas derivadas usadas por validaciones y cruces.
+- create_join_validation_columns: Crea columnas derivadas en la integrada (GBIF/metadata); los campos taxonómicos por especie viven en taxonomic_species_validation.
 - create_species_index: Función para crear índice BTREE sobre species para optimizar cruces taxonómicos.
+- validate_taxonomic_species: Tabla taxonomic_species_validation por species únicos, columnas taxonómicas y FK taxonomic_species_id en la integrada.
 - spatials_joins: Cruza geo_locality_validation con MGN_ADM_MPIO_2025 y capas marítimas usando ST_Intersects.
 - normalize_stateprovince_county: Normaliza stateprovince, county y slugs en geo_locality_validation antes de validar geografía.
 - validate_geography: Valida geografía en geo_locality_validation (tres bloques con db.connect: depto, municipio, flaggeo).
-- taxonomic_joins: Cruza la tabla integrada con tablas taxonómicas por el campo species.
-- clean_threatstatus_fields: Normaliza threatstatus y agrega sufijos por fuente (IUCN/MADS).
+- taxonomic_joins: Cruza taxonomic_species_validation con tablas taxonómicas por species.
+- clean_threatstatus_fields: Normaliza threatstatus en taxonomic_species_validation (IUCN/MADS).
 - gbif_api_calls: Enriquece la tabla integrada con metadatos de datasets y publicadores desde tablas locales y API GBIF.
 """
 
@@ -512,18 +513,6 @@ def create_join_validation_columns(db, table_name):
     with db.connect() as conn:
         conn.execute(
             f'ALTER TABLE "{integrated}" '
-            f'ADD COLUMN IF NOT EXISTS "cites" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "threatstatusuicn" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "threatstatusmads" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "exotic" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "exoticriskinvasion" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "invasiveness" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "invasive" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "transplanted" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "migratory" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "endemic" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "referencelist" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "flagtaxo" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "license" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "doi" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "datasettitle" TEXT, '
@@ -1134,6 +1123,147 @@ def create_species_index(db, table_name):
         logger.info("Indice BTREE creado: %s", idx_species)
         conn.commit()
 
+
+def validate_taxonomic_species(db, table_name):
+    # Crea o reutiliza taxonomic_species_validation con una fila por species y columnas
+    # taxonómicas (cites, amenazas, exóticas, etc.); vincula la integrada con taxonomic_species_id.
+    # Si la tabla ya existía, se trunca y se reinicia la secuencia de id para descartar cruces
+    # taxonómicos obsoletos antes de volver a poblar desde la integrada.
+    integrated = table_name
+    species_tbl = 'taxonomic_species_validation'
+    fk_name = f"fk_{integrated}_taxonomic_species_id"
+    link_batch_size = int(os.getenv('FLUSH_EVERY', '1000000'))
+    total_linked = 0
+
+    with db.connect() as conn:
+        species_already = conn.execute(
+            'SELECT EXISTS ('
+            '  SELECT 1 FROM information_schema.tables '
+            "  WHERE table_schema = 'public' AND table_name = %(t)s"
+            ')',
+            {'t': species_tbl},
+        ).fetchall()[0][0]
+
+        conn.execute(
+            f'CREATE TABLE IF NOT EXISTS "{species_tbl}" ('
+            f'  "id" SERIAL PRIMARY KEY, '
+            f'  "species" TEXT NOT NULL, '
+            f'  "class" TEXT, '
+            f'  "order" TEXT, '
+            f'  "cites" TEXT, '
+            f'  "threatstatusuicn" TEXT, '
+            f'  "threatstatusmads" TEXT, '
+            f'  "exotic" TEXT, '
+            f'  "exoticriskinvasion" TEXT, '
+            f'  "invasiveness" TEXT, '
+            f'  "invasive" TEXT, '
+            f'  "transplanted" TEXT, '
+            f'  "migratory" TEXT, '
+            f'  "endemic" TEXT, '
+            f'  "referencelist" TEXT, '
+            f'  "flagtaxo" TEXT, '
+            f'  CONSTRAINT "uq_{species_tbl}_species" UNIQUE ("species")'
+            f')'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS "idx_{species_tbl}_species" '
+            f'ON "{species_tbl}" USING BTREE ("species")'
+        )
+        conn.commit()
+
+        if species_already:
+            fk_rows = conn.execute(
+                'SELECT nsp.nspname, cls.relname, con.conname '
+                'FROM pg_constraint con '
+                'JOIN pg_class cls ON con.conrelid = cls.oid '
+                'JOIN pg_namespace nsp ON cls.relnamespace = nsp.oid '
+                'JOIN pg_class refcls ON con.confrelid = refcls.oid '
+                'JOIN pg_namespace rnsp ON refcls.relnamespace = rnsp.oid '
+                'WHERE con.contype = %(fk)s '
+                '  AND refcls.relname = %(tbl)s '
+                "  AND rnsp.nspname = 'public'",
+                {'fk': 'f', 'tbl': species_tbl},
+            ).fetchall()
+            for sch, rel, cname in fk_rows:
+                conn.execute(
+                    f'ALTER TABLE "{sch}"."{rel}" '
+                    f'DROP CONSTRAINT IF EXISTS "{cname}"'
+                )
+            conn.execute(f'TRUNCATE TABLE "{species_tbl}" RESTART IDENTITY')
+            conn.execute(
+                f'UPDATE "{integrated}" SET "taxonomic_species_id" = NULL '
+                f'WHERE "taxonomic_species_id" IS NOT NULL'
+            )
+            conn.commit()
+            logger.info(
+                "%s truncada y secuencia de id reiniciada (tabla ya existía)",
+                species_tbl,
+            )
+
+        conn.execute(
+            f'INSERT INTO "{species_tbl}" ("species", "class", "order") '
+            f'SELECT DISTINCT ON (i."species") '
+            f'  i."species", i."class", i."order" '
+            f'FROM "{integrated}" i '
+            f'WHERE i."species" IS NOT NULL AND BTRIM(i."species") <> \'\' '
+            f'ORDER BY i."species", i."gbifid"'
+        )
+        conn.commit()
+
+        conn.execute(
+            f'ALTER TABLE "{integrated}" '
+            f'ADD COLUMN IF NOT EXISTS "taxonomic_species_id" INT4'
+        )
+
+        while True:
+            result = conn.execute(
+                f'WITH batch AS ('
+                f'    SELECT i.ctid, s."id" AS taxonomic_species_id '
+                f'    FROM "{integrated}" i '
+                f'    JOIN "{species_tbl}" s ON i."species" IS NOT DISTINCT FROM s."species" '
+                f'    WHERE i."taxonomic_species_id" IS NULL '
+                f'    LIMIT {link_batch_size}'
+                f') '
+                f'UPDATE "{integrated}" i '
+                f'SET "taxonomic_species_id" = b.taxonomic_species_id '
+                f'FROM batch b '
+                f'WHERE i.ctid = b.ctid'
+            )
+            batch_linked = result.rowcount
+            conn.commit()
+            if batch_linked == 0:
+                break
+            total_linked += batch_linked
+            logger.info(
+                "taxonomic_species_id batch en %s: %s filas (total %s)",
+                integrated,
+                f"{batch_linked:,}",
+                f"{total_linked:,}",
+            )
+
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS "idx_{integrated}_taxonomic_species_id" '
+            f'ON "{integrated}" USING BTREE ("taxonomic_species_id")'
+        )
+        conn.commit()
+        conn.execute(f'ALTER TABLE "{integrated}" DROP CONSTRAINT IF EXISTS "{fk_name}"')
+        conn.execute(
+            f'ALTER TABLE "{integrated}" '
+            f'ADD CONSTRAINT "{fk_name}" '
+            f'FOREIGN KEY ("taxonomic_species_id") '
+            f'REFERENCES "{species_tbl}" ("id") '
+            f'ON UPDATE CASCADE '
+            f'ON DELETE SET NULL '
+            f'NOT VALID'
+        )
+        conn.commit()
+        logger.info(
+            "Tabla de validación taxonómica por especie actualizada: %s (taxonomic_species_id=%s)",
+            species_tbl,
+            f"{total_linked:,}",
+        )
+
+
 # --------------------------------------------------------------------------------------------------------------------------------------
 # Tabla de localidades únicas y referencia desde la integrada
 # --------------------------------------------------------------------------------------------------------------------------------------
@@ -1437,13 +1567,14 @@ def validate_geography(db, table_name):
 
 # Se definen las tablas y los campos a cruzar. La idea es iterar sobre las tablas y campos para evitar
 # tener que definirlas las consultas SQL manualmente.
+# Los cruces actualizan taxonomic_species_validation (v) por species; la integrada enlaza con taxonomic_species_id.
 # Es equivalente a ejecutar la siguiente consulta:
-# UPDATE "dwc_integrated_{fecha}}" SET "cites" = t."cites" FROM "taxonomic_cites" t WHERE i."species" = t."species"
-# UPDATE "dwc_integrated_{fecha}}" SET "threatstatusuicn" = t."threatstatusuicn" FROM "taxonomic_threat_uicn" t WHERE i."species" = t."species"
-# UPDATE "dwc_integrated_{fecha}}" SET "threatstatusmads" = t."threatstatusmads" FROM "taxonomic_threat_mads" t WHERE i."species" = t."species"
-# UPDATE "dwc_integrated_{fecha}}" SET "exotic" = t."exotic", "exoticriskinvasion" = t."exoticriskinvasion", "invasiveness" = t."invasiveness", "invasive" = t."invasive", "transplanted" = t."transplanted" FROM "taxonomic_invasive_exotic" t WHERE i."species" = t."species"
-# UPDATE "dwc_integrated_{fecha}}" SET "migratory" = t."migratory", "endemic" = t."endemic" FROM "taxonomic_col_list" t WHERE i."species" = t."species"
-# UPDATE "dwc_integrated_{fecha}}" SET "referencelist" = 'Presente en lista taxonómica: ' || "referencelist" FROM "taxonomic_ref_list" t WHERE i."species" = t."species"
+# UPDATE "taxonomic_species_validation" v SET "cites" = t."cites" FROM "taxonomic_cites" t WHERE v."species" = t."species"
+# UPDATE "taxonomic_species_validation" v SET "threatstatusuicn" = t."threatstatus" FROM "taxonomic_threat_uicn" t WHERE v."species" = t."species"
+# UPDATE "taxonomic_species_validation" v SET "threatstatusmads" = t."threatstatus" FROM "taxonomic_threat_mads" t WHERE v."species" = t."species"
+# UPDATE "taxonomic_species_validation" v SET "exotic" = t."exotic", ... FROM "taxonomic_invasive_exotic" t WHERE v."species" = t."species"
+# UPDATE "taxonomic_species_validation" v SET "migratory" = t."migratory", "endemic" = t."endemic" FROM "taxonomic_col_list" t WHERE v."species" = t."species"
+# UPDATE "taxonomic_species_validation" v SET "referencelist" = t."datasetid" FROM "taxonomic_col_list" t WHERE v."species" = t."species"
 _FLAGTAXO_CLASSES = ('Aves', 'Mammalia', 'Reptilia', 'Squamata', 'Crocodylia', 'Testudines')
 _FLAGTAXO_ORDERS = ('Lepidoptera','Odonota')
 
@@ -1482,8 +1613,9 @@ _TAXONOMIC_JOINS = {
 
 
 def taxonomic_joins(db, table_name):
-    # Cruza la tabla integrada con tablas taxonómicas por el campo species.
-    integrated = table_name
+    # Cruza taxonomic_species_validation con tablas taxonómicas por el campo species.
+    # table_name se conserva por compatibilidad con el orquestador.
+    species_tbl = 'taxonomic_species_validation'
     with db.connect() as conn:
         for src_table, config in _TAXONOMIC_JOINS.items():
             col_map = config['columns']
@@ -1495,32 +1627,32 @@ def taxonomic_joins(db, table_name):
                 if dest == 'migratory':
                     set_parts.append(
                         f'"{dest}" = CASE '
-                        f'WHEN i."migratory" IS NULL THEN t."{src}" '
-                        f'ELSE i."migratory" END'
+                        f'WHEN v."migratory" IS NULL THEN t."{src}" '
+                        f'ELSE v."migratory" END'
                     )
                 else:
                     set_parts.append(f'"{dest}" = t."{src}"')
             set_clause = ', '.join(set_parts)
             conn.execute(
-                f'UPDATE "{integrated}" i '
+                f'UPDATE "{species_tbl}" v '
                 f'SET {set_clause} '
                 f'FROM "{src_table}" t '
-                f'WHERE i."species" = t."species"'
+                f'WHERE v."species" = t."species"'
             )
-            logger.info("Join con %s completado en %s", src_table, integrated)
+            logger.info("Join con %s completado en %s", src_table, species_tbl)
 
         conn.execute(
-            f'UPDATE "{integrated}" '
+            f'UPDATE "{species_tbl}" '
             f"SET \"referencelist\" = 'Presente en lista taxonómica: ' || \"referencelist\" "
             f'WHERE "referencelist" IS NOT NULL'
         )
-        logger.info("Campo referencelist actualizado en %s", integrated)
+        logger.info("Campo referencelist actualizado en %s", species_tbl)
 
         classes_list = ', '.join(f"'{c}'" for c in _FLAGTAXO_CLASSES)
         orders_list = ', '.join(f"'{o}'" for o in _FLAGTAXO_ORDERS)
 
         conn.execute(
-            f'UPDATE "{integrated}" SET "flagtaxo" = CASE '
+            f'UPDATE "{species_tbl}" SET "flagtaxo" = CASE '
             f'WHEN "referencelist" IS NULL AND "species" IS NOT NULL '
             f"AND \"transplanted\" = 'Trasplantada' "
             f"THEN 'Ausente en lista taxonómica_Trasplantada' "
@@ -1544,7 +1676,7 @@ def taxonomic_joins(db, table_name):
             f"THEN 'Ausente en lista taxonómica' "
             f'ELSE NULL END'
         )
-        logger.info("Campo flagtaxo completado en %s", integrated)
+        logger.info("Campo flagtaxo completado en %s", species_tbl)
 
         conn.commit()
 
@@ -1553,17 +1685,18 @@ def taxonomic_joins(db, table_name):
 # --------------------------------------------------------------------------------------------------------------------------------------
 
 def clean_threatstatus_fields(db, table_name):
-    # Normaliza threatstatus y agrega sufijos por fuente (IUCN/MADS).
-    integrated = table_name
+    # Normaliza threatstatus y agrega sufijos por fuente (IUCN/MADS) en taxonomic_species_validation.
+    # table_name se conserva por compatibilidad con el orquestador; el trabajo es sobre la tabla de especies.
+    species_tbl = 'taxonomic_species_validation'
     with db.connect() as conn:
         conn.execute(
-            f'UPDATE "{integrated}" '
+            f'UPDATE "{species_tbl}" '
             f'SET "threatstatusuicn" = NULLIF(TRIM("threatstatusuicn"), \'\'), '
             f'    "threatstatusmads" = NULLIF(TRIM("threatstatusmads"), \'\') '
             f'WHERE "threatstatusuicn" IS NOT NULL OR "threatstatusmads" IS NOT NULL'
         )
         conn.execute(
-            f'UPDATE "{integrated}" '
+            f'UPDATE "{species_tbl}" '
             f'SET "threatstatusuicn" = CASE '
             f'    WHEN "threatstatusuicn" IS NULL THEN NULL '
             f'    WHEN "threatstatusuicn" LIKE \'%_IUCN\' THEN "threatstatusuicn" '
@@ -1575,7 +1708,11 @@ def clean_threatstatus_fields(db, table_name):
             f'    ELSE "threatstatusmads" || \'_MADS\' '
             f'END'
         )
-        logger.info("Validación de threatstatus (vacíos/sufijos por fuente) completada en %s", integrated)
+        logger.info(
+            "Validación de threatstatus (vacíos/sufijos por fuente) completada en %s (integrada: %s)",
+            species_tbl,
+            table_name,
+        )
         conn.commit()
 
 # --------------------------------------------------------------------------------------------------------------------------------------

@@ -45,6 +45,7 @@ from utils.functions import (
     validate_localities,
     create_join_validation_columns,
     create_species_index,
+    validate_taxonomic_species,
     spatials_joins,
     normalize_stateprovince_county,
     validate_geography,
@@ -104,13 +105,14 @@ try:
     timer(fill_species_from_scientificname, "Completando campo species desde scientificname")(db, table_names['integrated'])
     timer(link_taxonrank_reference, "Vinculando taxonrank con catálogo de referencia")(db, table_names['integrated'])
     timer(add_gbifid_index, "Añadiendo PK la tabla integrada")(db, table_names['integrated'])
+    timer(validate_taxonomic_species, "Tabla taxonomic_species_validation y FK taxonomic_species_id")(db, table_names['integrated'])
     timer(validate_localities, "Creando tabla de localidades únicas y referencia en integrada")(db, table_names['integrated'])
     timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(db, table_names['integrated'])
     timer(normalize_stateprovince_county, "Normalizando stateprovince/county antes de validación")(db, table_names['integrated'])
     timer(validate_geography, "Validación geográfica")(db, table_names['integrated'])
-    #timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(db, table_names['integrated'])
-    #timer(taxonomic_joins, "Cruces taxonómicos con listados")(db, table_names['integrated'])
-    #timer(clean_threatstatus_fields, "Normalizando campos threatstatus antes de API")(db, table_names['integrated'])
+    timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(db, table_names['integrated'])
+    timer(taxonomic_joins, "Cruces taxonómicos con listados")(db, table_names['integrated'])
+    timer(clean_threatstatus_fields, "Normalizando campos threatstatus antes de API")(db, table_names['integrated'])
     #timer(gbif_api_calls, "Enriqueciendo metadatos de datasets y publicadores GBIF")(db, table_names['integrated'])
 
     register_load(db, table_names, today, origin)
