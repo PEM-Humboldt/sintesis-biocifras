@@ -43,8 +43,8 @@ from utils.connection import table_exists
 # Inicialización del logger
 logger = logging.getLogger('sintesis_biocifras')
 
-# Valor por defecto de filas por batch en cargas COPY.
-DEFAULT_FLUSH_EVERY = 500000
+# Tamaño de lote para UPDATE masivos (evaluado al importar el módulo; FLUSH_EVERY en .env, default 1e6).
+SQL_BATCH_SIZE = int(os.getenv('FLUSH_EVERY', '1000000'))
 
 
 # ------------------------------------------------------------------------------------------------------------
@@ -348,7 +348,7 @@ def data_upload(db, filepath, table_name, columns, flush_every=None):
     # El flush_size es el tamaño del buffer para la carga de datos en .env. Si no se define, se usa el valor por defecto.
     raw_conn = db.raw_connection()
     cur = None
-    flush_size = int(flush_every) if flush_every else DEFAULT_FLUSH_EVERY
+    flush_size = int(flush_every) if flush_every else SQL_BATCH_SIZE
     try:
         cur = raw_conn.cursor()
         cur.execute("SET synchronous_commit = OFF")
@@ -554,7 +554,7 @@ def normalize_integrated_country(db, table_name):
     # y espacios) → 'Colombia'; cualquier otro código o vacío → NULL. Actualización por lotes sobre gbifid
     # para tablas muy grandes (p. ej. decenas de millones de filas).
     integrated = table_name
-    batch_size = int(os.getenv('COUNTRY_UPDATE_BATCH', os.getenv('FLUSH_EVERY', '500000')))
+    batch_size = SQL_BATCH_SIZE
     total = 0
     with db.connect() as conn:
         conn.execute(
@@ -604,6 +604,9 @@ def normalize_integrated_country(db, table_name):
             f"{total:,}",
             f"{batch_size:,}",
         )
+
+    _run_table_maintenance(db, integrated)
+    logger.info("VACUUM (ANALYZE) en %s tras actualización masiva de country", integrated)
 
 
 # -----------------------------------------------------------------------------------------------------
@@ -726,7 +729,7 @@ def spatials_joins(db, table_name):
     # - table_name: Nombre de la tabla integrada dwc_integrated (se mantiene por compatibilidad).
     # Retorna:
     # - None: No retorna nada.
-    spatial_batch_size = int(os.getenv('GEOM_UPDATE_BATCH', '1000000'))
+    batch_size = SQL_BATCH_SIZE
     with db.connect() as conn:
         total_mgn = 0
         while True:
@@ -736,7 +739,7 @@ def spatials_joins(db, table_name):
                 f'    FROM "geo_locality_validation" '
                 f'    WHERE geom IS NOT NULL '
                 f'      AND "stateprovincemgn" IS NULL '
-                f'    LIMIT {spatial_batch_size}'
+                f'    LIMIT {batch_size}'
                 f') '
                 f'UPDATE "geo_locality_validation" i '
                 f'SET "stateprovincemgn" = m."dpto_cnmbr", '
@@ -762,7 +765,7 @@ def spatials_joins(db, table_name):
                 f'    WHERE geom IS NOT NULL '
                 f'      AND "countymgn" IS NULL '
                 f'      AND "maritimeregion" IS NULL '
-                f'    LIMIT {spatial_batch_size}'
+                f'    LIMIT {batch_size}'
                 f') '
                 f'UPDATE "geo_locality_validation" i '
                 f'SET "maritimeregion" = m."DESCRIP" '
@@ -786,7 +789,7 @@ def spatials_joins(db, table_name):
                 f'    FROM "geo_locality_validation" '
                 f'    WHERE geom IS NOT NULL '
                 f'      AND "narinomaritimeregion" IS NULL '
-                f'    LIMIT {spatial_batch_size}'
+                f'    LIMIT {batch_size}'
                 f') '
                 f'UPDATE "geo_locality_validation" i '
                 f'SET "narinomaritimeregion" = m."Nombre" '
@@ -833,9 +836,6 @@ def spatials_joins(db, table_name):
 
         logger.info("Reemplazos manuales para mantener consistencia con la salida de sintesis de cifras de biodiversidad completados en %s", "geo_locality_validation")
 
-    _run_table_maintenance(db, "geo_locality_validation")
-    logger.info("Vacuum completado en %s tras cruces espaciales", "geo_locality_validation")
-
 # -----------------------------------------------------------------------------------------------------
 # Normalización de stateprovince y county en geo_locality_validation
 # -----------------------------------------------------------------------------------------------------
@@ -850,7 +850,7 @@ def normalize_stateprovince_county(db, table_name):
     # - None: No retorna nada.
     _ = table_name  # firma mantenida para compatibilidad con el orquestador (main.timer).
     locality = 'geo_locality_validation'
-    batch_size = int(os.getenv('FLUSH_EVERY', '500000'))
+    batch_size = SQL_BATCH_SIZE
     with db.connect() as conn:
         # Validación 1: Stateprovincevalidated desde geo_stateprovince_validation (solo NULL).
         total_v1 = 0
@@ -1186,7 +1186,7 @@ def validate_taxonomic_species(db, table_name):
     integrated = table_name
     species_tbl = 'taxonomic_species_validation'
     fk_name = f"fk_{integrated}_taxonomic_species_id"
-    link_batch_size = int(os.getenv('FLUSH_EVERY', '1000000'))
+    batch_size = SQL_BATCH_SIZE
     total_linked = 0
 
     with db.connect() as conn:
@@ -1275,7 +1275,7 @@ def validate_taxonomic_species(db, table_name):
                 f'    FROM "{integrated}" i '
                 f'    JOIN "{species_tbl}" s ON i."species" IS NOT DISTINCT FROM s."species" '
                 f'    WHERE i."taxonomic_species_id" IS NULL '
-                f'    LIMIT {link_batch_size}'
+                f'    LIMIT {batch_size}'
                 f') '
                 f'UPDATE "{integrated}" i '
                 f'SET "taxonomic_species_id" = b.taxonomic_species_id '
@@ -1333,8 +1333,7 @@ def validate_localities(db, table_name):
     # - None: No retorna nada.
     integrated = table_name
     fk_name = f"fk_{integrated}_locality_id"
-    geom_batch_size = int(os.getenv('GEOM_UPDATE_BATCH', '500000'))
-    location_link_batch_size = int(os.getenv('FLUSH_EVERY', '1000000'))
+    batch_size = SQL_BATCH_SIZE
     total_updated = 0
     total_linked = 0
 
@@ -1375,7 +1374,7 @@ def validate_localities(db, table_name):
                 f'    WHERE "geom" IS NULL '
                 f'      AND "decimallatitude" IS NOT NULL '
                 f'      AND "decimallongitude" IS NOT NULL '
-                f'    LIMIT {geom_batch_size}'
+                f'    LIMIT {batch_size}'
                 f') '
                 f'UPDATE "geo_locality_validation" t '
                 f'SET "geom" = ST_SetSRID(ST_MakePoint(t."decimallongitude", t."decimallatitude"), 4326) '
@@ -1407,7 +1406,7 @@ def validate_localities(db, table_name):
                 f'     AND i."stateprovince" IS NOT DISTINCT FROM l."stateprovince" '
                 f'     AND i."county" IS NOT DISTINCT FROM l."county" '
                 f'    WHERE i."locality_id" IS NULL '
-                f'    LIMIT {location_link_batch_size}'
+                f'    LIMIT {batch_size}'
                 f') '
                 f'UPDATE "{integrated}" i '
                 f'SET "locality_id" = b.locality_id '
@@ -1449,6 +1448,13 @@ def validate_localities(db, table_name):
             f"{total_linked:,}",
         )
 
+    _run_table_maintenance(db, integrated)
+    logger.info(
+        "VACUUM (ANALYZE) en %s tras locality_id y FK (integrada ~40M filas)",
+        integrated,
+    )
+
+
 # --------------------------------------------------------------------------------------------------------------------------------------
 # Validaciones geográficas
 # --------------------------------------------------------------------------------------------------------------------------------------
@@ -1459,10 +1465,10 @@ def validate_geography(db, table_name):
     # - db: Conexión al pool de conexiones de PostgreSQL.
     # - table_name: Nombre de la tabla integrada dwc_integrated.
     # Retorna:
-    # - None: No retorna nada.  
+    # - None: No retorna nada.
     _ = table_name
     locality_tbl = 'geo_locality_validation'
-    batch_size = int(os.getenv('GEOM_UPDATE_BATCH', '500000'))
+    batch_size = SQL_BATCH_SIZE
     with db.connect() as conn:
         # 1/3 stateprovincevalidation
         last_id = 0
@@ -1613,6 +1619,12 @@ def validate_geography(db, table_name):
             locality_tbl,
             f"{total_fg:,}",
         )
+
+    _run_table_maintenance(db, locality_tbl)
+    logger.info(
+        "VACUUM (ANALYZE) en %s tras validación geográfica (tabla de localidades)",
+        locality_tbl,
+    )
 
 # --------------------------------------------------------------------------------------------------------------------------------------
 # Cruces taxonómicos con listados de referencia
@@ -1767,6 +1779,9 @@ def clean_threatstatus_fields(db, table_name):
             table_name,
         )
         conn.commit()
+
+    _run_table_maintenance(db, species_tbl)
+    logger.info("VACUUM (ANALYZE) en %s tras cruces y normalización threatstatus", species_tbl)
 
 # --------------------------------------------------------------------------------------------------------------------------------------
 # Backfill desde API GBIF

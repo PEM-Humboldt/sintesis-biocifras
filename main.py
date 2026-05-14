@@ -58,7 +58,7 @@ from utils.functions import (
 # Tipo de carga: sql (descarga GBIF desde GBIF API SQL API) o regular (descarga archivo interpretado y DwC-A desde GBIF
 UPLOAD_TYPE = "sql"
 # Tamaño del buffer para la carga de datos.
-FLUSH_EVERY = int(os.getenv('FLUSH_EVERY', '500000'))
+FLUSH_EVERY = int(os.getenv('FLUSH_EVERY', '1000000'))
 
 logger = setup_logger(os.getenv('LOG_FILE_PATH'))
 today = date.today()
