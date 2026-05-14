@@ -57,8 +57,6 @@ from utils.functions import (
 
 # Tipo de carga: sql (descarga GBIF desde GBIF API SQL API) o regular (descarga archivo interpretado y DwC-A desde GBIF
 UPLOAD_TYPE = "sql"
-# Tamaño del buffer para la carga de datos.
-FLUSH_EVERY = int(os.getenv('FLUSH_EVERY', '1000000'))
 
 logger = setup_logger(os.getenv('LOG_FILE_PATH'))
 today = date.today()
@@ -83,7 +81,7 @@ try:
             db, suffix, upload_type=UPLOAD_TYPE
         )
         timer(data_upload, "Carga de datos desde SQL_FILE")(
-            db, os.getenv('SQL_FILE'), table_names['sql'], SQL_COLS, FLUSH_EVERY
+            db, os.getenv('SQL_FILE'), table_names['sql'], SQL_COLS
         )
         timer(finalize_sql_table, "Renombrando campos y tabla SQL a integrated")(
             db, table_names['sql'], table_integrated_name
@@ -93,10 +91,10 @@ try:
     else:
         table_names = timer(tables_operations, "Operaciones sobre las tablas de staging dwc_occurrence y dwc_verbatim")(db, suffix)
         timer(data_upload, "Carga de datos desde occurrence.txt")(
-            db, os.getenv('OCCURRENCE_FILE'), table_names['occurrence'], OCCURRENCE_COLS, FLUSH_EVERY
+            db, os.getenv('OCCURRENCE_FILE'), table_names['occurrence'], OCCURRENCE_COLS
         )
         timer(data_upload, "Carga de datos desde verbatim.txt")(
-            db, os.getenv('VERBATIM_FILE'), table_names['verbatim'], VERBATIM_COLS, FLUSH_EVERY
+            db, os.getenv('VERBATIM_FILE'), table_names['verbatim'], VERBATIM_COLS
         )
         timer(create_staging_indexes, "Creación de índices en las tablas de staging dwc_occurrence y dwc_verbatim")(db, table_names)
         timer(create_integrated_table, "Creación de la tabla integrada dwc_occurrence_integrated")(db, table_names)

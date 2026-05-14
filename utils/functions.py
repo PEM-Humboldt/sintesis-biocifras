@@ -8,7 +8,7 @@ para el proceso de análisis y síntesis de cifras para Biodiversidad en cifras.
 - SQL_COLS: Lista de columnas de la tabla dwc_sql.
 - register_load: Función para registrar la carga de datos en la tabla table_registry.
 - tables_operations: Función para crear/truncar las tablas de staging (dwc_occurrence y dwc_verbatim) y la tabla integrada (dwc_integrated).
-- data_upload: Función para cargar los datos desde los archivos TSV de GBIF a las tablas de staging.
+- data_upload: Función para cargar los datos desde los archivos TSV de GBIF a las tablas de staging (lote COPY = SQL_BATCH_SIZE / FLUSH_EVERY).
 - finalize_sql_table: Función para renombrar la columna v_scientificname y la tabla de staging dwc_sql a dwc_integrated.
 - create_staging_indexes: Función para crear índices en las tablas de staging.
 - create_integrated_table: Función para crear la tabla integrada con las columnas de las tablas de staging.
@@ -309,7 +309,7 @@ def _epoch_ms_to_iso(value):
         return value
 
 
-def data_upload(db, filepath, table_name, columns, flush_every=None):
+def data_upload(db, filepath, table_name, columns):
     # Confirma que los archivos de datos definidos en el .env existen.
     # Si no existen, se retorna un error y se elimina la tabla de staging.
     # Parámetros:
@@ -317,7 +317,6 @@ def data_upload(db, filepath, table_name, columns, flush_every=None):
     # - filepath: Ruta del archivo a cargar.
     # - table_name: Nombre de la tabla a cargar.
     # - columns: Columnas a cargar.
-    # - flush_every: Tamaño del buffer para la carga de datos.
     # Retorna:
     # - None: No retorna nada.
     if not filepath or not Path(filepath).is_file():
@@ -345,10 +344,10 @@ def data_upload(db, filepath, table_name, columns, flush_every=None):
     )
 
     # Se crea una conexión raw para ejecutar el comando COPY de PostgreSQL usando psycopg2.
-    # El flush_size es el tamaño del buffer para la carga de datos en .env. Si no se define, se usa el valor por defecto.
+    # El tamaño de lote COPY es SQL_BATCH_SIZE (variable FLUSH_EVERY en .env al importar este módulo).
     raw_conn = db.raw_connection()
     cur = None
-    flush_size = int(flush_every) if flush_every else SQL_BATCH_SIZE
+    flush_size = SQL_BATCH_SIZE
     try:
         cur = raw_conn.cursor()
         cur.execute("SET synchronous_commit = OFF")
