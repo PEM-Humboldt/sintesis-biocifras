@@ -1844,10 +1844,11 @@ def gbif_api_calls(db, table_name):
                     time.sleep(0.002)
 
         publisher_upsert_sql = """
-            INSERT INTO gbif_publishers (publishingorgkey, organization)
-            VALUES (%(publishingorgkey)s, %(organization)s)
+            INSERT INTO gbif_publishers (publishingorgkey, organization, institutionid)
+            VALUES (%(publishingorgkey)s, %(organization)s, %(institutionid)s)
             ON CONFLICT (publishingorgkey) DO UPDATE
-            SET organization = EXCLUDED.organization
+            SET organization = EXCLUDED.organization,
+                institutionid = EXCLUDED.institutionid
         """
 
         # Publishingorgkeys en la integrada sin fila en catálogo o sin organization en gbif_publishers.
@@ -1894,9 +1895,11 @@ def gbif_api_calls(db, table_name):
                         continue
 
                     pub_fetched += 1
+                    pub_key = data.get('key') or key
                     conn.execute(publisher_upsert_sql, {
-                        'publishingorgkey': data.get('key') or key,
+                        'publishingorgkey': pub_key,
                         'organization': data.get('title'),
+                        'institutionid': f'https://www.gbif.org/publisher/{pub_key}',
                     })
                     pub_upserted += 1
                     time.sleep(0.002)
