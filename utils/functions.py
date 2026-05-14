@@ -18,7 +18,7 @@ para el proceso de análisis y síntesis de cifras para Biodiversidad en cifras.
 - create_species_index: Función para crear índice BTREE sobre species para optimizar cruces taxonómicos.
 - spatials_joins: Cruza geo_locality_validation con MGN_ADM_MPIO_2025 y capas marítimas usando ST_Intersects.
 - normalize_stateprovince_county: Normaliza stateprovince, county y slugs en geo_locality_validation antes de validar geografía.
-- validate_geography: Valida la geografía sobre geo_locality_validation (validated vs MGN).
+- validate_geography: Valida geografía en geo_locality_validation (tres bloques con db.connect: depto, municipio, flaggeo).
 - taxonomic_joins: Cruza la tabla integrada con tablas taxonómicas por el campo species.
 - clean_threatstatus_fields: Normaliza threatstatus y agrega sufijos por fuente (IUCN/MADS).
 - gbif_api_calls: Enriquece la tabla integrada con metadatos de datasets y publicadores desde tablas locales y API GBIF.
@@ -1271,96 +1271,164 @@ def validate_localities(db, table_name):
 # --------------------------------------------------------------------------------------------------------------------------------------
 
 def validate_geography(db, table_name):
-    # Campos validados vs MGN en geo_locality_validation (*validated vs *mgn).
-    # Por lotes; solo filas con validación pendiente persistente (*validation IS NULL).
-    # Una TEMP guarda ids ya tratados en esta corrida para no reprocesar filas donde el CASE
-    # puede dejar ambas validaciones NULL (sin eso el while no terminaría).
-    # Si cambian *validated en BD y debe recalcularse, vaciar antes esas columnas de validación.
-    _ = table_name  # firma mantenida para compatibilidad con el orquestador (main.timer).
+    # Valida geografía en geo_locality_validation
+    # Parámetros:
+    # - db: Conexión al pool de conexiones de PostgreSQL.
+    # - table_name: Nombre de la tabla integrada dwc_integrated.
+    # Retorna:
+    # - None: No retorna nada.  
+    _ = table_name
     locality_tbl = 'geo_locality_validation'
-    batch_size = int(os.getenv('FLUSH_EVERY', '500000'))
-
-    def _val_case(alias, orig_col, mgn_col):
-        a = alias
-        return (
-            f'CASE '
-            f'WHEN UPPER(TRIM({a}"{orig_col}")) = UPPER(TRIM({a}"{mgn_col}")) THEN TRUE '
-            f'WHEN {a}"{orig_col}" IS NULL OR TRIM({a}"{orig_col}") = \'\' THEN NULL '
-            f'WHEN {a}"decimallatitude" IS NULL AND {a}"decimallongitude" IS NULL THEN NULL '
-            f'WHEN {a}"maritimeregion" IS NOT NULL THEN NULL '
-            f'ELSE FALSE END'
-        )
-
-    sp_case = _val_case('t.', 'stateprovincevalidated', 'stateprovincemgn')
-    co_case = _val_case('t.', 'countyvalidated', 'countymgn')
-
+    batch_size = int(os.getenv('GEOM_UPDATE_BATCH', '500000'))
     with db.connect() as conn:
-        conn.execute('DROP TABLE IF EXISTS _validate_geography_batch')
-        conn.execute(
-            'CREATE TEMP TABLE _validate_geography_batch (lid INT PRIMARY KEY)'
-        )
-        conn.commit()
-
-        total_rows = 0
+        # 1/3 stateprovincevalidation
+        last_id = 0
+        total_sp = 0
         while True:
-            peek = conn.execute(
-                f'SELECT "id" '
-                f'FROM "{locality_tbl}" '
-                f'WHERE "stateprovincevalidation" IS NULL '
-                f'  AND "countyvalidation" IS NULL '
-                f'  AND "id" NOT IN (SELECT lid FROM _validate_geography_batch) '
-                f'ORDER BY "id" '
-                f'LIMIT {batch_size}'
-            )
-            id_rows = peek.fetchall()
-            if not id_rows:
-                break
-            ids = [r[0] for r in id_rows]
-
+            # Se actualiza stateprovincevalidation por lotes (ctid + LIMIT) para acotar WAL y locks.
             result = conn.execute(
-                f'UPDATE "{locality_tbl}" t '
-                f'SET '
-                f'"stateprovincevalidation" = {sp_case}, '
-                f'"countyvalidation" = {co_case}, '
+                f'WITH batch AS ('
+                f'    SELECT t.ctid '
+                f'    FROM "{locality_tbl}" t '
+                f'    WHERE t."id" > %s '
+                f'    ORDER BY t."id" '
+                f'    LIMIT {batch_size}'
+                f') '
+                f'UPDATE "{locality_tbl}" t SET '
+                f'"stateprovincevalidation" = CASE '
+                f'WHEN NULLIF(BTRIM(t."stateprovincevalidated"), \'\') IS NULL THEN NULL '
+                f'WHEN UPPER(TRIM(t."stateprovincevalidated")) = '
+                f'     UPPER(TRIM(COALESCE(t."stateprovincemgn", \'\'))) THEN TRUE '
+                f'WHEN (t."decimallatitude" IS NULL AND t."decimallongitude" IS NULL) '
+                f'     OR (COALESCE(t."decimallatitude", 0) = 0 AND COALESCE(t."decimallongitude", 0) = 0) '
+                f'     THEN NULL '
+                f'WHEN NULLIF(BTRIM(t."maritimeregion"), \'\') IS NOT NULL THEN NULL '
+                f'ELSE FALSE END '
+                f'FROM batch b '
+                f'WHERE t.ctid = b.ctid '
+                f'RETURNING t."id"',
+                (last_id,),
+            )
+            batch_updated = result.rowcount
+            id_rows = result.fetchall()
+            if batch_updated == 0:
+                break
+            last_id = max(r[0] for r in id_rows)
+            conn.commit()
+            total_sp += batch_updated
+            logger.info(
+                "Validación geográfica (1/3 stateprovince) batch en %s: %s filas (total %s, hasta id=%s)",
+                locality_tbl,
+                f"{batch_updated:,}",
+                f"{total_sp:,}",
+                last_id,
+            )
+        logger.info(
+            "Validación geográfica (1/3 stateprovince) completada en %s (%s filas)",
+            locality_tbl,
+            f"{total_sp:,}",
+        )
+
+    # --- 2/3 countyvalidation ---
+    with db.connect() as conn:
+        last_id = 0
+        total_co = 0
+        while True:
+            result = conn.execute(
+                f'WITH batch AS ('
+                f'    SELECT t.ctid '
+                f'    FROM "{locality_tbl}" t '
+                f'    WHERE t."id" > %s '
+                f'    ORDER BY t."id" '
+                f'    LIMIT {batch_size}'
+                f') '
+                f'UPDATE "{locality_tbl}" t SET '
+                f'"countyvalidation" = CASE '
+                f'WHEN NULLIF(BTRIM(t."countyvalidated"), \'\') IS NULL THEN NULL '
+                f'WHEN UPPER(TRIM(t."countyvalidated")) = '
+                f'     UPPER(TRIM(COALESCE(t."countymgn", \'\'))) THEN TRUE '
+                f'WHEN (t."decimallatitude" IS NULL AND t."decimallongitude" IS NULL) '
+                f'     OR (COALESCE(t."decimallatitude", 0) = 0 AND COALESCE(t."decimallongitude", 0) = 0) '
+                f'     THEN NULL '
+                f'WHEN NULLIF(BTRIM(t."maritimeregion"), \'\') IS NOT NULL THEN NULL '
+                f'ELSE FALSE END '
+                f'FROM batch b '
+                f'WHERE t.ctid = b.ctid '
+                f'RETURNING t."id"',
+                (last_id,),
+            )
+            batch_updated = result.rowcount
+            id_rows = result.fetchall()
+            if batch_updated == 0:
+                break
+            last_id = max(r[0] for r in id_rows)
+            conn.commit()
+            total_co += batch_updated
+            logger.info(
+                "Validación geográfica (2/3 county) batch en %s: %s filas (total %s, hasta id=%s)",
+                locality_tbl,
+                f"{batch_updated:,}",
+                f"{total_co:,}",
+                last_id,
+            )
+        logger.info(
+            "Validación geográfica (2/3 county) completada en %s (%s filas)",
+            locality_tbl,
+            f"{total_co:,}",
+        )
+
+    # --- 3/3 flaggeo ---
+    with db.connect() as conn:
+        last_id = 0
+        total_fg = 0
+        while True:
+            result = conn.execute(
+                f'WITH batch AS ('
+                f'    SELECT t.ctid '
+                f'    FROM "{locality_tbl}" t '
+                f'    WHERE t."id" > %s '
+                f'    ORDER BY t."id" '
+                f'    LIMIT {batch_size}'
+                f') '
+                f'UPDATE "{locality_tbl}" t SET '
                 f'"flaggeo" = CASE '
-                f'WHEN ({sp_case}) IS TRUE  AND ({co_case}) IS TRUE  THEN NULL '
-                f'WHEN ({sp_case}) IS FALSE AND ({co_case}) IS FALSE '
+                f'WHEN t."stateprovincevalidation" IS FALSE AND t."countyvalidation" IS FALSE '
                 f"THEN 'Departamento y municipio no coinciden con ubicación de la coordenada' "
-                f'WHEN ({sp_case}) IS TRUE  AND ({co_case}) IS FALSE '
+                f'WHEN t."stateprovincevalidation" IS TRUE AND t."countyvalidation" IS FALSE '
                 f"THEN 'Municipio no coincide con ubicación de la coordenada' "
-                f'WHEN ({sp_case}) IS FALSE AND ({co_case}) IS TRUE '
+                f'WHEN t."stateprovincevalidation" IS FALSE AND t."countyvalidation" IS TRUE '
                 f"THEN 'Departamento no coincide con ubicación de la coordenada' "
-                f'WHEN ({sp_case}) IS NULL  AND ({co_case}) IS NULL '
-                f'AND t."maritimeregion" IS NOT NULL '
+                f'WHEN t."stateprovincevalidation" IS NULL AND t."countyvalidation" IS NULL '
+                f'AND NULLIF(BTRIM(t."maritimeregion"), \'\') IS NOT NULL '
                 f"THEN 'Coordenada en área marítima' "
-                f'WHEN ({sp_case}) IS NULL  AND ({co_case}) IS NULL '
-                f'AND t."decimallatitude" IS NULL AND t."decimallongitude" IS NULL '
+                f'WHEN t."stateprovincevalidation" IS NULL AND t."countyvalidation" IS NULL '
+                f'AND (t."decimallatitude" IS NULL AND t."decimallongitude" IS NULL '
+                f'     OR (COALESCE(t."decimallatitude", 0) = 0 AND COALESCE(t."decimallongitude", 0) = 0)) '
                 f"THEN 'Sin coordenadas' "
                 f'ELSE NULL END '
-                f'WHERE t."id" = ANY(%s::INT[])',
-                (ids,),
+                f'FROM batch b '
+                f'WHERE t.ctid = b.ctid '
+                f'RETURNING t."id"',
+                (last_id,),
             )
-            conn.execute(
-                'INSERT INTO _validate_geography_batch (lid) '
-                'SELECT UNNEST(%s::INT[])',
-                (ids,),
-            )
-            n = result.rowcount
-            conn.commit()
-            if n == 0:
+            batch_updated = result.rowcount
+            id_rows = result.fetchall()
+            if batch_updated == 0:
                 break
-            total_rows += n
+            last_id = max(r[0] for r in id_rows)
+            conn.commit()
+            total_fg += batch_updated
             logger.info(
-                "Validación geográfica batch en %s: %s filas (total %s)",
+                "Validación geográfica (3/3 flaggeo) batch en %s: %s filas (total %s, hasta id=%s)",
                 locality_tbl,
-                f"{n:,}",
-                f"{total_rows:,}",
+                f"{batch_updated:,}",
+                f"{total_fg:,}",
+                last_id,
             )
-
         logger.info(
-            "Validación geográfica completada en %s (%s filas)",
+            "Validación geográfica (3/3 flaggeo) completada en %s (%s filas)",
             locality_tbl,
-            f"{total_rows:,}",
+            f"{total_fg:,}",
         )
 
 # --------------------------------------------------------------------------------------------------------------------------------------
