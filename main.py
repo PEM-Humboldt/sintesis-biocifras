@@ -44,7 +44,6 @@ from utils.functions import (
     link_taxonrank_reference,
     add_gbifid_index,
     validate_localities,
-    create_join_validation_columns,
     create_species_index,
     validate_taxonomic_species,
     spatials_joins,
@@ -63,7 +62,7 @@ today = date.today()
 #Formato de la fecha para el sufijo de las tablas de staging y la tabla integrada
 suffix = today.strftime('%Y%m%d')
 
-logger.info("Inicio del proceso de carga — sufijo: %s", suffix)
+logger.info("Inicio del proceso de carga con fecha: %s", suffix)
 # Obtener la conexión a la base de datos PostgreSQL usando psycopg2
 db = get_db()
 
@@ -100,11 +99,10 @@ try:
         timer(create_integrated_table, "Creación de la tabla integrada dwc_occurrence_integrated")(db, table_names)
         origin = 'DwC-A download'
 
-    timer(create_join_validation_columns, "Comprobación de modelo GBIF (sin columnas duplicadas en integrada)")(db, table_names['integrated'])
     timer(fill_species_from_scientificname, "Completando campo species desde scientificname")(db, table_names['integrated'])
     #timer(normalize_integrated_country, "Campo country (CO → Colombia) por lotes")(db, table_names['integrated'])
-    timer(link_taxonrank_reference, "Vinculando taxonrank con catálogo de referencia")(db, table_names['integrated'])
     timer(add_gbifid_index, "Añadiendo PK la tabla integrada")(db, table_names['integrated'])
+    timer(link_taxonrank_reference, "Vinculando taxonrank con catálogo de referencia")(db, table_names['integrated'])
     timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(db, table_names['integrated'])
     timer(validate_taxonomic_species, "Tabla taxonomic_species_validation y FK taxonomic_species_id")(db, table_names['integrated'])
     timer(taxonomic_joins, "Cruces taxonómicos con listados")(db, table_names['integrated'])

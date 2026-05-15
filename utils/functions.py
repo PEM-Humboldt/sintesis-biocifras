@@ -16,7 +16,6 @@ Rendimiento: FLUSH_EVERY controla el lote de COPY (SQL_BATCH_SIZE); UPDATE_BATCH
 - fill_species_from_scientificname: Función para llenar el campo species con las dos primeras palabras de scientificname.
 - normalize_integrated_country: Campo country desde countrycode (CO → Colombia; resto NULL) por lotes sobre gbifid.
 - add_gbifid_index: Función para crear índice primary key sobre gbifid en la tabla integrada.
-- create_join_validation_columns: Reservado; metadatos GBIF solo en gbif_datasets / gbif_publishers (enlace por datasetkey y publishingorgkey en la integrada).
 - create_species_index: Función para crear índice BTREE sobre species para optimizar cruces taxonómicos.
 - validate_taxonomic_species: Tabla taxonomic_species_validation por species únicos, columnas taxonómicas y FK taxonomic_species_id en la integrada.
 - spatials_joins: Cruza geo_locality_validation con MGN_ADM_MPIO_2025 y capas marítimas usando ST_Intersects.
@@ -183,14 +182,17 @@ def _build_create_ddl(table_name, col_types):
     # cols es un diccionario con el nombre de la columna y el tipo SQL que se genera dinámicamente
     # col_types es uno de los diccionarios: _OCCURRENCE_TYPES, _VERBATIM_TYPES, _SQL_COL_TYPES
     # Es equivalente a ejecutar la siguiente consulta:
-    # CREATE TABLE "tabla_fecha" ("columna1" tipo1, "columna2" tipo2, ...);
+    # CREATE UNLOGGED TABLE "tabla_fecha" (...) WITH (autovacuum_enabled = false);
     # Parámetros:
     # - table_name: Nombre de la tabla a crear.
     # - col_types: Diccionario con los tipos de columnas para la tabla: _OCCURRENCE_TYPES, _VERBATIM_TYPES, _SQL_COL_TYPES
     # Retorna:
     # - ddl: Sentencia CREATE TABLE para la tabla.
     cols = ', '.join(f'"{col}" {dtype}' for col, dtype in col_types.items())
-    return f'CREATE UNLOGGED TABLE "{table_name}" ({cols});'
+    return (
+        f'CREATE UNLOGGED TABLE "{table_name}" ({cols}) '
+        f'WITH (autovacuum_enabled = false);'
+    )
 
 # Para mantener un historial de las tablas de staging y la tabla integrada se utiliza un sufijo de fecha.
 def tables_operations(db, suffix, upload_type=None):
@@ -418,6 +420,7 @@ def data_upload(db, filepath, table_name, columns):
 def finalize_sql_table(db, old_name, new_name):
     # Renombra la columna v_scientificname y la tabla de staging dwc_sql a dwc_integrated
     # para mantener integridad del flujo definido en main.py.
+    # Tras el RENAME, desactiva autovacuum en la relación (no es por tiempo: persiste hasta un ALTER SET true).
     # Parámetros:
     # - db: Conexión al pool de conexiones de PostgreSQL.
     # - old_name: Nombre de la tabla de staging dwc_sql.
@@ -437,8 +440,11 @@ def finalize_sql_table(db, old_name, new_name):
             conn.execute(f'DROP TABLE "{new_name}"')
             logger.info("DROP TABLE existente: %s", new_name)
         conn.execute(f'ALTER TABLE "{old_name}" RENAME TO "{new_name}"')
+        conn.execute(
+            f'ALTER TABLE "{new_name}" SET (autovacuum_enabled = false)'
+        )
         conn.commit()
-    logger.info("Tabla SQL finalizada: %s → %s", old_name, new_name)
+    logger.info("Tabla SQL finalizada: %s → %s y autovacuum desactivado", old_name, new_name)
 
 # -----------------------------------------------------------------------------------------------------
 # Creación de índices en las tablas de staging dwc_occurrence y dwc_verbatim
@@ -468,7 +474,7 @@ def create_integrated_table(db, table_names):
     # Se crea la tabla integrada dwc_occurrence_integrated desde las tablas de staging dwc_occurrence y dwc_verbatim
     # mediante un JOIN por la columna gbifID.
     # Es equivalente a ejecutar la siguiente consulta:
-    # CREATE TABLE dwc_occurrence_integrated AS
+    # CREATE TABLE dwc_occurrence_integrated WITH (autovacuum_enabled = false) AS
     # SELECT o.*, v.*
     # FROM dwc_occurrence_fecha o
     # INNER JOIN dwc_verbatim_fecha v ON o.gbifID = v.gbifID;
@@ -493,7 +499,7 @@ def create_integrated_table(db, table_names):
             logger.info("DROP TABLE existente: %s", integrated)
 
         sql = (
-            f'CREATE TABLE "{integrated}" AS '
+            f'CREATE TABLE "{integrated}" WITH (autovacuum_enabled = false) AS '
             f'SELECT {occurrence_cols}, {verbatim_cols} '
             f'FROM "{occurrence}" o '
             f'INNER JOIN "{verbatim}" v ON o."gbifid" = v."gbifid"'
@@ -501,22 +507,6 @@ def create_integrated_table(db, table_names):
         conn.execute(sql)
         conn.commit()
     logger.info("Tabla integrada creada: %s", integrated)
-
-# -----------------------------------------------------------------------------------------------------
-# Creación de columnas a usar en las validaciones y cruces en la tabla integrada
-# -----------------------------------------------------------------------------------------------------
-
-def create_join_validation_columns(db, table_name):
-    # Metadatos de dataset y publicador viven en gbif_datasets y gbif_publishers (claves TEXT
-    # alineadas con GBIF). La integrada ya trae datasetkey y publishingorgkey; no se duplican
-    # license, doi, título, etc. Las consultas deben hacer JOIN (o una vista) hacia esas tablas.
-    # Parámetros:
-    # - db: Reservado por compatibilidad con el orquestador.
-    # - table_name: Nombre de la tabla integrada dwc_integrated.
-    logger.info(
-        "Metadatos GBIF por relación (datasetkey, publishingorgkey); sin columnas extra en %s",
-        table_name,
-    )
 
 # -----------------------------------------------------------------------------------------------------
 # Revisión de casos de nombres científicos vacíos en la tabla integrada
@@ -634,12 +624,12 @@ def link_taxonrank_reference(db, table_name):
             f'ADD COLUMN IF NOT EXISTS "taxonrank_id" INTEGER'
         )
         conn.commit()
-        logger.info("Columna taxonrank_id preparada en %s", integrated)
+        logger.info("Columna taxonrank_id creada en %s", integrated)
 
         # Índice temporal de apoyo para acelerar el join por taxonrank.
         conn.execute(
             f'CREATE INDEX IF NOT EXISTS "{tmp_idx_integrated}" '
-            f'ON "{integrated}" ("taxonrank")'
+            f'ON "{integrated}" USING BTREE ("taxonrank")'
         )
         conn.commit()
         logger.info("Indice temporal creado: %s", tmp_idx_integrated)
@@ -657,7 +647,7 @@ def link_taxonrank_reference(db, table_name):
         total_updated = result.rowcount
         conn.commit()
         logger.info(
-            "Vinculación taxonrank en %s: %s filas actualizadas",
+            "Vinculación de taxonrank en %s: %s filas actualizadas",
             integrated,
             f"{total_updated:,}",
         )
@@ -668,6 +658,7 @@ def link_taxonrank_reference(db, table_name):
             f'ON "{integrated}" USING BTREE ("taxonrank_id")'
         )
         conn.commit()
+        logger.info("Indice creado en %s: taxonrank_id", integrated)
 
         # FK nullable: permite huérfanos (taxonrank_id = NULL) cuando no hay match en catálogo.
         conn.execute(f'ALTER TABLE "{integrated}" DROP CONSTRAINT IF EXISTS "{fk_name}"')
@@ -697,7 +688,7 @@ def link_taxonrank_reference(db, table_name):
 
 
 # -----------------------------------------------------------------------------------------------------
-# Creación de indice primary key y campo de geometría en la tabla integrada
+# Creación de indice primary key
 # -----------------------------------------------------------------------------------------------------
 
 def add_gbifid_index(db, table_name):
@@ -756,7 +747,7 @@ def spatials_joins(db, table_name):
             if batch_updated == 0:
                 break
             total_mgn += batch_updated
-            logger.info("Cruce MGN batch en %s: %s filas (total %s)", "geo_locality_validation", f"{batch_updated:,}", f"{total_mgn:,}")
+            logger.info("Cruce MGN en batch en %s: %s filas (total %s)", "geo_locality_validation", f"{batch_updated:,}", f"{total_mgn:,}")
         logger.info("Cruce espacial con MGN_ADM_MPIO_2025 completado en %s (%s filas)", "geo_locality_validation", f"{total_mgn:,}")
 
         total_invemar = 0
@@ -781,7 +772,7 @@ def spatials_joins(db, table_name):
             if batch_updated == 0:
                 break
             total_invemar += batch_updated
-            logger.info("Cruce INVEMAR batch en %s: %s filas (total %s)", "geo_locality_validation", f"{batch_updated:,}", f"{total_invemar:,}")
+            logger.info("Cruce INVEMAR en batch en %s: %s filas (total %s)", "geo_locality_validation", f"{batch_updated:,}", f"{total_invemar:,}")
         logger.info("Cruce espacial con INVEMAR_MARITIME_REGIONS completado en %s (%s filas)", "geo_locality_validation", f"{total_invemar:,}")
 
         total_narino = 0
@@ -805,7 +796,7 @@ def spatials_joins(db, table_name):
             if batch_updated == 0:
                 break
             total_narino += batch_updated
-            logger.info("Cruce Nariño batch en %s: %s filas (total %s)", "geo_locality_validation", f"{batch_updated:,}", f"{total_narino:,}")
+            logger.info("Cruce Nariño en batch en %s: %s filas (total %s)", "geo_locality_validation", f"{batch_updated:,}", f"{total_narino:,}")
         logger.info("Cruce espacial con NARINO_MARITIME_REGION completado en %s (%s filas)", "geo_locality_validation", f"{total_narino:,}")
 
         # Se aplica INITCAP a los campos de departamento y municipio para estandarización de nombres.
@@ -1222,16 +1213,20 @@ def validate_taxonomic_species(db, table_name):
             f'  CONSTRAINT "uq_{species_tbl}_species" UNIQUE ("species")'
             f')'
         )
+        conn.commit()
+        logger.info("Tabla de validación taxonómica por especie creada: %s", species_tbl)
         conn.execute(
             f'CREATE INDEX IF NOT EXISTS "idx_{species_tbl}_species" '
             f'ON "{species_tbl}" USING BTREE ("species")'
         )
+        conn.commit()
+        logger.info("Indice creado en %s: species", species_tbl)
         conn.execute(
             f'ALTER TABLE "{integrated}" '
             f'ADD COLUMN IF NOT EXISTS "taxonomic_species_id" INT4'
         )
         conn.commit()
-
+        logger.info("Columna taxonomic_species_id creada en %s", integrated)
         if species_already:
             fk_rows = conn.execute(
                 'SELECT nsp.nspname, cls.relname, con.conname '
@@ -1257,7 +1252,7 @@ def validate_taxonomic_species(db, table_name):
             )
             conn.commit()
             logger.info(
-                "%s truncada y secuencia de id reiniciada (tabla ya existía)",
+                "%s truncada y secuencia de id reiniciada (tabla taxonomic_species_validation ya existía)",
                 species_tbl,
             )
 
@@ -1270,7 +1265,7 @@ def validate_taxonomic_species(db, table_name):
             f'ORDER BY i."species", i."gbifid"'
         )
         conn.commit()
-
+        logger.info("Espcies únicas de integrada insertadas en %s: species", species_tbl)
         while True:
             result = conn.execute(
                 f'WITH batch AS ('
@@ -1302,6 +1297,8 @@ def validate_taxonomic_species(db, table_name):
             f'ON "{integrated}" USING BTREE ("taxonomic_species_id")'
         )
         conn.commit()
+        logger.info("Indice creado en %s: taxonomic_species_id", integrated)
+
         conn.execute(f'ALTER TABLE "{integrated}" DROP CONSTRAINT IF EXISTS "{fk_name}"')
         conn.execute(
             f'ALTER TABLE "{integrated}" '
@@ -1345,7 +1342,8 @@ def validate_localities(db, table_name):
             f'ALTER TABLE "{integrated}" '
             f'ADD COLUMN IF NOT EXISTS "locality_id" INT4'
         )
-
+        conn.commit()
+        logger.info("Columna locality_id creada en %s", integrated)
         # Inserta combinaciones nuevas desde integrated (orden = índice único en BD).
         conn.execute(
             f'INSERT INTO "geo_locality_validation" '
@@ -1367,7 +1365,7 @@ def validate_localities(db, table_name):
             f'ON CONFLICT ("decimallatitude", "decimallongitude", "stateprovince", "county") DO NOTHING'
         )
         conn.commit()
-
+        logger.info("Combinaciones nuevas de integrada insertadas en %s: geo_locality_validation", integrated)
         # Completa geom por lotes solo cuando falta geometría y hay coordenadas.
         while True:
             result = conn.execute(
@@ -1396,7 +1394,7 @@ def validate_localities(db, table_name):
                 f"{total_updated:,}",
             )
         conn.commit()
-
+        logger.info("Geom completado en %s: geo_locality_validation", "geo_locality_validation")
         # Vincula locality_id en integrada por lotes para reducir locks y WAL en tablas grandes.
         while True:
             result = conn.execute(
@@ -1427,12 +1425,13 @@ def validate_localities(db, table_name):
                 f"{batch_linked:,}",
                 f"{total_linked:,}",
             )
-
+        logger.info("Locality_id completado en %s: integrated", integrated)
         conn.execute(
             f'CREATE INDEX IF NOT EXISTS "idx_{integrated}_locality_id" '
             f'ON "{integrated}" USING BTREE ("locality_id")'
         )
         conn.commit()
+        logger.info("Indice creado en %s: locality_id", integrated)
         conn.execute(f'ALTER TABLE "{integrated}" DROP CONSTRAINT IF EXISTS "{fk_name}"')
         conn.execute(
             f'ALTER TABLE "{integrated}" '
