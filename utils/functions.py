@@ -4,8 +4,8 @@
 Este archivo contiene las funciones para la carga de datos desde GBIF a un servidor PostgreSQL + PostGIS
 para el proceso de análisis y síntesis de cifras para Biodiversidad en cifras.
 Rendimiento: FLUSH_EVERY controla el lote de COPY (SQL_BATCH_SIZE); UPDATE_BATCH_SIZE controla el LIMIT en UPDATE por lotes (JOIN/ctid).
-- OCCURRENCE_COLS: Lista de columnas de la tabla dwc_occurrence.
-- VERBATIM_COLS: Lista de columnas de la tabla dwc_verbatim.
+- SIMPLE_COLS: Lista de columnas de la tabla dwc_occurrence (occurrence.txt / simple).
+- OCURRENCE_COLS: Lista de columnas de la tabla dwc_verbatim (verbatim.txt).
 - SQL_COLS: Lista de columnas de la tabla dwc_sql.
 - register_load: Función para registrar la carga de datos en la tabla table_registry.
 - tables_operations: Función para crear/truncar las tablas de staging (dwc_occurrence y dwc_verbatim) y la tabla integrada (dwc_integrated).
@@ -17,7 +17,9 @@ Rendimiento: FLUSH_EVERY controla el lote de COPY (SQL_BATCH_SIZE); UPDATE_BATCH
 - normalize_integrated_country: Campo country desde countrycode (CO → Colombia; resto NULL) por lotes sobre gbifid.
 - add_gbifid_index: Función para crear índice primary key sobre gbifid en la tabla integrada.
 - create_species_index: Función para crear índice BTREE sobre species para optimizar cruces taxonómicos.
-- validate_taxonomic_species: Tabla taxonomic_species_validation por species únicos, columnas taxonómicas y FK taxonomic_species_id en la integrada.
+- validate_taxonomic_species: Tabla taxonomic_species_validation por species únicos y columna taxonomic_species_id en la integrada (sin enlace masivo).
+- link_integrated_taxonomic_species_id: UPDATE por lotes integrada → taxonomic_species_validation, índice y FK NOT VALID (orquestar al final del pipeline).
+- link_integrated_locality_id: UPDATE por lotes integrada → geo_locality_validation, índice, FK NOT VALID y VACUUM ANALYZE (orquestar al final del pipeline).
 - spatials_joins: Cruza geo_locality_validation con MGN_ADM_MPIO_2025 y capas marítimas usando ST_Intersects.
 - normalize_stateprovince_county: Normaliza stateprovince, county y slugs en geo_locality_validation antes de validar geografía.
 - validate_geography: Valida geografía en geo_locality_validation (tres bloques con db.connect: depto, municipio, flaggeo).
@@ -56,12 +58,12 @@ UPDATE_BATCH_SIZE = int(os.getenv('UPDATE_BATCH_SIZE', '50000'))
 # Para el process de carga desde los archivos integrated.csv, ocurrence.txt y sql.csv se definen únicamente 
 # las columnas con listas que se van a utilizar para evitar cargar datos innecesarios y optimizar el 
 # proceso de carga. Se pueden agregar más columnas si es necesario. Pero no olvidar agregar las columnas a las 
-# tablas de staging en las listas _OCCURRENCE_TYPES, _VERBATIM_TYPES, _SQL_COL_TYPES.
+# tablas de staging en las listas _SIMPLE_TYPES, _OCURRENCE_TYPES, _SQL_COL_TYPES.
 # Se decide usar este enfoque de listas para poder agregar o reducir el número de columnas de manera dinámica
 # sin tener que modificar directamente consultas SQL en RAW.
 # ------------------------------------------------------------------------------------------------------------
 
-OCCURRENCE_COLS = [
+SIMPLE_COLS = [
     'gbifid', 'occurrenceid', 'basisofrecord', 'collectioncode',
     'catalognumber', 'recordedby', 'individualcount', 'eventdate',
     'countrycode', 'stateprovince', 'locality', 'elevation', 'depth',
@@ -72,7 +74,7 @@ OCCURRENCE_COLS = [
     'taxonkey', 'issue', 'occurrencestatus', 'lastinterpreted',
 ]
 
-VERBATIM_COLS = [
+OCURRENCE_COLS = [
     'gbifid', 'type', 'datasetid', 'datasetname', 'organismquantity',
     'organismquantitytype', 'eventid', 'samplingprotocol', 'county',
     'municipality', 'repatriated', 'publishingcountry', 'lastparsed',
@@ -92,7 +94,7 @@ SQL_COLS = [
 ]
 
 # Mapeo de columnas tipo SQL para CREATE TABLE dinámico
-_OCCURRENCE_TYPES = {
+_SIMPLE_TYPES = {
     'gbifid': 'BIGINT',
     'occurrenceid': 'TEXT', 'basisofrecord': 'TEXT',
     'collectioncode': 'TEXT', 'catalognumber': 'TEXT',
@@ -113,7 +115,7 @@ _OCCURRENCE_TYPES = {
     'lastinterpreted': 'TIMESTAMPTZ',
 }
 
-_VERBATIM_TYPES = {
+_OCURRENCE_TYPES = {
     'gbifid': 'BIGINT',
     'type': 'TEXT', 'datasetid': 'TEXT', 'datasetname': 'TEXT',
     'organismquantity': 'TEXT', 'organismquantitytype': 'TEXT',
@@ -180,12 +182,12 @@ def _build_create_ddl(table_name, col_types):
     # Función de apoyo.
     # Genera sentencias CREATE TABLE a partir del diccionario columna -> tipo SQL.
     # cols es un diccionario con el nombre de la columna y el tipo SQL que se genera dinámicamente
-    # col_types es uno de los diccionarios: _OCCURRENCE_TYPES, _VERBATIM_TYPES, _SQL_COL_TYPES
+    # col_types es uno de los diccionarios: _SIMPLE_TYPES, _OCURRENCE_TYPES, _SQL_COL_TYPES
     # Es equivalente a ejecutar la siguiente consulta:
     # CREATE UNLOGGED TABLE "tabla_fecha" (...) WITH (autovacuum_enabled = false);
     # Parámetros:
     # - table_name: Nombre de la tabla a crear.
-    # - col_types: Diccionario con los tipos de columnas para la tabla: _OCCURRENCE_TYPES, _VERBATIM_TYPES, _SQL_COL_TYPES
+    # - col_types: Diccionario con los tipos de columnas para la tabla: _SIMPLE_TYPES, _OCURRENCE_TYPES, _SQL_COL_TYPES
     # Retorna:
     # - ddl: Sentencia CREATE TABLE para la tabla.
     cols = ', '.join(f'"{col}" {dtype}' for col, dtype in col_types.items())
@@ -222,8 +224,8 @@ def tables_operations(db, suffix, upload_type=None):
             'integrated': f'dwc_integrated_{suffix}',
         }
         type_maps = {
-            'occurrence': _OCCURRENCE_TYPES,
-            'verbatim': _VERBATIM_TYPES,
+            'occurrence': _SIMPLE_TYPES,
+            'verbatim': _OCURRENCE_TYPES,
         }
         keys = ('occurrence', 'verbatim')
 
@@ -488,10 +490,10 @@ def create_integrated_table(db, table_names):
     integrated = table_names['integrated']
 
     occurrence_cols = ', '.join(
-        f'o."{c.lower()}"' for c in OCCURRENCE_COLS
+        f'o."{c.lower()}"' for c in SIMPLE_COLS
     )
     verbatim_cols = ', '.join(
-        f'v."{c.lower()}"' for c in VERBATIM_COLS if c != 'gbifid'
+        f'v."{c.lower()}"' for c in OCURRENCE_COLS if c != 'gbifid'
     )
     with db.connect() as conn:
         if table_exists(db, integrated):
@@ -1174,14 +1176,12 @@ def create_species_index(db, table_name):
 
 def validate_taxonomic_species(db, table_name):
     # Crea o reutiliza taxonomic_species_validation con una fila por species y columnas
-    # taxonómicas (cites, amenazas, exóticas, etc.); vincula la integrada con taxonomic_species_id.
+    # taxonómicas (cites, amenazas, exóticas, etc.) y prepara taxonomic_species_id en la integrada.
+    # El enlace masivo integrada → catálogo se hace en link_integrated_taxonomic_species_id (main al final).
     # Si la tabla ya existía, se trunca y se reinicia la secuencia de id para descartar cruces
     # taxonómicos obsoletos antes de volver a poblar desde la integrada.
     integrated = table_name
     species_tbl = 'taxonomic_species_validation'
-    fk_name = f"fk_{integrated}_taxonomic_species_id"
-    batch_size = UPDATE_BATCH_SIZE
-    total_linked = 0
 
     with db.connect() as conn:
         species_already = conn.execute(
@@ -1265,7 +1265,24 @@ def validate_taxonomic_species(db, table_name):
             f'ORDER BY i."species", i."gbifid"'
         )
         conn.commit()
-        logger.info("Espcies únicas de integrada insertadas en %s: species", species_tbl)
+        logger.info(
+            "Catálogo taxonómico %s poblado desde %s (enlace en link_integrated_taxonomic_species_id)",
+            species_tbl,
+            integrated,
+        )
+
+
+def link_integrated_taxonomic_species_id(db, table_name):
+    # Enlaza la integrada con taxonomic_species_validation por species (UPDATE por lotes),
+    # crea índice en taxonomic_species_id y FK NOT VALID hacia el catálogo.
+    # Pensado para ejecutarse al final del pipeline (main.py) tras taxonomic_joins y demás pasos.
+    integrated = table_name
+    species_tbl = 'taxonomic_species_validation'
+    fk_name = f"fk_{integrated}_taxonomic_species_id"
+    batch_size = UPDATE_BATCH_SIZE
+    total_linked = 0
+
+    with db.connect() as conn:
         while True:
             result = conn.execute(
                 f'WITH batch AS ('
@@ -1311,7 +1328,7 @@ def validate_taxonomic_species(db, table_name):
         )
         conn.commit()
         logger.info(
-            "Tabla de validación taxonómica por especie actualizada: %s (taxonomic_species_id=%s)",
+            "Enlace integrada → %s: %s filas con taxonomic_species_id",
             species_tbl,
             f"{total_linked:,}",
         )
@@ -1324,18 +1341,16 @@ def validate_taxonomic_species(db, table_name):
 def validate_localities(db, table_name):
     # Mantiene una tabla de localidades únicas a partir de los campos
     # decimallatitude, decimallongitude, county, stateprovince, e inserta
-    # nuevas combinaciones desde la tabla integrada actual.
-    # Luego vincula la integrada con locality_id por llave foránea nullable.
+    # nuevas combinaciones desde la tabla integrada actual y completa geom.
+    # El enlace masivo locality_id en la integrada: link_integrated_locality_id (main al final).
     # Parámetros:
     # - db: Conexión al pool de conexiones de PostgreSQL.
     # - table_name: Nombre de la tabla integrada dwc_integrated.
     # Retorna:
     # - None: No retorna nada.
     integrated = table_name
-    fk_name = f"fk_{integrated}_locality_id"
     batch_size = UPDATE_BATCH_SIZE
     total_updated = 0
-    total_linked = 0
 
     with db.connect() as conn:
         conn.execute(
@@ -1394,8 +1409,23 @@ def validate_localities(db, table_name):
                 f"{total_updated:,}",
             )
         conn.commit()
-        logger.info("Geom completado en %s: geo_locality_validation", "geo_locality_validation")
-        # Vincula locality_id en integrada por lotes para reducir locks y WAL en tablas grandes.
+        logger.info(
+            "geo_locality_validation actualizada desde %s (geom=%s; enlace en link_integrated_locality_id)",
+            integrated,
+            f"{total_updated:,}",
+        )
+
+
+def link_integrated_locality_id(db, table_name):
+    # Enlaza la integrada con geo_locality_validation por lat/lon/state/county (UPDATE por lotes),
+    # crea índice en locality_id, FK NOT VALID y VACUUM ANALYZE en la integrada.
+    # Ejecutar al final del pipeline tras spatials_joins y validate_geography.
+    integrated = table_name
+    fk_name = f"fk_{integrated}_locality_id"
+    batch_size = UPDATE_BATCH_SIZE
+    total_linked = 0
+
+    with db.connect() as conn:
         while True:
             result = conn.execute(
                 f'WITH batch AS ('
@@ -1420,18 +1450,19 @@ def validate_localities(db, table_name):
                 break
             total_linked += batch_linked
             logger.info(
-                "Locality_id batch en %s: %s filas (total %s)",
+                "locality_id batch en %s: %s filas (total %s)",
                 integrated,
                 f"{batch_linked:,}",
                 f"{total_linked:,}",
             )
-        logger.info("Locality_id completado en %s: integrated", integrated)
+
         conn.execute(
             f'CREATE INDEX IF NOT EXISTS "idx_{integrated}_locality_id" '
             f'ON "{integrated}" USING BTREE ("locality_id")'
         )
         conn.commit()
         logger.info("Indice creado en %s: locality_id", integrated)
+
         conn.execute(f'ALTER TABLE "{integrated}" DROP CONSTRAINT IF EXISTS "{fk_name}"')
         conn.execute(
             f'ALTER TABLE "{integrated}" '
@@ -1444,15 +1475,13 @@ def validate_localities(db, table_name):
         )
         conn.commit()
         logger.info(
-            "Tabla de validación de localidades actualizada: %s (geom=%s, locality_id=%s)",
-            "geo_locality_validation",
-            f"{total_updated:,}",
+            "Enlace integrada → geo_locality_validation: %s filas con locality_id",
             f"{total_linked:,}",
         )
 
     _run_table_maintenance(db, integrated)
     logger.info(
-        "VACUUM (ANALYZE) en %s tras locality_id y FK (integrada ~40M filas)",
+        "VACUUM (ANALYZE) en %s tras locality_id y FK",
         integrated,
     )
 

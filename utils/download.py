@@ -97,7 +97,7 @@ def extract_gbifZip(zipFile, nameInZip, destFile, checkHash=True):
 ### PARTE 2: descargar datos con la api classica de GBIF ###
 ################################################################################
 
-def download_gbif_predicates_files(predicates=default_predicates, maximum_time_s = 60*60*24*7, maximum_diff_time_s=60*60*24, limit = 20,  simple_csv_file=os.getenv('OCCURRENCE_FILE'), verbatim_dwca_file=os.getenv('VERBATIM_FILE'), user=os.getenv("GBIF_USER"), pwd=os.getenv("GBIF_PWD")):
+def download_gbif_predicates_files(predicates=default_predicates, maximum_time_s = 60*60*24*7, maximum_diff_time_s=60*60*24, limit = 20,  simple_csv_file=os.getenv('SIMPLE_FILE'), verbatim_dwca_file=os.getenv('OCURRENCE_FILE'), user=os.getenv("GBIF_USER"), pwd=os.getenv("GBIF_PWD")):
   dwca_corres=corresponding_download_list(format_download= 'DWCA', predicates=predicates, maximum_time_s=maximum_time_s, limit=limit, user=user, pwd=pwd )
   simple_corres=corresponding_download_list(format_download='SIMPLE_CSV', predicates=predicates, maximum_time_s=maximum_time_s, limit=limit, user=user, pwd=pwd)
   preparedDownloadExists = dwca_corres.shape[0] > 0 and simple_corres.shape[0] > 0

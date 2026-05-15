@@ -30,8 +30,8 @@ from utils.connection import get_db, check_connection
 load_dotenv()
 
 from utils.functions import (
-    OCCURRENCE_COLS,
-    VERBATIM_COLS,
+    SIMPLE_COLS,
+    OCURRENCE_COLS,
     SQL_COLS,
     register_load,
     tables_operations,
@@ -46,6 +46,8 @@ from utils.functions import (
     validate_localities,
     create_species_index,
     validate_taxonomic_species,
+    link_integrated_taxonomic_species_id,
+    link_integrated_locality_id,
     spatials_joins,
     normalize_stateprovince_county,
     validate_geography,
@@ -90,10 +92,10 @@ try:
     else:
         table_names = timer(tables_operations, "Operaciones sobre las tablas de staging dwc_occurrence y dwc_verbatim")(db, suffix)
         timer(data_upload, "Carga de datos desde occurrence.txt")(
-            db, os.getenv('OCCURRENCE_FILE'), table_names['occurrence'], OCCURRENCE_COLS
+            db, os.getenv('SIMPLE_FILE'), table_names['occurrence'], SIMPLE_COLS
         )
         timer(data_upload, "Carga de datos desde verbatim.txt")(
-            db, os.getenv('VERBATIM_FILE'), table_names['verbatim'], VERBATIM_COLS
+            db, os.getenv('OCURRENCE_FILE'), table_names['verbatim'], OCURRENCE_COLS
         )
         timer(create_staging_indexes, "Creación de índices en las tablas de staging dwc_occurrence y dwc_verbatim")(db, table_names)
         timer(create_integrated_table, "Creación de la tabla integrada dwc_occurrence_integrated")(db, table_names)
@@ -104,15 +106,16 @@ try:
     timer(add_gbifid_index, "Añadiendo PK la tabla integrada")(db, table_names['integrated'])
     timer(link_taxonrank_reference, "Vinculando taxonrank con catálogo de referencia")(db, table_names['integrated'])
     timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(db, table_names['integrated'])
-    timer(validate_taxonomic_species, "Tabla taxonomic_species_validation y FK taxonomic_species_id")(db, table_names['integrated'])
+    timer(validate_taxonomic_species, "Catálogo taxonomic_species_validation desde integrada")(db, table_names['integrated'])
     timer(taxonomic_joins, "Cruces taxonómicos con listados")(db, table_names['integrated'])
-    timer(validate_localities, "Creando tabla de localidades únicas y referencia en integrada")(db, table_names['integrated'])
+    timer(validate_localities, "Catálogo geo_locality_validation desde integrada")(db, table_names['integrated'])
     timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(db, table_names['integrated'])
     timer(normalize_stateprovince_county, "Normalizando stateprovince/county antes de validación")(db, table_names['integrated'])
     timer(validate_geography, "Validación geográfica")(db, table_names['integrated'])
     timer(clean_threatstatus_fields, "Normalizando campos threatstatus antes de API")(db, table_names['integrated'])
     timer(gbif_api_calls, "Enriqueciendo metadatos de datasets y publicadores GBIF")(db, table_names['integrated'])
-
+    timer(link_integrated_locality_id, "Enlace integrada → geo_locality_validation (lotes, índice y FK)")(db, table_names['integrated'])
+    timer(link_integrated_taxonomic_species_id, "Enlace integrada → taxonomic_species_validation (lotes, índice y FK)")(db, table_names['integrated'])
     register_load(db, table_names, today, origin)
     logger.info("Proceso completado.")
 
