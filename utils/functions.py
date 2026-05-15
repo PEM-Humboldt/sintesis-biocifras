@@ -3,12 +3,13 @@
 """
 Este archivo contiene las funciones para la carga de datos desde GBIF a un servidor PostgreSQL + PostGIS
 para el proceso de análisis y síntesis de cifras para Biodiversidad en cifras.
+Rendimiento: FLUSH_EVERY controla el lote de COPY (SQL_BATCH_SIZE); UPDATE_BATCH_SIZE controla el LIMIT en UPDATE por lotes (JOIN/ctid).
 - OCCURRENCE_COLS: Lista de columnas de la tabla dwc_occurrence.
 - VERBATIM_COLS: Lista de columnas de la tabla dwc_verbatim.
 - SQL_COLS: Lista de columnas de la tabla dwc_sql.
 - register_load: Función para registrar la carga de datos en la tabla table_registry.
 - tables_operations: Función para crear/truncar las tablas de staging (dwc_occurrence y dwc_verbatim) y la tabla integrada (dwc_integrated).
-- data_upload: Función para cargar los datos desde los archivos TSV de GBIF a las tablas de staging (lote COPY = SQL_BATCH_SIZE / FLUSH_EVERY).
+- data_upload: Función para cargar los datos desde los archivos TSV de GBIF a las tablas de staging (lote COPY vía FLUSH_EVERY / SQL_BATCH_SIZE).
 - finalize_sql_table: Función para renombrar la columna v_scientificname y la tabla de staging dwc_sql a dwc_integrated.
 - create_staging_indexes: Función para crear índices en las tablas de staging.
 - create_integrated_table: Función para crear la tabla integrada con las columnas de las tablas de staging.
@@ -43,8 +44,11 @@ from utils.connection import table_exists
 # Inicialización del logger
 logger = logging.getLogger('sintesis_biocifras')
 
-# Tamaño de lote para UPDATE masivos (evaluado al importar el módulo; FLUSH_EVERY en .env, default 1e6).
+# Tamaño de buffer para COPY (FLUSH_EVERY en .env; valores altos reducen round-trips al servidor).
 SQL_BATCH_SIZE = int(os.getenv('FLUSH_EVERY', '1000000'))
+# Límite de filas por sentencia en UPDATE por lotes (JOIN + ctid). Valores del orden de 1e6 hacen que cada
+# iteración tarde mucho sin commit intermedio; en pg_stat_activity parece “quieto” hasta terminar el lote.
+UPDATE_BATCH_SIZE = int(os.getenv('UPDATE_BATCH_SIZE', '50000'))
 
 
 # ------------------------------------------------------------------------------------------------------------
@@ -553,7 +557,7 @@ def normalize_integrated_country(db, table_name):
     # y espacios) → 'Colombia'; cualquier otro código o vacío → NULL. Actualización por lotes sobre gbifid
     # para tablas muy grandes (p. ej. decenas de millones de filas).
     integrated = table_name
-    batch_size = SQL_BATCH_SIZE
+    batch_size = UPDATE_BATCH_SIZE
     total = 0
     with db.connect() as conn:
         conn.execute(
@@ -728,7 +732,7 @@ def spatials_joins(db, table_name):
     # - table_name: Nombre de la tabla integrada dwc_integrated (se mantiene por compatibilidad).
     # Retorna:
     # - None: No retorna nada.
-    batch_size = SQL_BATCH_SIZE
+    batch_size = UPDATE_BATCH_SIZE
     with db.connect() as conn:
         total_mgn = 0
         while True:
@@ -849,7 +853,7 @@ def normalize_stateprovince_county(db, table_name):
     # - None: No retorna nada.
     _ = table_name  # firma mantenida para compatibilidad con el orquestador (main.timer).
     locality = 'geo_locality_validation'
-    batch_size = SQL_BATCH_SIZE
+    batch_size = UPDATE_BATCH_SIZE
     with db.connect() as conn:
         # Validación 1: Stateprovincevalidated desde geo_stateprovince_validation (solo NULL).
         total_v1 = 0
@@ -1185,7 +1189,7 @@ def validate_taxonomic_species(db, table_name):
     integrated = table_name
     species_tbl = 'taxonomic_species_validation'
     fk_name = f"fk_{integrated}_taxonomic_species_id"
-    batch_size = SQL_BATCH_SIZE
+    batch_size = UPDATE_BATCH_SIZE
     total_linked = 0
 
     with db.connect() as conn:
@@ -1332,7 +1336,7 @@ def validate_localities(db, table_name):
     # - None: No retorna nada.
     integrated = table_name
     fk_name = f"fk_{integrated}_locality_id"
-    batch_size = SQL_BATCH_SIZE
+    batch_size = UPDATE_BATCH_SIZE
     total_updated = 0
     total_linked = 0
 
@@ -1467,7 +1471,7 @@ def validate_geography(db, table_name):
     # - None: No retorna nada.
     _ = table_name
     locality_tbl = 'geo_locality_validation'
-    batch_size = SQL_BATCH_SIZE
+    batch_size = UPDATE_BATCH_SIZE
     with db.connect() as conn:
         # 1/3 stateprovincevalidation
         last_id = 0
