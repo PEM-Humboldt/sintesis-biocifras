@@ -102,7 +102,6 @@ try:
         origin = 'DwC-A download'
 
     timer(fill_species_from_scientificname, "Completando campo species desde scientificname")(db, table_names['integrated'])
-    #timer(normalize_integrated_country, "Campo country (CO → Colombia) por lotes")(db, table_names['integrated'])
     timer(add_gbifid_index, "Añadiendo PK la tabla integrada")(db, table_names['integrated'])
     timer(link_taxonrank_reference, "Vinculando taxonrank con catálogo de referencia")(db, table_names['integrated'])
     timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(db, table_names['integrated'])
@@ -114,8 +113,9 @@ try:
     timer(validate_geography, "Validación geográfica")(db, table_names['integrated'])
     timer(clean_threatstatus_fields, "Normalizando campos threatstatus antes de API")(db, table_names['integrated'])
     timer(gbif_api_calls, "Enriqueciendo metadatos de datasets y publicadores GBIF")(db, table_names['integrated'])
-    timer(link_integrated_locality_id, "Enlace integrada → geo_locality_validation (lotes, índice y FK)")(db, table_names['integrated'])
-    timer(link_integrated_taxonomic_species_id, "Enlace integrada → taxonomic_species_validation (lotes, índice y FK)")(db, table_names['integrated'])
+    #timer(link_integrated_locality_id, "Enlace integrada → geo_locality_validation (lotes, índice y FK)")(db, table_names['integrated'])
+    #timer(link_integrated_taxonomic_species_id, "Enlace integrada → taxonomic_species_validation (lotes, índice y FK)")(db, table_names['integrated'])
+    #timer(normalize_integrated_country, "Campo country (CO → Colombia) por lotes")(db, table_names['integrated'])
     register_load(db, table_names, today, origin)
     logger.info("Proceso completado.")
 

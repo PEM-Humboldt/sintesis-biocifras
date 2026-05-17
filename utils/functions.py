@@ -1026,33 +1026,39 @@ def normalize_stateprovince_county(db, table_name):
             f"{total_county_v2:,}",
         )
 
-        # Validación 3 (municipio): valida la pareja stateprovincevalidated + countyvalidated
-        # contra geo_divipola (municipio -> parent_id -> departamento). Si no hay match, limpia countyvalidated.
+        # Validación 3 (municipio): pareja (stateprovincevalidated, countyvalidated) debe existir en DIVIPOLA.
+        # Dos pasos: (3a) sustituir por countymgn si MGN coincide con depto validado y la pareja MGN es válida;
+        # (3b) NULL al resto con pareja inválida. Evita CASE + EXISTS duplicado y el bucle infinito.
+        _invalid_county_pair = (
+            f'NULLIF(BTRIM(i."countyvalidated"), \'\') IS NOT NULL '
+            f'AND NOT EXISTS ('
+            f'    SELECT 1 FROM "geo_divipola" m '
+            f'    INNER JOIN "geo_divipola" d ON d."id" = m."parent_id" '
+            f'    WHERE m."subtype" = \'municipio\' '
+            f'      AND UPPER(TRIM(m."name")) = UPPER(TRIM(i."countyvalidated")) '
+            f'      AND UPPER(TRIM(d."name")) = UPPER(TRIM(i."stateprovincevalidated"))'
+            f')'
+        )
         total_county_v3 = 0
         while True:
             result = conn.execute(
                 f'WITH batch AS ('
                 f'    SELECT i.ctid '
                 f'    FROM "{locality}" i '
-                f'    WHERE NULLIF(BTRIM(i."countyvalidated"), \'\') IS NOT NULL '
-                f'      AND NOT EXISTS ('
-                f'          SELECT 1 '
-                f'          FROM "geo_divipola" m '
-                f'          INNER JOIN "geo_divipola" d ON d."id" = m."parent_id" '
-                f'          WHERE m."subtype" = \'municipio\' '
-                f'            AND UPPER(TRIM(m."name")) = UPPER(TRIM(i."countyvalidated")) '
-                f'            AND UPPER(TRIM(d."name")) = UPPER(TRIM(i."stateprovincevalidated"))'
-                f'      ) '
+                f'    INNER JOIN "geo_divipola" m '
+                f'      ON m."subtype" = \'municipio\' '
+                f'     AND UPPER(TRIM(m."name")) = UPPER(TRIM(i."countymgn")) '
+                f'    INNER JOIN "geo_divipola" d '
+                f'      ON d."id" = m."parent_id" '
+                f'     AND UPPER(TRIM(d."name")) = UPPER(TRIM(i."stateprovincevalidated")) '
+                f'    WHERE {_invalid_county_pair} '
+                f'      AND NULLIF(BTRIM(i."countymgn"), \'\') IS NOT NULL '
+                f'      AND UPPER(TRIM(COALESCE(i."stateprovincemgn", \'\'))) = '
+                f'          UPPER(TRIM(COALESCE(i."stateprovincevalidated", \'\'))) '
                 f'    LIMIT {batch_size}'
                 f') '
                 f'UPDATE "{locality}" i '
-                f'SET "countyvalidated" = CASE '
-                f'    WHEN NULLIF(BTRIM(i."countymgn"), \'\') IS NOT NULL '
-                f'     AND UPPER(TRIM(COALESCE(i."stateprovincemgn", \'\'))) = '
-                f'         UPPER(TRIM(COALESCE(i."stateprovincevalidated", \'\'))) '
-                f'    THEN TRIM(i."countymgn") '
-                f'    ELSE NULL '
-                f'END '
+                f'SET "countyvalidated" = TRIM(i."countymgn") '
                 f'FROM batch b '
                 f'WHERE i.ctid = b.ctid'
             )
@@ -1062,13 +1068,37 @@ def normalize_stateprovince_county(db, table_name):
                 break
             total_county_v3 += n
             logger.info(
-                "Validación 3 (consistencia depto/municipio validado) batch en %s: %s filas (total %s)",
+                "Validación 3a en batch en %s: %s filas (total %s)",
+                locality,
+                f"{n:,}",
+                f"{total_county_v3:,}",
+            )
+        while True:
+            result = conn.execute(
+                f'WITH batch AS ('
+                f'    SELECT i.ctid '
+                f'    FROM "{locality}" i '
+                f'    WHERE {_invalid_county_pair} '
+                f'    LIMIT {batch_size}'
+                f') '
+                f'UPDATE "{locality}" i '
+                f'SET "countyvalidated" = NULL '
+                f'FROM batch b '
+                f'WHERE i.ctid = b.ctid'
+            )
+            n = result.rowcount
+            conn.commit()
+            if n == 0:
+                break
+            total_county_v3 += n
+            logger.info(
+                "Validación 3b (limpiar pareja inválida) batch en %s: %s filas (total %s)",
                 locality,
                 f"{n:,}",
                 f"{total_county_v3:,}",
             )
         logger.info(
-            "Validación 3 (consistencia depto/municipio validado) completada en %s (%s filas)",
+            "Validación 3 (consistencia depto/municipio) completada en %s (%s filas)",
             locality,
             f"{total_county_v3:,}",
         )
