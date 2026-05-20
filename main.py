@@ -76,35 +76,37 @@ logger.info("Conectado a la base de datos.")
 
 try:
     table_integrated_name = f'dwc_integrated_{suffix}'
+    table_names = {'integrated': table_integrated_name}
+    origin = 'SQL download'
+    if True: # Si la tabla integrada ya existe, no ejecuta la carga ni los pasos 80-107 (staging, COPY, PK, species, etc.).
+        if UPLOAD_TYPE == "sql":
+            table_names = timer(tables_operations, "Operaciones sobre la tabla de staging dwc_sql")(
+                db, suffix, upload_type=UPLOAD_TYPE
+            )
+            timer(data_upload, "Carga de datos desde SQL_FILE")(
+                db, os.getenv('SQL_FILE'), table_names['sql'], SQL_COLS
+            )
+            timer(finalize_sql_table, "Renombrando campos y tabla SQL a integrated")(
+                db, table_names['sql'], table_integrated_name
+            )
+            table_names = {'integrated': table_integrated_name}
+            origin = 'SQL download'
+        else:
+            table_names = timer(tables_operations, "Operaciones sobre las tablas de staging dwc_occurrence y dwc_verbatim")(db, suffix)
+            timer(data_upload, "Carga de datos desde occurrence.txt")(
+                db, os.getenv('SIMPLE_FILE'), table_names['occurrence'], SIMPLE_COLS
+            )
+            timer(data_upload, "Carga de datos desde verbatim.txt")(
+                db, os.getenv('OCURRENCE_FILE'), table_names['verbatim'], OCURRENCE_COLS
+            )
+            timer(create_staging_indexes, "Creación de índices en las tablas de staging dwc_occurrence y dwc_verbatim")(db, table_names)
+            timer(create_integrated_table, "Creación de la tabla integrada dwc_occurrence_integrated")(db, table_names)
+            origin = 'DwC-A download'
 
-    if UPLOAD_TYPE == "sql":
-        table_names = timer(tables_operations, "Operaciones sobre la tabla de staging dwc_sql")(
-            db, suffix, upload_type=UPLOAD_TYPE
-        )
-        timer(data_upload, "Carga de datos desde SQL_FILE")(
-            db, os.getenv('SQL_FILE'), table_names['sql'], SQL_COLS
-        )
-        timer(finalize_sql_table, "Renombrando campos y tabla SQL a integrated")(
-            db, table_names['sql'], table_integrated_name
-        )
-        table_names = {'integrated': table_integrated_name}
-        origin = 'SQL download'
-    else:
-        table_names = timer(tables_operations, "Operaciones sobre las tablas de staging dwc_occurrence y dwc_verbatim")(db, suffix)
-        timer(data_upload, "Carga de datos desde occurrence.txt")(
-            db, os.getenv('SIMPLE_FILE'), table_names['occurrence'], SIMPLE_COLS
-        )
-        timer(data_upload, "Carga de datos desde verbatim.txt")(
-            db, os.getenv('OCURRENCE_FILE'), table_names['verbatim'], OCURRENCE_COLS
-        )
-        timer(create_staging_indexes, "Creación de índices en las tablas de staging dwc_occurrence y dwc_verbatim")(db, table_names)
-        timer(create_integrated_table, "Creación de la tabla integrada dwc_occurrence_integrated")(db, table_names)
-        origin = 'DwC-A download'
-
-    timer(fill_species_from_scientificname, "Completando campo species desde scientificname")(db, table_names['integrated'])
-    timer(add_gbifid_index, "Añadiendo PK la tabla integrada")(db, table_names['integrated'])
-    timer(link_taxonrank_reference, "Vinculando taxonrank con catálogo de referencia")(db, table_names['integrated'])
-    timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(db, table_names['integrated'])
+        timer(fill_species_from_scientificname, "Completando campo species desde scientificname")(db, table_names['integrated'])
+        timer(add_gbifid_index, "Añadiendo PK la tabla integrada")(db, table_names['integrated'])
+        timer(link_taxonrank_reference, "Vinculando taxonrank con catálogo de referencia")(db, table_names['integrated'])
+        timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(db, table_names['integrated'])
     timer(validate_taxonomic_species, "Catálogo taxonomic_species_validation desde integrada")(db, table_names['integrated'])
     timer(taxonomic_joins, "Cruces taxonómicos con listados")(db, table_names['integrated'])
     timer(clean_threatstatus_fields, "Normalizando campos threatstatus antes de API")(db, table_names['integrated'])

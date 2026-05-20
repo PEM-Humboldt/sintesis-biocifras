@@ -228,17 +228,17 @@ def tables_operations(db, suffix, upload_type=None):
             'verbatim': _OCURRENCE_TYPES,
         }
         keys = ('occurrence', 'verbatim')
-
-    with db.connect() as conn:
-        for key in keys:
-            tname = table_names[key]
-            if table_exists(db, tname):
-                conn.execute(f'DROP TABLE "{tname}"')
-                logger.info("DROP TABLE %s", tname)
-            ddl = _build_create_ddl(tname, type_maps[key])
-            conn.execute(ddl)
-            logger.info("CREATE TABLE %s", tname)
-        conn.commit()
+    if True:    
+        with db.connect() as conn:
+            for key in keys:
+                tname = table_names[key]
+                if table_exists(db, tname):
+                    conn.execute(f'DROP TABLE "{tname}"')
+                    logger.info("DROP TABLE %s", tname)
+                ddl = _build_create_ddl(tname, type_maps[key])
+                conn.execute(ddl)
+                logger.info("CREATE TABLE %s", tname)
+            conn.commit()
     return table_names
 
 # -------------------------------------------------------------------------------------------------------------------------
