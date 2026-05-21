@@ -8,3 +8,4 @@ shapely
 fiona
 matplotlib
 geopandas
+geoalchemy2

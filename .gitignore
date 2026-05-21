@@ -182,3 +182,4 @@ cython_debug/
 **/.Renviron
 .Rhistory
 
+.positai
