@@ -3,9 +3,9 @@
 Estadísticas básicas de la tabla integrada vigente y vista materializada region.
 
 - Resolución de la tabla integrada vigente (table_registry, is_latest).
-- Vista materializada region desde geo_divipola (parent por parent_id y region_id).
-- Vista materializada departamento desde geo_divipola (subtype = departamento).
-- Vista materializada municipio desde geo_divipola (subtype = municipio).
+- Vista materializada region desde geo_master_geography (parent por parent_id y region_id).
+- Vista materializada departamento desde geo_master_geography (subtype = departamento).
+- Vista materializada municipio desde geo_master_geography (subtype = municipio).
 """
 
 import logging
@@ -61,8 +61,8 @@ def print_record_count(table_name, total):
 
 
 def create_region_materialized_view(db):
-    if not table_exists(db, 'geo_divipola'):
-        raise ValueError('La tabla geo_divipola no existe en la base de datos.')
+    if not table_exists(db, 'geo_master_geography'):
+        raise ValueError('La tabla geo_master_geography no existe en la base de datos.')
     with db.connect() as conn:
         conn.execute('DROP MATERIALIZED VIEW IF EXISTS region')
         conn.execute("""
@@ -75,8 +75,8 @@ def create_region_materialized_view(db):
                 d.subtype AS subtipo,
                 d.description AS descripcion,
                 d.ismarine AS marino
-            FROM geo_divipola d
-            LEFT JOIN geo_divipola p ON p.id = d.parent_id
+            FROM geo_master_geography d
+            LEFT JOIN geo_master_geography p ON p.id = d.parent_id
 
             UNION ALL
 
@@ -88,8 +88,8 @@ def create_region_materialized_view(db):
                 d.subtype AS subtipo,
                 d.description AS descripcion,
                 d.ismarine AS marino
-            FROM geo_divipola d
-            JOIN geo_divipola r ON r.id = d.region_id
+            FROM geo_master_geography d
+            JOIN geo_master_geography r ON r.id = d.region_id
             ORDER BY parent
         """)
         conn.commit()
@@ -100,8 +100,8 @@ def create_region_materialized_view(db):
 
 
 def create_departamento_materialized_view(db):
-    if not table_exists(db, 'geo_divipola'):
-        raise ValueError('La tabla geo_divipola no existe en la base de datos.')
+    if not table_exists(db, 'geo_master_geography'):
+        raise ValueError('La tabla geo_master_geography no existe en la base de datos.')
     with db.connect() as conn:
         conn.execute('DROP MATERIALIZED VIEW IF EXISTS departamento')
         conn.execute("""
@@ -112,7 +112,7 @@ def create_departamento_materialized_view(db):
                 d.codedane AS cod_dane,
                 d.ismarine AS marino,
                 d."date" AS fecha_corte
-            FROM geo_divipola d
+            FROM geo_master_geography d
             WHERE d.subtype = 'departamento'
             ORDER BY slug
         """)
@@ -124,8 +124,8 @@ def create_departamento_materialized_view(db):
 
 
 def create_municipio_materialized_view(db):
-    if not table_exists(db, 'geo_divipola'):
-        raise ValueError('La tabla geo_divipola no existe en la base de datos.')
+    if not table_exists(db, 'geo_master_geography'):
+        raise ValueError('La tabla geo_master_geography no existe en la base de datos.')
     with db.connect() as conn:
         conn.execute('DROP MATERIALIZED VIEW IF EXISTS municipio')
         conn.execute("""
@@ -136,7 +136,7 @@ def create_municipio_materialized_view(db):
                 d.codedane AS cod_dane,
                 d.ismarine AS marino,
                 d."date" AS fecha_corte
-            FROM geo_divipola d
+            FROM geo_master_geography d
             WHERE d.subtype = 'municipio'
             ORDER BY slug
         """)

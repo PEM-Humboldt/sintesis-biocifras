@@ -18,8 +18,8 @@ Rendimiento: FLUSH_EVERY controla el lote de COPY (SQL_BATCH_SIZE); UPDATE_BATCH
 - add_gbifid_index: Función para crear índice primary key sobre gbifid en la tabla integrada.
 - create_species_index: Función para crear índice BTREE sobre species para optimizar cruces taxonómicos.
 - validate_taxonomic_species: Tabla taxonomic_species_validation por species únicos y enlace taxonomic_species_id en integrada.
-- link_integrated_taxonomic_species_id: UPDATE por lotes (CTE) integrada → catálogo por species; índice parcial de filas pendientes.
-- link_integrated_locality_id: UPDATE por lotes integrada → geo_locality_validation, índice, FK NOT VALID y VACUUM ANALYZE (orquestar al final del pipeline).
+- link_integrated_taxonomic_species_id: UPDATE por lotes (CTE) integrada → catálogo por species; índice parcial y VACUUM ANALYZE en integrada.
+- link_integrated_locality_id: UPDATE por lotes (CTE) integrada → geo_locality_validation por 4 campos; índice parcial, FK NOT VALID y VACUUM.
 - spatials_joins: Cruza geo_locality_validation con MGN_ADM_MPIO_2025 y capas marítimas usando ST_Intersects.
 - normalize_stateprovince_county: Normaliza stateprovince, county y slugs en geo_locality_validation antes de validar geografía.
 - validate_geography: Valida geografía en geo_locality_validation (tres bloques con db.connect: depto, municipio, flaggeo).
@@ -199,6 +199,7 @@ def _build_create_ddl(table_name, col_types):
 # Para mantener un historial de las tablas de staging y la tabla integrada se utiliza un sufijo de fecha.
 def tables_operations(db, suffix, upload_type=None):
     # Crea tablas con sufijo de fecha. Si ya existen, las elimina y vuelven a crear para garantizar una carga limpia.
+    # Recrea staging, elimina la integrada con sufijo y luego las tablas de validación (sin recrearlas aquí).
     # Se tienen el cuenta el tipo de carga: sql o regular.
     # Parámetros:
     # - db: Conexión al pool de conexiones de PostgreSQL.
@@ -228,7 +229,8 @@ def tables_operations(db, suffix, upload_type=None):
             'verbatim': _OCURRENCE_TYPES,
         }
         keys = ('occurrence', 'verbatim')
-    if False:    
+    validation_tables = ('taxonomic_species_validation', 'geo_locality_validation')
+    if True:
         with db.connect() as conn:
             for key in keys:
                 tname = table_names[key]
@@ -238,6 +240,13 @@ def tables_operations(db, suffix, upload_type=None):
                 ddl = _build_create_ddl(tname, type_maps[key])
                 conn.execute(ddl)
                 logger.info("CREATE TABLE %s", tname)
+            integrated_tname = f'dwc_integrated_{suffix}'
+            if table_exists(db, integrated_tname):
+                conn.execute(f'DROP TABLE "{integrated_tname}"')
+                logger.info("DROP TABLE %s", integrated_tname)
+            for vtbl in validation_tables:
+                conn.execute(f'DROP TABLE IF EXISTS "{vtbl}"')
+                logger.info("DROP TABLE %s", vtbl)
             conn.commit()
     return table_names
 
@@ -857,18 +866,18 @@ def normalize_stateprovince_county(db, table_name):
                 f'    FROM "{locality}" i '
                 f'    INNER JOIN "geo_stateprovince_validation" a '
                 f'      ON UPPER(TRIM(i."stateprovince")) = UPPER(TRIM(a."originalstateprovince")) '
-                f'    INNER JOIN "geo_divipola" d ON d."id" = a."geo_divipola_id" '
+                f'    INNER JOIN "geo_master_geography" d ON d."id" = a."geo_master_geography_id" '
                 f'    WHERE i."stateprovincevalidated" IS NULL '
-                f'      AND a."geo_divipola_id" IS NOT NULL'
+                f'      AND a."geo_master_geography_id" IS NOT NULL'
                 f'), batch AS ('
                 f'    SELECT ctid FROM candidates LIMIT {batch_size}'
                 f') '
                 f'UPDATE "{locality}" i '
                 f'SET "stateprovincevalidated" = TRIM(d."name") '
-                f'FROM batch b, "geo_stateprovince_validation" a, "geo_divipola" d '
+                f'FROM batch b, "geo_stateprovince_validation" a, "geo_master_geography" d '
                 f'WHERE i.ctid = b.ctid '
                 f'AND UPPER(TRIM(i."stateprovince")) = UPPER(TRIM(a."originalstateprovince")) '
-                f'AND d."id" = a."geo_divipola_id"'
+                f'AND d."id" = a."geo_master_geography_id"'
             )
             n = result.rowcount
             conn.commit()
@@ -1032,8 +1041,8 @@ def normalize_stateprovince_county(db, table_name):
         _invalid_county_pair = (
             f'NULLIF(BTRIM(i."countyvalidated"), \'\') IS NOT NULL '
             f'AND NOT EXISTS ('
-            f'    SELECT 1 FROM "geo_divipola" m '
-            f'    INNER JOIN "geo_divipola" d ON d."id" = m."parent_id" '
+            f'    SELECT 1 FROM "geo_master_geography" m '
+            f'    INNER JOIN "geo_master_geography" d ON d."id" = m."parent_id" '
             f'    WHERE m."subtype" = \'municipio\' '
             f'      AND UPPER(TRIM(m."name")) = UPPER(TRIM(i."countyvalidated")) '
             f'      AND UPPER(TRIM(d."name")) = UPPER(TRIM(i."stateprovincevalidated"))'
@@ -1045,10 +1054,10 @@ def normalize_stateprovince_county(db, table_name):
                 f'WITH batch AS ('
                 f'    SELECT i.ctid '
                 f'    FROM "{locality}" i '
-                f'    INNER JOIN "geo_divipola" m '
+                f'    INNER JOIN "geo_master_geography" m '
                 f'      ON m."subtype" = \'municipio\' '
                 f'     AND UPPER(TRIM(m."name")) = UPPER(TRIM(i."countymgn")) '
-                f'    INNER JOIN "geo_divipola" d '
+                f'    INNER JOIN "geo_master_geography" d '
                 f'      ON d."id" = m."parent_id" '
                 f'     AND UPPER(TRIM(d."name")) = UPPER(TRIM(i."stateprovincevalidated")) '
                 f'    WHERE {_invalid_county_pair} '
@@ -1103,7 +1112,7 @@ def normalize_stateprovince_county(db, table_name):
             f"{total_county_v3:,}",
         )
 # -----------------------------------------------------------------------------------------------------
-# Cruce final con DIVIPOLA: asignación de geo_divipola_id desde stateprovincevalidated/countyvalidated.
+# Cruce final con DIVIPOLA: asignación de geo_master_geography_id desde stateprovincevalidated/countyvalidated.
 # -----------------------------------------------------------------------------------------------------
 
         # Caso 1: stateprovincevalidated + countyvalidated -> municipio y su parent_id (departamento).
@@ -1111,21 +1120,21 @@ def normalize_stateprovince_county(db, table_name):
         while True:
             result = conn.execute(
                 f'WITH batch AS ('
-                f'    SELECT i.ctid, m."id" AS geo_divipola_id '
+                f'    SELECT i.ctid, m."id" AS geo_master_geography_id '
                 f'    FROM "{locality}" i '
-                f'    INNER JOIN "geo_divipola" m '
+                f'    INNER JOIN "geo_master_geography" m '
                 f'      ON m."subtype" = \'municipio\' '
                 f'     AND UPPER(TRIM(m."name")) = UPPER(TRIM(i."countyvalidated")) '
-                f'    INNER JOIN "geo_divipola" d '
+                f'    INNER JOIN "geo_master_geography" d '
                 f'      ON d."id" = m."parent_id" '
                 f'     AND UPPER(TRIM(d."name")) = UPPER(TRIM(i."stateprovincevalidated")) '
                 f'    WHERE NULLIF(BTRIM(i."stateprovincevalidated"), \'\') IS NOT NULL '
                 f'      AND NULLIF(BTRIM(i."countyvalidated"), \'\') IS NOT NULL '
-                f'      AND i."geo_divipola_id" IS DISTINCT FROM m."id" '
+                f'      AND i."geo_master_geography_id" IS DISTINCT FROM m."id" '
                 f'    LIMIT {batch_size}'
                 f') '
                 f'UPDATE "{locality}" i '
-                f'SET "geo_divipola_id" = b.geo_divipola_id '
+                f'SET "geo_master_geography_id" = b.geo_master_geography_id '
                 f'FROM batch b '
                 f'WHERE i.ctid = b.ctid'
             )
@@ -1151,18 +1160,18 @@ def normalize_stateprovince_county(db, table_name):
         while True:
             result = conn.execute(
                 f'WITH batch AS ('
-                f'    SELECT i.ctid, d."id" AS geo_divipola_id '
+                f'    SELECT i.ctid, d."id" AS geo_master_geography_id '
                 f'    FROM "{locality}" i '
-                f'    INNER JOIN "geo_divipola" d '
+                f'    INNER JOIN "geo_master_geography" d '
                 f'      ON d."subtype" = \'departamento\' '
                 f'     AND UPPER(TRIM(d."name")) = UPPER(TRIM(i."stateprovincevalidated")) '
                 f'    WHERE NULLIF(BTRIM(i."stateprovincevalidated"), \'\') IS NOT NULL '
                 f'      AND NULLIF(BTRIM(i."countyvalidated"), \'\') IS NULL '
-                f'      AND i."geo_divipola_id" IS DISTINCT FROM d."id" '
+                f'      AND i."geo_master_geography_id" IS DISTINCT FROM d."id" '
                 f'    LIMIT {batch_size}'
                 f') '
                 f'UPDATE "{locality}" i '
-                f'SET "geo_divipola_id" = b.geo_divipola_id '
+                f'SET "geo_master_geography_id" = b.geo_master_geography_id '
                 f'FROM batch b '
                 f'WHERE i.ctid = b.ctid'
             )
@@ -1205,24 +1214,14 @@ def create_species_index(db, table_name):
 
 
 def validate_taxonomic_species(db, table_name):
-    # Crea o reutiliza taxonomic_species_validation con una fila por species y columnas
-    # taxonómicas (cites, amenazas, exóticas, etc.). El enlace taxonomic_species_id: link_integrated_taxonomic_species_id (main).
-    # Si la tabla ya existía, se trunca y se reinicia la secuencia de id para descartar cruces
-    # taxonómicos obsoletos antes de volver a poblar desde la integrada.
+    # Crea taxonomic_species_validation (borrada en tables_operations) y la puebla desde la integrada.
+    # El enlace taxonomic_species_id: link_integrated_taxonomic_species_id (main).
     integrated = table_name
     species_tbl = 'taxonomic_species_validation'
 
     with db.connect() as conn:
-        species_already = conn.execute(
-            'SELECT EXISTS ('
-            '  SELECT 1 FROM information_schema.tables '
-            "  WHERE table_schema = 'public' AND table_name = %(t)s"
-            ')',
-            {'t': species_tbl},
-        ).fetchall()[0][0]
-
         conn.execute(
-            f'CREATE TABLE IF NOT EXISTS "{species_tbl}" ('
+            f'CREATE TABLE "{species_tbl}" ('
             f'  "id" SERIAL PRIMARY KEY, '
             f'  "kingdom" TEXT, '
             f'  "phylum" TEXT, '
@@ -1249,35 +1248,6 @@ def validate_taxonomic_species(db, table_name):
         conn.commit()
         logger.info("Tabla de validación taxonómica por especie creada: %s", species_tbl)
 
-        if species_already:
-            fk_rows = conn.execute(
-                'SELECT nsp.nspname, cls.relname, con.conname '
-                'FROM pg_constraint con '
-                'JOIN pg_class cls ON con.conrelid = cls.oid '
-                'JOIN pg_namespace nsp ON cls.relnamespace = nsp.oid '
-                'JOIN pg_class refcls ON con.confrelid = refcls.oid '
-                'JOIN pg_namespace rnsp ON refcls.relnamespace = rnsp.oid '
-                'WHERE con.contype = %(fk)s '
-                '  AND refcls.relname = %(tbl)s '
-                "  AND rnsp.nspname = 'public'",
-                {'fk': 'f', 'tbl': species_tbl},
-            ).fetchall()
-            for sch, rel, cname in fk_rows:
-                conn.execute(
-                    f'ALTER TABLE "{sch}"."{rel}" '
-                    f'DROP CONSTRAINT IF EXISTS "{cname}"'
-                )
-            conn.execute(f'TRUNCATE TABLE "{species_tbl}" RESTART IDENTITY')
-            conn.execute(
-                f'UPDATE "{integrated}" SET "taxonomic_species_id" = NULL '
-                f'WHERE "taxonomic_species_id" IS NOT NULL'
-            )
-            conn.commit()
-            logger.info(
-                "%s truncada y secuencia de id reiniciada (tabla taxonomic_species_validation ya existía)",
-                species_tbl,
-            )
-
         conn.execute(
             f'INSERT INTO "{species_tbl}" ('
             f'  "kingdom", "phylum", "class", "order", "family", '
@@ -1302,11 +1272,11 @@ def link_integrated_taxonomic_species_id(db, table_name):
     # Propaga id del catálogo (92k filas) a la integrada (~40M) por species.
     # CTE + LIMIT por lote: el catálogo entra en hash pequeño; la integrada se recorre por lotes.
     # Índice parcial en filas con taxonomic_species_id IS NULL evita re-escanear toda la tabla cada lote.
-    # SPECIES_LINK_BATCH_SIZE (default 1e6) controla el tamaño del lote.
+    # Tamaño de lote: SQL_BATCH_SIZE (FLUSH_EVERY en .env).
     integrated = table_name
     species_tbl = 'taxonomic_species_validation'
     pending_idx = f'idx_{integrated}_species_link_pending'
-    batch_size = int(os.getenv('SPECIES_LINK_BATCH_SIZE', '1000000'))
+    batch_size = UPDATE_BATCH_SIZE
     total_linked = 0
 
     with db.connect() as conn:
@@ -1360,6 +1330,12 @@ def link_integrated_taxonomic_species_id(db, table_name):
             f"{total_linked:,}",
         )
 
+    _run_table_maintenance(db, integrated)
+    logger.info(
+        "VACUUM (ANALYZE) en %s tras enlace taxonomic_species_id",
+        integrated,
+    )
+
 
 # --------------------------------------------------------------------------------------------------------------------------------------
 # Tabla de localidades únicas y referencia desde la integrada
@@ -1376,7 +1352,7 @@ def validate_localities(db, table_name):
     # Retorna:
     # - None: No retorna nada.
     integrated = table_name
-    batch_size = UPDATE_BATCH_SIZE
+    batch_size = SQL_BATCH_SIZE
     total_updated = 0
 
     with db.connect() as conn:
@@ -1444,21 +1420,39 @@ def validate_localities(db, table_name):
 
 
 def link_integrated_locality_id(db, table_name):
-    # Enlaza la integrada con geo_locality_validation por lat/lon/state/county (UPDATE por lotes),
-    # crea índice en locality_id, FK NOT VALID y VACUUM ANALYZE en la integrada.
-    # Ejecutar al final del pipeline tras spatials_joins y validate_geography.
+    # Propaga id de geo_locality_validation (~2M) a la integrada (~40M) por lat/lon/state/county.
+    # CTE + LIMIT por lote (SQL_BATCH_SIZE / FLUSH_EVERY). Índice parcial en integrada solo filas
+    # con locality_id IS NULL. El catálogo ya tiene UNIQUE en los 4 campos para el JOIN.
     integrated = table_name
+    locality_tbl = 'geo_locality_validation'
     fk_name = f"fk_{integrated}_locality_id"
-    batch_size = UPDATE_BATCH_SIZE
+    pending_idx = f'idx_{integrated}_locality_link_pending'
+    batch_size = SQL_BATCH_SIZE
     total_linked = 0
 
     with db.connect() as conn:
+        conn.execute(
+            f'ALTER TABLE "{integrated}" '
+            f'ADD COLUMN IF NOT EXISTS "locality_id" INT4'
+        )
+        conn.commit()
+
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS "{pending_idx}" '
+            f'ON "{integrated}" ('
+            f'  "decimallatitude", "decimallongitude", "stateprovince", "county"'
+            f') '
+            f'WHERE "locality_id" IS NULL'
+        )
+        conn.commit()
+        logger.info("Indice parcial creado: %s", pending_idx)
+
         while True:
             result = conn.execute(
                 f'WITH batch AS ('
                 f'    SELECT i.ctid, l."id" AS locality_id '
                 f'    FROM "{integrated}" i '
-                f'    JOIN "geo_locality_validation" l '
+                f'    INNER JOIN "{locality_tbl}" l '
                 f'      ON i."decimallatitude" IS NOT DISTINCT FROM l."decimallatitude" '
                 f'     AND i."decimallongitude" IS NOT DISTINCT FROM l."decimallongitude" '
                 f'     AND i."stateprovince" IS NOT DISTINCT FROM l."stateprovince" '
@@ -1482,6 +1476,9 @@ def link_integrated_locality_id(db, table_name):
                 f"{batch_linked:,}",
                 f"{total_linked:,}",
             )
+
+        conn.execute(f'DROP INDEX IF EXISTS "{pending_idx}"')
+        conn.commit()
 
         conn.execute(
             f'CREATE INDEX IF NOT EXISTS "idx_{integrated}_locality_id" '

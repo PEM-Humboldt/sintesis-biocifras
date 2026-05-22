@@ -78,7 +78,7 @@ try:
     table_integrated_name = f'dwc_integrated_20260518'
     table_names = {'integrated': table_integrated_name}
     origin = 'SQL download'
-    if False: # Si la tabla integrada ya existe, no ejecuta la carga ni los pasos 80-107 (staging, COPY, PK, species, etc.).
+    if True: # Si la tabla integrada ya existe, no ejecuta la carga ni los pasos 80-107 (staging, COPY, PK, species, etc.).
         if UPLOAD_TYPE == "sql":
             table_names = timer(tables_operations, "Operaciones sobre la tabla de staging dwc_sql")(
                 db, suffix, upload_type=UPLOAD_TYPE
@@ -110,11 +110,11 @@ try:
     timer(validate_taxonomic_species, "Catálogo taxonomic_species_validation desde integrada")(db, table_names['integrated'])
     timer(taxonomic_joins, "Cruces taxonómicos con listados")(db, table_names['integrated'])
     timer(clean_threatstatus_fields, "Normalizando campos threatstatus antes de API")(db, table_names['integrated'])
-    #timer(validate_localities, "Catálogo geo_locality_validation desde integrada")(db, table_names['integrated'])
-    #timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(db, table_names['integrated'])
-    #timer(normalize_stateprovince_county, "Normalizando stateprovince/county antes de validación")(db, table_names['integrated'])
-    #timer(validate_geography, "Validación geográfica")(db, table_names['integrated'])
-    #timer(gbif_api_calls, "Enriqueciendo metadatos de datasets y publicadores GBIF")(db, table_names['integrated'])
+    timer(validate_localities, "Catálogo geo_locality_validation desde integrada")(db, table_names['integrated'])
+    timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(db, table_names['integrated'])
+    timer(normalize_stateprovince_county, "Normalizando stateprovince/county antes de validación")(db, table_names['integrated'])
+    timer(validate_geography, "Validación geográfica")(db, table_names['integrated'])
+    timer(gbif_api_calls, "Enriqueciendo metadatos de datasets y publicadores GBIF")(db, table_names['integrated'])
     timer(link_integrated_taxonomic_species_id, "Enlace integrada → taxonomic_species_validation (lotes)")(db, table_names['integrated'])
     #timer(link_integrated_locality_id, "Enlace integrada → geo_locality_validation (lotes, índice y FK)")(db, table_names['integrated'])
     #timer(normalize_integrated_country, "Campo country (CO → Colombia) por lotes")(db, table_names['integrated'])
