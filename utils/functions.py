@@ -513,7 +513,7 @@ def create_join_validation_columns(db, table_name):
         conn.execute(
             f'ALTER TABLE "{integrated}" '
             f'ADD COLUMN IF NOT EXISTS "cites" TEXT, '
-            f'ADD COLUMN IF NOT EXISTS "threatstatusuicn" TEXT, '
+            f'ADD COLUMN IF NOT EXISTS "threatstatusiucn" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "threatstatusmads" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "exotic" TEXT, '
             f'ADD COLUMN IF NOT EXISTS "exoticriskinvasion" TEXT, '
@@ -1371,7 +1371,7 @@ def validate_geography(db, table_name):
 # tener que definirlas las consultas SQL manualmente.
 # Es equivalente a ejecutar la siguiente consulta:
 # UPDATE "dwc_integrated_{fecha}}" SET "cites" = t."cites" FROM "taxonomic_cites" t WHERE i."species" = t."species"
-# UPDATE "dwc_integrated_{fecha}}" SET "threatstatusuicn" = t."threatstatusuicn" FROM "taxonomic_threat_uicn" t WHERE i."species" = t."species"
+# UPDATE "dwc_integrated_{fecha}}" SET "threatstatusiucn" = t."threatstatusiucn" FROM "taxonomic_threat_iucn" t WHERE i."species" = t."species"
 # UPDATE "dwc_integrated_{fecha}}" SET "threatstatusmads" = t."threatstatusmads" FROM "taxonomic_threat_mads" t WHERE i."species" = t."species"
 # UPDATE "dwc_integrated_{fecha}}" SET "exotic" = t."exotic", "exoticriskinvasion" = t."exoticriskinvasion", "invasiveness" = t."invasiveness", "invasive" = t."invasive", "transplanted" = t."transplanted" FROM "taxonomic_invasive_exotic" t WHERE i."species" = t."species"
 # UPDATE "dwc_integrated_{fecha}}" SET "migratory" = t."migratory", "endemic" = t."endemic" FROM "taxonomic_col_list" t WHERE i."species" = t."species"
@@ -1383,8 +1383,8 @@ _TAXONOMIC_JOINS = {
     'taxonomic_cites': {
         'columns': {'cites': 'cites'},
     },
-    'taxonomic_threat_uicn': {
-        'columns': {'threatstatus': 'threatstatusuicn'},
+    'taxonomic_threat_iucn': {
+        'columns': {'threatstatus': 'threatstatusiucn'},
     },
     'taxonomic_threat_mads': {
         'columns': {'threatstatus': 'threatstatusmads'},
@@ -1490,16 +1490,16 @@ def clean_threatstatus_fields(db, table_name):
     with db.connect() as conn:
         conn.execute(
             f'UPDATE "{integrated}" '
-            f'SET "threatstatusuicn" = NULLIF(TRIM("threatstatusuicn"), \'\'), '
+            f'SET "threatstatusiucn" = NULLIF(TRIM("threatstatusiucn"), \'\'), '
             f'    "threatstatusmads" = NULLIF(TRIM("threatstatusmads"), \'\') '
-            f'WHERE "threatstatusuicn" IS NOT NULL OR "threatstatusmads" IS NOT NULL'
+            f'WHERE "threatstatusiucn" IS NOT NULL OR "threatstatusmads" IS NOT NULL'
         )
         conn.execute(
             f'UPDATE "{integrated}" '
-            f'SET "threatstatusuicn" = CASE '
-            f'    WHEN "threatstatusuicn" IS NULL THEN NULL '
-            f'    WHEN "threatstatusuicn" LIKE \'%_IUCN\' THEN "threatstatusuicn" '
-            f'    ELSE "threatstatusuicn" || \'_IUCN\' '
+            f'SET "threatstatusiucn" = CASE '
+            f'    WHEN "threatstatusiucn" IS NULL THEN NULL '
+            f'    WHEN "threatstatusiucn" LIKE \'%_IUCN\' THEN "threatstatusiucn" '
+            f'    ELSE "threatstatusiucn" || \'_IUCN\' '
             f'END, '
             f'    "threatstatusmads" = CASE '
             f'    WHEN "threatstatusmads" IS NULL THEN NULL '
