@@ -214,15 +214,16 @@ def tables_operations(db, suffix, upload_type=None):
             f"upload_type inválido: {upload_type}. Debe ser 'sql' o 'regular'."
         )
 
+    integrated_tname = f'dwc_integrated_{suffix}'
     if upload_type == "sql":
-        table_names = {'sql': f'dwc_sql_{suffix}'}
+        table_names = {'sql': f'dwc_sql_{suffix}', 'integrated': integrated_tname}
         type_maps = {'sql': _SQL_COL_TYPES}
         keys = ('sql',)
     else:
         table_names = {
             'occurrence': f'dwc_occurrence_{suffix}',
             'verbatim': f'dwc_verbatim_{suffix}',
-            'integrated': f'dwc_integrated_{suffix}',
+            'integrated': integrated_tname,
         }
         type_maps = {
             'occurrence': _SIMPLE_TYPES,
@@ -232,24 +233,21 @@ def tables_operations(db, suffix, upload_type=None):
     validation_tables = ('taxonomic_species_validation', 'geo_locality_validation')
     if True:
         with db.connect() as conn:
+            logger.info("Ejecutando consulta")
+            conn.execute(f'DROP TABLE IF EXISTS "{integrated_tname}" CASCADE')
+            conn.commit()
+            logger.info("DROP TABLE %s", integrated_tname)
             for key in keys:
                 tname = table_names[key]
-                if table_exists(db, tname):
-                    logger.info("Ejecutando consulta")
-                    conn.execute(f'DROP TABLE "{tname}"')
-                    conn.commit()
-                    logger.info("DROP TABLE %s", tname)
+                logger.info("Ejecutando consulta")
+                conn.execute(f'DROP TABLE IF EXISTS "{tname}" CASCADE')
+                conn.commit()
+                logger.info("DROP TABLE %s", tname)
                 ddl = _build_create_ddl(tname, type_maps[key])
                 logger.info("Ejecutando consulta")
                 conn.execute(ddl)
                 conn.commit()
                 logger.info("CREATE TABLE %s", tname)
-            integrated_tname = f'dwc_integrated_{suffix}'
-            if table_exists(db, integrated_tname):
-                logger.info("Ejecutando consulta")
-                conn.execute(f'DROP TABLE "{integrated_tname}"')
-                conn.commit()
-                logger.info("DROP TABLE %s", integrated_tname)
             for vtbl in validation_tables:
                 logger.info("Ejecutando consulta")
                 conn.execute(f'DROP TABLE IF EXISTS "{vtbl}"')
