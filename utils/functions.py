@@ -17,7 +17,8 @@ Rendimiento: FLUSH_EVERY controla el lote de COPY (SQL_BATCH_SIZE); UPDATE_BATCH
 - normalize_integrated_country: Campo country desde countrycode (CO → Colombia; resto NULL) por lotes sobre gbifid.
 - add_gbifid_index: Función para crear índice primary key sobre gbifid en la tabla integrada.
 - create_species_index: Función para crear índice BTREE sobre species para optimizar cruces taxonómicos.
-- validate_taxonomic_species: Tabla taxonomic_species_validation por species únicos y enlace taxonomic_species_id en integrada.
+- validate_taxonomic_species: Crea taxonomic_species_validation (borrada en tables_operations) y catálogo por species.
+- validate_localities: Crea geo_locality_validation (borrada en tables_operations) y catálogo por coordenadas/localidad.
 - link_integrated_taxonomic_species_id: UPDATE por lotes (CTE) integrada → catálogo por species; índice parcial y VACUUM ANALYZE en integrada.
 - link_integrated_locality_id: UPDATE por lotes (CTE) integrada → geo_locality_validation por 4 campos; índice parcial, FK NOT VALID y VACUUM.
 - spatials_joins: Cruza geo_locality_validation con MGN_ADM_MPIO_2025 y capas marítimas usando ST_Intersects.
@@ -1416,20 +1417,46 @@ def link_integrated_taxonomic_species_id(db, table_name):
 # --------------------------------------------------------------------------------------------------------------------------------------
 
 def validate_localities(db, table_name):
-    # Mantiene una tabla de localidades únicas a partir de los campos
-    # decimallatitude, decimallongitude, county, stateprovince, e inserta
-    # nuevas combinaciones desde la tabla integrada actual y completa geom.
-    # El enlace masivo locality_id en la integrada: link_integrated_locality_id (main al final).
+    # Crea geo_locality_validation (borrada en tables_operations) y la puebla desde la integrada.
+    # Completa geom por lotes. El enlace locality_id: link_integrated_locality_id (main).
     # Parámetros:
     # - db: Conexión al pool de conexiones de PostgreSQL.
     # - table_name: Nombre de la tabla integrada dwc_integrated.
     # Retorna:
     # - None: No retorna nada.
     integrated = table_name
+    locality_tbl = 'geo_locality_validation'
     batch_size = SQL_BATCH_SIZE
     total_updated = 0
 
     with db.connect() as conn:
+        logger.info("Ejecutando consulta")
+        conn.execute(
+            f'CREATE TABLE "{locality_tbl}" ('
+            f'  "id" SERIAL PRIMARY KEY, '
+            f'  "decimallatitude" DOUBLE PRECISION, '
+            f'  "decimallongitude" DOUBLE PRECISION, '
+            f'  "stateprovince" TEXT, '
+            f'  "county" TEXT, '
+            f'  "geom" geometry(Point, 4326), '
+            f'  "stateprovincemgn" TEXT, '
+            f'  "countymgn" TEXT, '
+            f'  "maritimeregion" TEXT, '
+            f'  "narinomaritimeregion" TEXT, '
+            f'  "stateprovincevalidated" TEXT, '
+            f'  "countyvalidated" TEXT, '
+            f'  "stateprovincevalidation" BOOLEAN, '
+            f'  "countyvalidation" BOOLEAN, '
+            f'  "flaggeo" TEXT, '
+            f'  "geo_master_geography_id" INT4, '
+            f'  CONSTRAINT "uq_{locality_tbl}_coords" UNIQUE ('
+            f'    "decimallatitude", "decimallongitude", "stateprovince", "county"'
+            f'  )'
+            f')'
+        )
+        conn.commit()
+        logger.info("Tabla de validación de localidades creada: %s", locality_tbl)
+
         logger.info("Ejecutando consulta")
         conn.execute(
             f'ALTER TABLE "{integrated}" '
@@ -1440,7 +1467,7 @@ def validate_localities(db, table_name):
         # Inserta combinaciones nuevas desde integrated (orden = índice único en BD).
         logger.info("Ejecutando consulta")
         conn.execute(
-            f'INSERT INTO "geo_locality_validation" '
+            f'INSERT INTO "{locality_tbl}" '
             f'("decimallatitude", "decimallongitude", "stateprovince", "county") '
             f'SELECT DISTINCT '
             f'i."decimallatitude", '
@@ -1450,7 +1477,7 @@ def validate_localities(db, table_name):
             f'FROM "{integrated}" i '
             f'WHERE NOT EXISTS ('
             f'    SELECT 1 '
-            f'    FROM "geo_locality_validation" l '
+            f'    FROM "{locality_tbl}" l '
             f'    WHERE l."decimallatitude" IS NOT DISTINCT FROM i."decimallatitude" '
             f'      AND l."decimallongitude" IS NOT DISTINCT FROM i."decimallongitude" '
             f'      AND l."stateprovince" IS NOT DISTINCT FROM i."stateprovince" '
@@ -1459,20 +1486,20 @@ def validate_localities(db, table_name):
             f'ON CONFLICT ("decimallatitude", "decimallongitude", "stateprovince", "county") DO NOTHING'
         )
         conn.commit()
-        logger.info("Combinaciones nuevas de integrada insertadas en %s: geo_locality_validation", integrated)
+        logger.info("Combinaciones nuevas de integrada insertadas en %s: %s", integrated, locality_tbl)
         # Completa geom por lotes solo cuando falta geometría y hay coordenadas.
         while True:
             logger.info("Ejecutando consulta")
             result = conn.execute(
                 f'WITH batch AS ('
                 f'    SELECT ctid '
-                f'    FROM "geo_locality_validation" '
+                f'    FROM "{locality_tbl}" '
                 f'    WHERE "geom" IS NULL '
                 f'      AND "decimallatitude" IS NOT NULL '
                 f'      AND "decimallongitude" IS NOT NULL '
                 f'    LIMIT {batch_size}'
                 f') '
-                f'UPDATE "geo_locality_validation" t '
+                f'UPDATE "{locality_tbl}" t '
                 f'SET "geom" = ST_SetSRID(ST_MakePoint(t."decimallongitude", t."decimallatitude"), 4326) '
                 f'FROM batch '
                 f'WHERE t.ctid = batch.ctid'
@@ -1485,13 +1512,14 @@ def validate_localities(db, table_name):
             total_updated += batch_updated
             logger.info(
                 "Geom batch en %s: %s filas (total %s)",
-                "geo_locality_validation",
+                locality_tbl,
                 f"{batch_updated:,}",
                 f"{total_updated:,}",
             )
         conn.commit()
         logger.info(
-            "geo_locality_validation actualizada desde %s (geom=%s; enlace en link_integrated_locality_id)",
+            "%s actualizada desde %s (geom=%s; enlace en link_integrated_locality_id)",
+            locality_tbl,
             integrated,
             f"{total_updated:,}",
         )

@@ -75,9 +75,9 @@ if not check_connection(db):
 logger.info("Conectado a la base de datos.")
 
 try:
-    table_integrated_name = f'dwc_integrated_20260518'
-    table_names = {'integrated': table_integrated_name}
-    origin = 'SQL download'
+    table_integrated_name = f'dwc_integrated_{suffix}'
+    #table_names = {'integrated': table_integrated_name}
+    #origin = 'SQL download'
     if True: # Si la tabla integrada ya existe, no ejecuta la carga ni los pasos 80-107 (staging, COPY, PK, species, etc.).
         if UPLOAD_TYPE == "sql":
             table_names = timer(tables_operations, "Operaciones sobre la tabla de staging dwc_sql")(
