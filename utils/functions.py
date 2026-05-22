@@ -17,8 +17,8 @@ Rendimiento: FLUSH_EVERY controla el lote de COPY (SQL_BATCH_SIZE); UPDATE_BATCH
 - normalize_integrated_country: Campo country desde countrycode (CO → Colombia; resto NULL) por lotes sobre gbifid.
 - add_gbifid_index: Función para crear índice primary key sobre gbifid en la tabla integrada.
 - create_species_index: Función para crear índice BTREE sobre species para optimizar cruces taxonómicos.
-- validate_taxonomic_species: Tabla taxonomic_species_validation por species únicos y columna taxonomic_species_id en la integrada (sin enlace masivo).
-- link_integrated_taxonomic_species_id: UPDATE por lotes integrada → taxonomic_species_validation, índice y FK NOT VALID (orquestar al final del pipeline).
+- validate_taxonomic_species: Tabla taxonomic_species_validation por species únicos y enlace taxonomic_species_id en integrada.
+- link_integrated_taxonomic_species_id: UPDATE por lotes (CTE) integrada → catálogo por species; índice parcial de filas pendientes.
 - link_integrated_locality_id: UPDATE por lotes integrada → geo_locality_validation, índice, FK NOT VALID y VACUUM ANALYZE (orquestar al final del pipeline).
 - spatials_joins: Cruza geo_locality_validation con MGN_ADM_MPIO_2025 y capas marítimas usando ST_Intersects.
 - normalize_stateprovince_county: Normaliza stateprovince, county y slugs en geo_locality_validation antes de validar geografía.
@@ -228,7 +228,7 @@ def tables_operations(db, suffix, upload_type=None):
             'verbatim': _OCURRENCE_TYPES,
         }
         keys = ('occurrence', 'verbatim')
-    if True:    
+    if False:    
         with db.connect() as conn:
             for key in keys:
                 tname = table_names[key]
@@ -1206,8 +1206,7 @@ def create_species_index(db, table_name):
 
 def validate_taxonomic_species(db, table_name):
     # Crea o reutiliza taxonomic_species_validation con una fila por species y columnas
-    # taxonómicas (cites, amenazas, exóticas, etc.) y prepara taxonomic_species_id en la integrada.
-    # El enlace masivo integrada → catálogo se hace en link_integrated_taxonomic_species_id (main al final).
+    # taxonómicas (cites, amenazas, exóticas, etc.). El enlace taxonomic_species_id: link_integrated_taxonomic_species_id (main).
     # Si la tabla ya existía, se trunca y se reinicia la secuencia de id para descartar cruces
     # taxonómicos obsoletos antes de volver a poblar desde la integrada.
     integrated = table_name
@@ -1225,9 +1224,13 @@ def validate_taxonomic_species(db, table_name):
         conn.execute(
             f'CREATE TABLE IF NOT EXISTS "{species_tbl}" ('
             f'  "id" SERIAL PRIMARY KEY, '
-            f'  "species" TEXT NOT NULL, '
+            f'  "kingdom" TEXT, '
+            f'  "phylum" TEXT, '
             f'  "class" TEXT, '
             f'  "order" TEXT, '
+            f'  "family" TEXT, '
+            f'  "genus" TEXT, '
+            f'  "species" TEXT NOT NULL, '
             f'  "cites" TEXT, '
             f'  "threatstatusuicn" TEXT, '
             f'  "threatstatusmads" TEXT, '
@@ -1245,18 +1248,7 @@ def validate_taxonomic_species(db, table_name):
         )
         conn.commit()
         logger.info("Tabla de validación taxonómica por especie creada: %s", species_tbl)
-        conn.execute(
-            f'CREATE INDEX IF NOT EXISTS "idx_{species_tbl}_species" '
-            f'ON "{species_tbl}" USING BTREE ("species")'
-        )
-        conn.commit()
-        logger.info("Indice creado en %s: species", species_tbl)
-        conn.execute(
-            f'ALTER TABLE "{integrated}" '
-            f'ADD COLUMN IF NOT EXISTS "taxonomic_species_id" INT4'
-        )
-        conn.commit()
-        logger.info("Columna taxonomic_species_id creada en %s", integrated)
+
         if species_already:
             fk_rows = conn.execute(
                 'SELECT nsp.nspname, cls.relname, con.conname '
@@ -1287,38 +1279,59 @@ def validate_taxonomic_species(db, table_name):
             )
 
         conn.execute(
-            f'INSERT INTO "{species_tbl}" ("species", "class", "order") '
+            f'INSERT INTO "{species_tbl}" ('
+            f'  "kingdom", "phylum", "class", "order", "family", '
+            f'  "genus", "species"'
+            f') '
             f'SELECT DISTINCT ON (i."species") '
-            f'  i."species", i."class", i."order" '
+            f'  i."kingdom", i."phylum", i."class", i."order", i."family", '
+            f'  i."genus", i."species" '
             f'FROM "{integrated}" i '
             f'WHERE i."species" IS NOT NULL AND BTRIM(i."species") <> \'\' '
             f'ORDER BY i."species", i."gbifid"'
         )
         conn.commit()
         logger.info(
-            "Catálogo taxonómico %s poblado desde %s (enlace en link_integrated_taxonomic_species_id)",
+            "Catálogo taxonómico %s poblado desde %s",
             species_tbl,
             integrated,
         )
 
 
 def link_integrated_taxonomic_species_id(db, table_name):
-    # Enlaza la integrada con taxonomic_species_validation por species (UPDATE por lotes),
-    # crea índice en taxonomic_species_id y FK NOT VALID hacia el catálogo.
-    # Pensado para ejecutarse al final del pipeline (main.py) tras taxonomic_joins y demás pasos.
+    # Propaga id del catálogo (92k filas) a la integrada (~40M) por species.
+    # CTE + LIMIT por lote: el catálogo entra en hash pequeño; la integrada se recorre por lotes.
+    # Índice parcial en filas con taxonomic_species_id IS NULL evita re-escanear toda la tabla cada lote.
+    # SPECIES_LINK_BATCH_SIZE (default 1e6) controla el tamaño del lote.
     integrated = table_name
     species_tbl = 'taxonomic_species_validation'
-    fk_name = f"fk_{integrated}_taxonomic_species_id"
-    batch_size = UPDATE_BATCH_SIZE
+    pending_idx = f'idx_{integrated}_species_link_pending'
+    batch_size = int(os.getenv('SPECIES_LINK_BATCH_SIZE', '1000000'))
     total_linked = 0
 
     with db.connect() as conn:
+        conn.execute(
+            f'ALTER TABLE "{integrated}" '
+            f'ADD COLUMN IF NOT EXISTS "taxonomic_species_id" INT4'
+        )
+        conn.commit()
+
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS "{pending_idx}" '
+            f'ON "{integrated}" ("species") '
+            f'WHERE "taxonomic_species_id" IS NULL '
+            f'  AND "species" IS NOT NULL '
+            f'  AND BTRIM("species") <> \'\''
+        )
+        conn.commit()
+        logger.info("Indice parcial creado: %s", pending_idx)
+
         while True:
             result = conn.execute(
                 f'WITH batch AS ('
-                f'    SELECT i.ctid, s."id" AS taxonomic_species_id '
+                f'    SELECT i.ctid, s.id AS taxonomic_species_id '
                 f'    FROM "{integrated}" i '
-                f'    JOIN "{species_tbl}" s ON i."species" IS NOT DISTINCT FROM s."species" '
+                f'    INNER JOIN "{species_tbl}" s ON i."species" = s."species" '
                 f'    WHERE i."taxonomic_species_id" IS NULL '
                 f'    LIMIT {batch_size}'
                 f') '
@@ -1339,23 +1352,7 @@ def link_integrated_taxonomic_species_id(db, table_name):
                 f"{total_linked:,}",
             )
 
-        conn.execute(
-            f'CREATE INDEX IF NOT EXISTS "idx_{integrated}_taxonomic_species_id" '
-            f'ON "{integrated}" USING BTREE ("taxonomic_species_id")'
-        )
-        conn.commit()
-        logger.info("Indice creado en %s: taxonomic_species_id", integrated)
-
-        conn.execute(f'ALTER TABLE "{integrated}" DROP CONSTRAINT IF EXISTS "{fk_name}"')
-        conn.execute(
-            f'ALTER TABLE "{integrated}" '
-            f'ADD CONSTRAINT "{fk_name}" '
-            f'FOREIGN KEY ("taxonomic_species_id") '
-            f'REFERENCES "{species_tbl}" ("id") '
-            f'ON UPDATE CASCADE '
-            f'ON DELETE SET NULL '
-            f'NOT VALID'
-        )
+        conn.execute(f'DROP INDEX IF EXISTS "{pending_idx}"')
         conn.commit()
         logger.info(
             "Enlace integrada → %s: %s filas con taxonomic_species_id",
@@ -1693,7 +1690,7 @@ def validate_geography(db, table_name):
 
 # Se definen las tablas y los campos a cruzar. La idea es iterar sobre las tablas y campos para evitar
 # tener que definirlas las consultas SQL manualmente.
-# Los cruces actualizan taxonomic_species_validation (v) por species; la integrada enlaza con taxonomic_species_id.
+# Los cruces actualizan taxonomic_species_validation (v) por species; la integrada enlaza por taxonomic_species_id.
 # Es equivalente a ejecutar la siguiente consulta:
 # UPDATE "taxonomic_species_validation" v SET "cites" = t."cites" FROM "taxonomic_cites" t WHERE v."species" = t."species"
 # UPDATE "taxonomic_species_validation" v SET "threatstatusuicn" = t."threatstatus" FROM "taxonomic_threat_uicn" t WHERE v."species" = t."species"
@@ -1853,14 +1850,7 @@ def _fetch_gbif_json(url, key, label, retries=5, backoff_factor=0.5):
     for attempt in range(retries + 1):
         try:
             with urllib.request.urlopen(url, timeout=10) as response:
-                if response.status != 200:
-                    if response.status in retry_statuses and attempt < retries:
-                        time.sleep(backoff_factor * (2 ** attempt))
-                        continue
-                    logger.warning("GBIF API status %s para %s %s", response.status, label, key)
-                    return None, False
-                data = json.loads(response.read().decode('utf-8'))
-            return data, True
+                return json.loads(response.read().decode('utf-8')), True
         except urllib.error.HTTPError as e:
             if e.code in retry_statuses and attempt < retries:
                 time.sleep(backoff_factor * (2 ** attempt))
@@ -1881,25 +1871,21 @@ def _fetch_gbif_json(url, key, label, retries=5, backoff_factor=0.5):
 
 def _parse_gbif_created_date(value):
     # Convierte el campo created de GBIF a date (YYYY-MM-DD).
-    if not value:
-        return None
     if isinstance(value, datetime):
         return value.date()
-    if isinstance(value, str):
-        raw = value.strip()
-        if not raw:
-            return None
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace('Z', '+00:00')).date()
+    except ValueError:
         try:
-            # Soporta ISO8601 con Z o con offset (+00:00)
-            return datetime.fromisoformat(raw.replace('Z', '+00:00')).date()
+            return datetime.strptime(raw[:10], '%Y-%m-%d').date()
         except ValueError:
-            try:
-                # Fallback cuando ya viene como YYYY-MM-DD
-                return datetime.strptime(raw[:10], '%Y-%m-%d').date()
-            except ValueError:
-                logger.warning("Fecha created inválida en respuesta GBIF: %s", value)
-                return None
-    return None
+            logger.warning("Fecha created inválida en respuesta GBIF: %s", value)
+            return None
 
 
 def gbif_api_calls(db, table_name):
