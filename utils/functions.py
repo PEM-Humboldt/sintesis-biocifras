@@ -158,20 +158,31 @@ _SQL_COL_TYPES = {
 # -----------------------------------------------------------------------------------------------------
 
 def _run_table_maintenance(db, table_name):
-    # Se ejecuta el comando VACUUM (ANALYZE) y/o VACUUM (FULL, ANALYZE) para mantener la tabla optimizada.
-    # Parámetros:
-    # - db: Conexión al pool de conexiones de PostgreSQL.
-    # - table_name: Nombre de la tabla a mantener.
-    # Retorna:
-    # - None: No retorna nada.
+    # Mantenimiento post-actualización masiva. Por defecto VACUUM (ANALYZE) sin workers paralelos
+    # (evita agotar /dev/shm en WSL/Docker: "could not resize shared memory segment").
+    # Variables: SKIP_TABLE_MAINTENANCE, TABLE_MAINTENANCE_MODE (vacuum_analyze|analyze),
+    # VACUUM_MAINTENANCE_WORK_MEM, RUN_VACUUM_FULL.
+    if os.getenv('SKIP_TABLE_MAINTENANCE', 'false').lower() == 'true':
+        logger.info("Mantenimiento omitido (SKIP_TABLE_MAINTENANCE=true): %s", table_name)
+        return
+
+    mode = os.getenv('TABLE_MAINTENANCE_MODE', 'vacuum_analyze').lower()
+    vacuum_mem = os.getenv('VACUUM_MAINTENANCE_WORK_MEM', '512MB')
     raw_conn = db.raw_connection()
     try:
         raw_conn.autocommit = True
         with raw_conn.cursor() as cur:
-            cur.execute(f'VACUUM (ANALYZE) "{table_name}"')
-            # Si la variable de entorno RUN_VACUUM_FULL es true, se ejecuta el comando VACUUM (FULL, ANALYZE).
-            if os.getenv('RUN_VACUUM_FULL', 'false').lower() == 'true':
-                cur.execute(f'VACUUM (FULL, ANALYZE) "{table_name}"')
+            cur.execute('SET max_parallel_maintenance_workers = 0')
+            cur.execute(f"SET maintenance_work_mem = '{vacuum_mem}'")
+            if mode == 'analyze':
+                cur.execute(f'ANALYZE "{table_name}"')
+                logger.info("ANALYZE completado en %s", table_name)
+            else:
+                cur.execute(f'VACUUM (ANALYZE) "{table_name}"')
+                logger.info("VACUUM (ANALYZE) completado en %s", table_name)
+                if os.getenv('RUN_VACUUM_FULL', 'false').lower() == 'true':
+                    cur.execute(f'VACUUM (FULL, ANALYZE) "{table_name}"')
+                    logger.info("VACUUM (FULL, ANALYZE) completado en %s", table_name)
     finally:
         raw_conn.close()
 
@@ -636,6 +647,7 @@ def normalize_integrated_country(db, table_name):
             f"{batch_size:,}",
         )
 
+    logger.info("Ejecutando vacuum analyze")
     _run_table_maintenance(db, integrated)
     logger.info("VACUUM (ANALYZE) en %s tras actualización masiva de country", integrated)
 
@@ -1405,11 +1417,9 @@ def link_integrated_taxonomic_species_id(db, table_name):
             f"{total_linked:,}",
         )
 
+    logger.info("Ejecutando vacuum analyze")
     _run_table_maintenance(db, integrated)
-    logger.info(
-        "VACUUM (ANALYZE) en %s tras enlace taxonomic_species_id",
-        integrated,
-    )
+    logger.info("VACUUM (ANALYZE) en %s tras enlace taxonomic_species_id", integrated)
 
 
 # --------------------------------------------------------------------------------------------------------------------------------------
@@ -1618,11 +1628,9 @@ def link_integrated_locality_id(db, table_name):
             f"{total_linked:,}",
         )
 
+    logger.info("Ejecutando vacuum analyze")
     _run_table_maintenance(db, integrated)
-    logger.info(
-        "VACUUM (ANALYZE) en %s tras locality_id y FK",
-        integrated,
-    )
+    logger.info("VACUUM (ANALYZE) en %s tras locality_id y FK", integrated)
 
 
 # --------------------------------------------------------------------------------------------------------------------------------------
@@ -1796,11 +1804,9 @@ def validate_geography(db, table_name):
             f"{total_fg:,}",
         )
 
+    logger.info("Ejecutando vacuum analyze")
     _run_table_maintenance(db, locality_tbl)
-    logger.info(
-        "VACUUM (ANALYZE) en %s tras validación geográfica (tabla de localidades)",
-        locality_tbl,
-    )
+    logger.info("VACUUM (ANALYZE) en %s tras validación geográfica (tabla de localidades)", locality_tbl)
 
 # --------------------------------------------------------------------------------------------------------------------------------------
 # Cruces taxonómicos con listados de referencia
@@ -1966,6 +1972,7 @@ def clean_threatstatus_fields(db, table_name):
         )
         conn.commit()
 
+    logger.info("Ejecutando vacuum analyze")
     _run_table_maintenance(db, species_tbl)
     logger.info("VACUUM (ANALYZE) en %s tras cruces y normalización threatstatus", species_tbl)
 
@@ -2041,7 +2048,7 @@ def gbif_api_calls(db, table_name):
         """
 
         # Datasetkeys presentes en la integrada sin fila en catálogo o sin título en gbif_datasets.
-        logger.info("Ejecutando consulta")
+        logger.info("Ejecutando gbif_api_calls")
         dataset_rows = conn.execute(
             f'SELECT DISTINCT i."datasetkey" '
             f'FROM "{integrated}" i '
@@ -2051,11 +2058,7 @@ def gbif_api_calls(db, table_name):
         ).fetchall()
         conn.commit()
         missing_dataset_keys = [row[0] for row in dataset_rows if row[0]]
-        logger.info(
-            "Datasetkeys sin datasettitle en %s: %s",
-            integrated,
-            f"{len(missing_dataset_keys):,}",
-        )
+        logger.info("Datasetkeys sin datasettitle en %s: %s", integrated, f"{len(missing_dataset_keys):,}")
 
         ds_fetched = 0
         ds_upserted = 0
@@ -2086,7 +2089,7 @@ def gbif_api_calls(db, table_name):
                         continue
 
                     ds_fetched += 1
-                    logger.info("Ejecutando consulta")
+                    logger.info("Ejecutando gbif_api_calls")
                     conn.execute(dataset_upsert_sql, {
                         'datasetkey': data.get('key') or key,
                         'license': data.get('license'),
