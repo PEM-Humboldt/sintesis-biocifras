@@ -20,7 +20,7 @@ Rendimiento: FLUSH_EVERY controla el lote de COPY (SQL_BATCH_SIZE); UPDATE_BATCH
 - validate_taxonomic_species: Crea taxonomic_species_validation (borrada en tables_operations) y catálogo por species.
 - validate_localities: Crea geo_locality_validation (borrada en tables_operations) y catálogo por coordenadas/localidad.
 - link_integrated_taxonomic_species_id: UPDATE por lotes (CTE) integrada → catálogo por species; índice parcial y VACUUM ANALYZE en integrada.
-- link_integrated_locality_id: UPDATE por lotes (CTE) integrada → geo_locality_validation por 4 campos; índice parcial, FK NOT VALID y VACUUM.
+- link_integrated_locality_id: UPDATE por lotes (pending + JOIN 4 campos) integrada → geo_locality_validation; FK NOT VALID y VACUUM.
 - spatials_joins: Cruza geo_locality_validation con MGN_ADM_MPIO_2025 y capas marítimas usando ST_Intersects.
 - normalize_stateprovince_county: Normaliza stateprovince, county y slugs en geo_locality_validation antes de validar geografía.
 - validate_geography: Valida geografía en geo_locality_validation (tres bloques con db.connect: depto, municipio, flaggeo).
@@ -1537,47 +1537,43 @@ def validate_localities(db, table_name):
 
 def link_integrated_locality_id(db, table_name):
     # Propaga id de geo_locality_validation (~2M) a la integrada (~40M) por lat/lon/state/county.
-    # CTE + LIMIT por lote (SQL_BATCH_SIZE / FLUSH_EVERY). Índice parcial en integrada solo filas
-    # con locality_id IS NULL. El catálogo ya tiene UNIQUE en los 4 campos para el JOIN.
+    # Por lote: LIMIT de filas pendientes y JOIN al catálogo (UNIQUE en 4 campos). Sin índice
+    # parcial de 4 columnas sobre ~40M (muy costoso). UPDATE_BATCH_SIZE acota WAL por commit.
     integrated = table_name
     locality_tbl = 'geo_locality_validation'
     fk_name = f"fk_{integrated}_locality_id"
-    pending_idx = f'idx_{integrated}_locality_link_pending'
-    batch_size = SQL_BATCH_SIZE
+    batch_size = UPDATE_BATCH_SIZE
     total_linked = 0
 
     with db.connect() as conn:
-        logger.info("Ejecutando consulta")
+        logger.info("Ejecutando add_locality_id_column")
         conn.execute(
             f'ALTER TABLE "{integrated}" '
             f'ADD COLUMN IF NOT EXISTS "locality_id" INT4'
         )
         conn.commit()
 
-        logger.info("Ejecutando consulta")
-        conn.execute(
-            f'CREATE INDEX IF NOT EXISTS "{pending_idx}" '
-            f'ON "{integrated}" ('
-            f'  "decimallatitude", "decimallongitude", "stateprovince", "county"'
-            f') '
-            f'WHERE "locality_id" IS NULL'
-        )
-        conn.commit()
-        logger.info("Indice parcial creado: %s", pending_idx)
-
         while True:
             logger.info("Ejecutando consulta")
             result = conn.execute(
-                f'WITH batch AS ('
-                f'    SELECT i.ctid, l."id" AS locality_id '
+                f'WITH pending AS ('
+                f'    SELECT '
+                f'      i.ctid, '
+                f'      i."decimallatitude", '
+                f'      i."decimallongitude", '
+                f'      i."stateprovince", '
+                f'      i."county" '
                 f'    FROM "{integrated}" i '
-                f'    INNER JOIN "{locality_tbl}" l '
-                f'      ON i."decimallatitude" IS NOT DISTINCT FROM l."decimallatitude" '
-                f'     AND i."decimallongitude" IS NOT DISTINCT FROM l."decimallongitude" '
-                f'     AND i."stateprovince" IS NOT DISTINCT FROM l."stateprovince" '
-                f'     AND i."county" IS NOT DISTINCT FROM l."county" '
                 f'    WHERE i."locality_id" IS NULL '
                 f'    LIMIT {batch_size}'
+                f'), batch AS ('
+                f'    SELECT p.ctid, l."id" AS locality_id '
+                f'    FROM pending p '
+                f'    INNER JOIN "{locality_tbl}" l '
+                f'      ON p."decimallatitude" IS NOT DISTINCT FROM l."decimallatitude" '
+                f'     AND p."decimallongitude" IS NOT DISTINCT FROM l."decimallongitude" '
+                f'     AND p."stateprovince" IS NOT DISTINCT FROM l."stateprovince" '
+                f'     AND p."county" IS NOT DISTINCT FROM l."county"'
                 f') '
                 f'UPDATE "{integrated}" i '
                 f'SET "locality_id" = b.locality_id '
@@ -1596,10 +1592,6 @@ def link_integrated_locality_id(db, table_name):
                 f"{batch_linked:,}",
                 f"{total_linked:,}",
             )
-
-        logger.info("Ejecutando consulta")
-        conn.execute(f'DROP INDEX IF EXISTS "{pending_idx}"')
-        conn.commit()
 
         logger.info("Ejecutando consulta")
         conn.execute(
