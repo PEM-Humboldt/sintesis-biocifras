@@ -36,12 +36,11 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 import urllib.error
 import urllib.request
-
-from utils.connection import table_exists
 
 # Inicialización del logger
 logger = logging.getLogger('sintesis_biocifras')
@@ -51,6 +50,12 @@ SQL_BATCH_SIZE = int(os.getenv('FLUSH_EVERY', '1000000'))
 # Límite de filas por sentencia en UPDATE por lotes (JOIN + ctid). Valores del orden de 1e6 hacen que cada
 # iteración tarde mucho sin commit intermedio; en pg_stat_activity parece “quieto” hasta terminar el lote.
 UPDATE_BATCH_SIZE = int(os.getenv('UPDATE_BATCH_SIZE', '50000'))
+# Parámetros de sesión usados en cargas COPY masivas.
+_MAINTENANCE_WORK_MEM = os.getenv('MAINTENANCE_WORK_MEM', '2GB')
+_WORK_MEM = os.getenv('WORK_MEM', '64MB')
+# Workers paralelos para CREATE INDEX / ADD PRIMARY KEY / VACUUM. Bajar a 0 en WSL/Docker
+# si /dev/shm es pequeño ("could not resize shared memory segment").
+_MAX_PARALLEL_MAINTENANCE_WORKERS = int(os.getenv('MAX_PARALLEL_MAINTENANCE_WORKERS', '4'))
 
 
 # ------------------------------------------------------------------------------------------------------------
@@ -172,7 +177,7 @@ def _run_table_maintenance(db, table_name):
     try:
         raw_conn.autocommit = True
         with raw_conn.cursor() as cur:
-            cur.execute('SET max_parallel_maintenance_workers = 0')
+            cur.execute(f'SET max_parallel_maintenance_workers = {_MAX_PARALLEL_MAINTENANCE_WORKERS}')
             cur.execute(f"SET maintenance_work_mem = '{vacuum_mem}'")
             if mode == 'analyze':
                 cur.execute(f'ANALYZE "{table_name}"')
@@ -203,10 +208,10 @@ def _build_create_ddl(table_name, col_types):
     # Retorna:
     # - ddl: Sentencia CREATE TABLE para la tabla.
     cols = ', '.join(f'"{col}" {dtype}' for col, dtype in col_types.items())
-    return (
-        f'CREATE UNLOGGED TABLE "{table_name}" ({cols}) '
-        f'WITH (autovacuum_enabled = false);'
-    )
+    return f"""
+        CREATE UNLOGGED TABLE "{table_name}" ({cols})
+        WITH (autovacuum_enabled = false);
+    """
 
 # Para mantener un historial de las tablas de staging y la tabla integrada se utiliza un sufijo de fecha.
 def tables_operations(db, suffix, upload_type=None):
@@ -265,7 +270,6 @@ def tables_operations(db, suffix, upload_type=None):
                 conn.execute(f'DROP TABLE IF EXISTS "{vtbl}"')
                 conn.commit()
                 logger.info("DROP TABLE %s", vtbl)
-            conn.commit()
     return table_names
 
 # -------------------------------------------------------------------------------------------------------------------------
@@ -308,37 +312,14 @@ def register_load(db, table_names, created_at, origin):
 # Carga masiva de datos desde los archivos TSV de GBIF a las tablas de staging
 # ------------------------------------------------------------------------------------------------------------
 
-# Los datos de GBIF pueden presentar problemas por el uso de caracteres especiales como comillas, tabuladores y
-# backlash. Por lo que antes de subir cada batch datos se deben procesar los caracteres especiales para evitar
-# errores de carga a traves de csv.writer para manejar el caracter comilla doble ("). Para backslash se indica
-# en el la sentencia COPY de PostgreSQL con el delimitador E'\\'.
-
-# El otro punto importante es que al cargar los datos se utiliza copy_expert de psycopg2 ya que es más eficiente
-# al poder hacer cargas por batch y no tener que leer todo el archivo en memoria.
-# Ahora, por qué se utiliza copy_expert y no copy_from o directamente con execute o una 
-# consulta SQL en raw o con el comando COPY de PostgreSQL?
-# La principal son los caracteres especiales desde los archivos de GBIF, además de tener control sobre la cantidad
-# de filas a cargar por batch.
-# COPY si bien es más rápido, hay que procesar los caracteres especiales antes de la carga, pero sobre todo los
-# archivos deben estár en el mismo servidor de la base de datos, aunque puede solventarse con salida STDOUT.
-# EXECUTE es más flexible, pero espera siempre que se retorne el resultado de la consulta, por lo que
-# en procesos de carga masiva no es la mejor opción.
-# Por último, el comando de copy_expert de psycopg2 se ejecuta a través de la conexión raw de psycopg2,
-# que crea un cursor y se ejecuta el comando de copy_expert con el buffer de datos procesado por csv.writer.
-
-# También se debe manejar fechas desde los archivos TSV de GBIF que se deben convertir a ISO 8601 para columnas TIMESTAMPTZ
-# Bug que apareció al cargar los datos descargados en formato GBIF SQL
-# El EPOCH es el número de milisegundos desde el 1 de enero de 1970 00:00:00 UTC, pero no es legible como el timestamp
-# por lo que se debe convertir a ISO 8601 para que sea legible y que se pueda cargar a la base de datos.
+# Notas técnicas:
+# - psycopg2.copy_expert: permite COPY ... FROM STDIN por buffer (sin requerir el archivo en el server)
+#   y deja control sobre el tamaño de lote (flush_size). Combinado con csv.writer maneja comillas/tabs.
+# - _EPOCH_MS_COLS: columnas TIMESTAMPTZ que GBIF entrega en epoch ms; se convierten a ISO 8601 antes del COPY.
 _EPOCH_MS_COLS = {'lastinterpreted', 'lastparsed'}
-
 
 def _epoch_ms_to_iso(value):
     # Convierte epoch en milisegundos a ISO 8601 para columnas TIMESTAMPTZ.
-    # Parámetros:
-    # - value: Valor a convertir.
-    # Retorna:
-    # - value: Valor convertido a ISO 8601.
     if not value:
         return value
     try:
@@ -348,21 +329,12 @@ def _epoch_ms_to_iso(value):
 
 
 def data_upload(db, filepath, table_name, columns):
-    # Confirma que los archivos de datos definidos en el .env existen.
-    # Si no existen, se retorna un error y se elimina la tabla de staging.
-    # Parámetros:
-    # - db: Conexión al pool de conexiones de PostgreSQL.
-    # - filepath: Ruta del archivo a cargar.
-    # - table_name: Nombre de la tabla a cargar.
-    # - columns: Columnas a cargar.
-    # Retorna:
-    # - None: No retorna nada.
+    """Carga `filepath` (TSV de GBIF) a `table_name` por COPY en lotes de SQL_BATCH_SIZE filas.
+
+    Si `filepath` no está definido o no existe, lanza FileNotFoundError (sin tocar la tabla;
+    `tables_operations` se encarga de la DDL).
+    """
     if not filepath or not Path(filepath).is_file():
-        with db.connect() as conn:
-            logger.info("Ejecutando consulta")
-            conn.execute(f'DROP TABLE IF EXISTS "{table_name}"')
-            conn.commit()
-        logger.info("DROP TABLE %s", table_name)
         msg = (
             f"No se definió la ruta del archivo en el .env para la tabla {table_name}"
             if not filepath
@@ -371,79 +343,59 @@ def data_upload(db, filepath, table_name, columns):
         logger.error(msg)
         raise FileNotFoundError(msg)
 
-    # Se generan las columnas de la tabla de staging en minúsculas para la ejecución del comando COPY de PostgreSQL.
-    # Primero se generan las columnas en minúsculas y luego se generan las columnas entre comillas dobles para la ejecución 
-    # del comando COPY de PostgreSQL.
-    # Se ejecuta el comando COPY de PostgreSQL con el formato csv, el delimitador E'\\t' y el null '' para evitar errores de carga.
-    db_cols = [c.lower() for c in columns]
-    quoted_cols = ', '.join(f'"{c}"' for c in db_cols)
-    copy_sql = (
-        f'COPY "{table_name}" ({quoted_cols}) '
-        f"FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t', NULL '')"
-    )
+    quoted_cols = ', '.join(f'"{c.lower()}"' for c in columns)
+    copy_sql = f"""
+        COPY "{table_name}" ({quoted_cols})
+        FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t', NULL '')
+    """
 
-    # Se crea una conexión raw para ejecutar el comando COPY de PostgreSQL usando psycopg2.
-    # El tamaño de lote COPY es SQL_BATCH_SIZE (variable FLUSH_EVERY en .env al importar este módulo).
-    raw_conn = db.raw_connection()
-    cur = None
     flush_size = SQL_BATCH_SIZE
-    try:
-        cur = raw_conn.cursor()
-        cur.execute("SET synchronous_commit = OFF")
-        # Parametros de sesion orientados a cargas masivas por COPY.
-        # maintenance_work_mem aporta sobre todo en CREATE INDEX, pero se deja configurable en .env.
-        cur.execute(f"SET maintenance_work_mem = '{os.getenv('MAINTENANCE_WORK_MEM', '2GB')}'")
-        cur.execute(f"SET work_mem = '{os.getenv('WORK_MEM', '64MB')}'")
-        buffer = io.StringIO()
-        writer = csv.writer(buffer, delimiter='\t', quoting=csv.QUOTE_MINIMAL)
-        count = 0
-        with open(filepath, 'r', encoding='utf-8') as f:
-            reader = csv.reader(f, delimiter='\t', quoting=csv.QUOTE_NONE)
-            # Se arma una sola vez el mapeo columna -> posición para evitar overhead de DictReader por fila.
-            header = next(reader, None)
-            if not header:
-                raise ValueError(f"Archivo vacío o sin encabezado: {filepath}")
-            header_map = {name.lower(): idx for idx, name in enumerate(header)}
-            col_specs = []
-            for c in columns:
-                name = c.lower()
-                col_specs.append((header_map.get(name), name in _EPOCH_MS_COLS))
+    with closing(db.raw_connection()) as raw_conn, raw_conn.cursor() as cur:
+        try:
+            cur.execute("SET synchronous_commit = OFF")
+            cur.execute(f"SET maintenance_work_mem = '{_MAINTENANCE_WORK_MEM}'")
+            cur.execute(f"SET work_mem = '{_WORK_MEM}'")
+            buffer = io.StringIO()
+            writer = csv.writer(buffer, delimiter='\t', quoting=csv.QUOTE_MINIMAL)
+            count = 0
+            with open(filepath, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f, delimiter='\t', quoting=csv.QUOTE_NONE)
+                header = next(reader, None)
+                if not header:
+                    raise ValueError(f"Archivo vacío o sin encabezado: {filepath}")
+                header_map = {name.lower(): idx for idx, name in enumerate(header)}
+                col_specs = [
+                    (header_map.get(c.lower()), c.lower() in _EPOCH_MS_COLS)
+                    for c in columns
+                ]
 
-            for row in reader:
-                # Para cada fila, escribe solo las columnas requeridas. Si falta columna o valor, usa cadena vacía.
-                # Si la columna es de tipo TIMESTAMPTZ, se convierte a ISO 8601.
-                writer.writerow([
-                    _epoch_ms_to_iso(row[idx]) if is_epoch and idx is not None and idx < len(row)
-                    else (row[idx] if idx is not None and idx < len(row) else '')
-                    for idx, is_epoch in col_specs
-                ])
-                count += 1
-                # Si el modulo de count con flush_size es igual a 0, se envía el buffer a la base de datos.
-                if count % flush_size == 0:
-                    buffer.seek(0)
-                    cur.copy_expert(copy_sql, buffer)
-                    raw_conn.commit()
-                    # Se reinicia el buffer y el writer para la siguiente carga.
-                    buffer = io.StringIO()
-                    writer = csv.writer(buffer, delimiter='\t', quoting=csv.QUOTE_MINIMAL)
-                    logger.info("  %s — %s filas cargadas...", table_name, f"{count:,}")
-        # Si quedan filas por cargar, se cargan las que quedan en el buffer
-        if buffer.tell() > 0:
-            buffer.seek(0)
-            cur.copy_expert(copy_sql, buffer)
-            raw_conn.commit()
+                for row in reader:
+                    writer.writerow([
+                        _epoch_ms_to_iso(row[idx]) if is_epoch and idx is not None and idx < len(row)
+                        else (row[idx] if idx is not None and idx < len(row) else '')
+                        for idx, is_epoch in col_specs
+                    ])
+                    count += 1
+                    if count % flush_size == 0:
+                        buffer.seek(0)
+                        cur.copy_expert(copy_sql, buffer)
+                        raw_conn.commit()
+                        buffer = io.StringIO()
+                        writer = csv.writer(buffer, delimiter='\t', quoting=csv.QUOTE_MINIMAL)
+                        logger.info("  %s — %s filas cargadas...", table_name, f"{count:,}")
+            if buffer.tell() > 0:
+                buffer.seek(0)
+                cur.copy_expert(copy_sql, buffer)
+                raw_conn.commit()
 
-        logger.info("  %s — carga completa: %s filas totales.", table_name, f"{count:,}")
-    except Exception:
-        raw_conn.rollback()
-        raise
-    finally:
-        # Se resetean los parámetros de sesión orientados a cargas masivas por COPY.
-        if cur is not None:
+            logger.info("  %s — carga completa: %s filas totales.", table_name, f"{count:,}")
+        except Exception:
+            raw_conn.rollback()
+            raise
+        finally:
             cur.execute("RESET synchronous_commit")
             cur.execute("RESET maintenance_work_mem")
             cur.execute("RESET work_mem")
-        raw_conn.close()
 
 
 # -----------------------------------------------------------------------------------------------------
@@ -451,61 +403,34 @@ def data_upload(db, filepath, table_name, columns):
 # -----------------------------------------------------------------------------------------------------
 
 def finalize_sql_table(db, old_name, new_name):
-    # Renombra la columna v_scientificname y la tabla de staging dwc_sql a dwc_integrated
-    # para mantener integridad del flujo definido en main.py.
-    # Tras el RENAME, desactiva autovacuum en la relación (no es por tiempo: persiste hasta un ALTER SET true).
-    # Parámetros:
-    # - db: Conexión al pool de conexiones de PostgreSQL.
-    # - old_name: Nombre de la tabla de staging dwc_sql.
-    # - new_name: Nombre de la tabla integrada dwc_integrated.
-    # Retorna:
-    # - None: No retorna nada.
+    """Renombra la columna v_scientificname → verbatimscientificname, renombra `old_name`
+    a `new_name` y desactiva autovacuum en la tabla resultante. Commit único (atómico)."""
     with db.connect() as conn:
-        logger.info("Ejecutando consulta")
         conn.execute(
-            f'ALTER TABLE "{old_name}" RENAME COLUMN "v_scientificname" TO "verbatimscientificname"'
+            f'ALTER TABLE "{old_name}" '
+            f'RENAME COLUMN "v_scientificname" TO "verbatimscientificname"'
         )
-        conn.commit()
-        logger.info(
-            "Columna renombrada: v_scientificname a verbatimscientificname en %s",
-            old_name,
-        )
-
-        if table_exists(db, new_name):
-            logger.info("Ejecutando consulta")
-            conn.execute(f'DROP TABLE "{new_name}"')
-            conn.commit()
-            logger.info("DROP TABLE existente: %s", new_name)
-        logger.info("Ejecutando consulta")
+        conn.execute(f'DROP TABLE IF EXISTS "{new_name}"')
         conn.execute(f'ALTER TABLE "{old_name}" RENAME TO "{new_name}"')
+        conn.execute(f'ALTER TABLE "{new_name}" SET (autovacuum_enabled = false)')
         conn.commit()
-        logger.info("Ejecutando consulta")
-        conn.execute(
-            f'ALTER TABLE "{new_name}" SET (autovacuum_enabled = false)'
-        )
-        conn.commit()
-    logger.info("Tabla SQL finalizada: %s → %s y autovacuum desactivado", old_name, new_name)
+    logger.info("Tabla SQL finalizada: %s → %s (autovacuum desactivado)", old_name, new_name)
 
 # -----------------------------------------------------------------------------------------------------
 # Creación de índices en las tablas de staging dwc_occurrence y dwc_verbatim
 # -----------------------------------------------------------------------------------------------------
 
 def create_staging_indexes(db, table_names):
-    # Crea un índice en la columna gbifID para facilitar el JOIN entre las tablas de staging.
-    # Parámetros:
-    # - db: Conexión al pool de conexiones de PostgreSQL.
-    # - table_names: Diccionario con los nombres de las tablas de staging dwc_occurrence y dwc_verbatim.
-    # Retorna:
-    # - None: No retorna nada.
+    """Crea índice BTREE en gbifid para `occurrence` y `verbatim` (acelera el JOIN del integrated)."""
     with db.connect() as conn:
+        conn.execute(f"SET maintenance_work_mem = '{_MAINTENANCE_WORK_MEM}'")
+        conn.execute(f"SET max_parallel_maintenance_workers = {_MAX_PARALLEL_MAINTENANCE_WORKERS}")
         for key in ('occurrence', 'verbatim'):
             tname = table_names[key]
             idx_name = f"idx_{tname}_gbifid"
-            logger.info("Ejecutando consulta")
-            conn.execute(f'CREATE INDEX "{idx_name}" ON "{tname}" ("gbifid")')
+            conn.execute(f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON "{tname}" ("gbifid")')
             conn.commit()
             logger.info("Indice creado: %s", idx_name)
-        conn.commit()
 
 
 # -----------------------------------------------------------------------------------------------------
@@ -513,43 +438,30 @@ def create_staging_indexes(db, table_names):
 # -----------------------------------------------------------------------------------------------------
 
 def create_integrated_table(db, table_names):
-    # Se crea la tabla integrada dwc_occurrence_integrated desde las tablas de staging dwc_occurrence y dwc_verbatim
-    # mediante un JOIN por la columna gbifID.
-    # Es equivalente a ejecutar la siguiente consulta:
-    # CREATE TABLE dwc_occurrence_integrated WITH (autovacuum_enabled = false) AS
-    # SELECT o.*, v.*
-    # FROM dwc_occurrence_fecha o
-    # INNER JOIN dwc_verbatim_fecha v ON o.gbifID = v.gbifID;
-    # Parámetros:
-    # - db: Conexión al pool de conexiones de PostgreSQL.
-    # - table_names: Diccionario con los nombres de las tablas de staging dwc_occurrence y dwc_verbatim.
-    # Retorna:
-    # - None: No retorna nada.
+    """Crea `integrated` con JOIN de `occurrence` y `verbatim` por gbifid (autovacuum off).
+
+    ANALYZE previo para que el planner tenga estadísticas frescas tras el COPY.
+    """
     occurrence = table_names['occurrence']
     verbatim = table_names['verbatim']
     integrated = table_names['integrated']
 
-    occurrence_cols = ', '.join(
-        f'o."{c.lower()}"' for c in SIMPLE_COLS
-    )
-    verbatim_cols = ', '.join(
-        f'v."{c.lower()}"' for c in OCURRENCE_COLS if c != 'gbifid'
-    )
-    with db.connect() as conn:
-        if table_exists(db, integrated):
-            logger.info("Ejecutando consulta")
-            conn.execute(f'DROP TABLE "{integrated}"')
-            conn.commit()
-            logger.info("DROP TABLE existente: %s", integrated)
+    occurrence_cols = ', '.join(f'o."{c.lower()}"' for c in SIMPLE_COLS)
+    verbatim_cols = ', '.join(f'v."{c.lower()}"' for c in OCURRENCE_COLS if c != 'gbifid')
 
-        sql = (
-            f'CREATE TABLE "{integrated}" WITH (autovacuum_enabled = false) AS '
-            f'SELECT {occurrence_cols}, {verbatim_cols} '
-            f'FROM "{occurrence}" o '
-            f'INNER JOIN "{verbatim}" v ON o."gbifid" = v."gbifid"'
-        )
-        logger.info("Ejecutando consulta")
-        conn.execute(sql)
+    with db.connect() as conn:
+        conn.execute(f"SET work_mem = '{_WORK_MEM}'")
+        conn.execute(f"SET maintenance_work_mem = '{_MAINTENANCE_WORK_MEM}'")
+        conn.execute("SET max_parallel_workers_per_gather = 4")
+        conn.execute(f'ANALYZE "{occurrence}"')
+        conn.execute(f'ANALYZE "{verbatim}"')
+        conn.execute(f'DROP TABLE IF EXISTS "{integrated}"')
+        conn.execute(f"""
+            CREATE TABLE "{integrated}" WITH (autovacuum_enabled = false) AS
+            SELECT {occurrence_cols}, {verbatim_cols}
+            FROM "{occurrence}" o
+            INNER JOIN "{verbatim}" v ON o."gbifid" = v."gbifid"
+        """)
         conn.commit()
     logger.info("Tabla integrada creada: %s", integrated)
 
@@ -558,17 +470,9 @@ def create_integrated_table(db, table_names):
 # -----------------------------------------------------------------------------------------------------
 
 def fill_species_from_scientificname(db, table_name):
-    # Se llena el campo species con las dos primeras palabras de scientificname cuando taxonrank es
-    # SPECIES (valor típico de GBIF) y species es nulo o vacío.
-    # Es equivalente a ejecutar la siguiente consulta:
-    # UPDATE "dwc_integrated_{fecha}}" SET "species" = TRIM(split_part("scientificname", ' ', 1) || ' ' || split_part("scientificname", ' ', 2)) WHERE "taxonrank" = 'SPECIES' AND ("species" IS NULL OR TRIM("species") = '')
-    # Parámetros:   
-    # - db: Conexión al pool de conexiones de PostgreSQL.
-    # - table_name: Nombre de la tabla integrada dwc_integrated.
-    # Retorna:
-    # - None: No retorna nada.
+    """Rellena species con las dos primeras palabras de scientificname cuando taxonrank='SPECIES'
+    y species está vacío."""
     with db.connect() as conn:
-        logger.info("Ejecutando consulta")
         result = conn.execute(f"""
             UPDATE "{table_name}"
             SET "species" = TRIM(
@@ -576,12 +480,15 @@ def fill_species_from_scientificname(db, table_name):
                 split_part("scientificname", ' ', 2)
             )
             WHERE "taxonrank" = 'SPECIES'
-            AND "scientificname" IS NOT NULL
-            AND TRIM("scientificname") <> ''
-            AND ("species" IS NULL OR TRIM("species") = '');
-            """)
+              AND "scientificname" IS NOT NULL
+              AND TRIM("scientificname") <> ''
+              AND ("species" IS NULL OR TRIM("species") = '')
+        """)
         conn.commit()
-    logger.info("Campo species completado desde scientificname en %s (%s filas)", table_name, f"{result.rowcount:,}")
+    logger.info(
+        "Campo species completado desde scientificname en %s (%s filas)",
+        table_name, f"{result.rowcount:,}",
+    )
 
 
 # -----------------------------------------------------------------------------------------------------
@@ -589,67 +496,15 @@ def fill_species_from_scientificname(db, table_name):
 # -----------------------------------------------------------------------------------------------------
 
 def normalize_integrated_country(db, table_name):
-    # Añade si hace falta el campo country y lo rellena desde countrycode: ISO CO (insensible a mayúsculas
-    # y espacios) → 'Colombia'; cualquier otro código o vacío → NULL. Actualización por lotes sobre gbifid
-    # para tablas muy grandes (p. ej. decenas de millones de filas).
-    integrated = table_name
-    batch_size = UPDATE_BATCH_SIZE
-    total = 0
+    """Añade la columna `country` con DEFAULT 'Colombia'. Se puede usar este enfoque ya que
+    todo registro descargado de GBIF tiene condición countrycode='CO'."""
     with db.connect() as conn:
-        logger.info("Ejecutando consulta")
         conn.execute(
-            f'ALTER TABLE "{integrated}" '
-            f'ADD COLUMN IF NOT EXISTS "country" TEXT'
+            f'ALTER TABLE "{table_name}" '
+            f"ADD COLUMN IF NOT EXISTS \"country\" TEXT DEFAULT 'Colombia'"
         )
         conn.commit()
-
-        last_gbifid = 0
-        while True:
-            logger.info("Ejecutando consulta")
-            result = conn.execute(
-                f'WITH batch AS ('
-                f'    SELECT i.ctid '
-                f'    FROM "{integrated}" i '
-                f'    WHERE i."gbifid" > %s '
-                f'    ORDER BY i."gbifid" '
-                f'    LIMIT {batch_size}'
-                f') '
-                f'UPDATE "{integrated}" i SET '
-                f'  "country" = CASE '
-                f'    WHEN UPPER(BTRIM(COALESCE(i."countrycode", \'\'))) = \'CO\' '
-                f"    THEN 'Colombia' "
-                f'    ELSE NULL '
-                f'  END '
-                f'FROM batch b '
-                f'WHERE i.ctid = b.ctid '
-                f'RETURNING i."gbifid"',
-                (last_gbifid,),
-            )
-            conn.commit()
-            batch_n = result.rowcount
-            id_rows = result.fetchall()
-            if batch_n == 0:
-                break
-            last_gbifid = max(r[0] for r in id_rows)
-            conn.commit()
-            total += batch_n
-            logger.info(
-                "normalize_integrated_country batch en %s: %s filas (total %s, hasta gbifid=%s)",
-                integrated,
-                f"{batch_n:,}",
-                f"{total:,}",
-                last_gbifid,
-            )
-        logger.info(
-            "Campo country normalizado en %s (%s filas; lotes de %s)",
-            integrated,
-            f"{total:,}",
-            f"{batch_size:,}",
-        )
-
-    logger.info("Ejecutando vacuum analyze")
-    _run_table_maintenance(db, integrated)
-    logger.info("VACUUM (ANALYZE) en %s tras actualización masiva de country", integrated)
+    logger.info("Columna country añadida con DEFAULT 'Colombia' en %s", table_name)
 
 
 # -----------------------------------------------------------------------------------------------------
@@ -689,14 +544,14 @@ def link_taxonrank_reference(db, table_name):
         # Actualización en una sola pasada: suele escalar mejor que re-escanear por lotes
         # cuando el catálogo de referencia (taxonomic_taxon_rank) es pequeño.
         logger.info("Ejecutando consulta")
-        result = conn.execute(
-            f'UPDATE "{integrated}" i '
-            f'SET "taxonrank_id" = t."id" '
-            f'FROM "taxonomic_taxon_rank" t '
-            f'WHERE i."taxonrank" = t."taxonrank" '
-            f'AND i."taxonrank_id" IS NULL '
-            f'AND i."taxonrank" IS NOT NULL'
-        )
+        result = conn.execute(f"""
+            UPDATE "{integrated}" i
+            SET "taxonrank_id" = t."id"
+            FROM "taxonomic_taxon_rank" t
+            WHERE i."taxonrank" = t."taxonrank"
+              AND i."taxonrank_id" IS NULL
+              AND i."taxonrank" IS NOT NULL
+        """)
         conn.commit()
         total_updated = result.rowcount
         conn.commit()
@@ -721,13 +576,15 @@ def link_taxonrank_reference(db, table_name):
         conn.commit()
         logger.info("Ejecutando consulta")
         conn.execute(
-            f'ALTER TABLE "{integrated}" '
-            f'ADD CONSTRAINT "{fk_name}" '
-            f'FOREIGN KEY ("taxonrank_id") '
-            f'REFERENCES "taxonomic_taxon_rank" ("id") '
-            f'ON UPDATE CASCADE '
-            f'ON DELETE SET NULL '
-            f'NOT VALID'
+            f"""
+            ALTER TABLE "{integrated}"
+            ADD CONSTRAINT "{fk_name}"
+            FOREIGN KEY ("taxonrank_id")
+            REFERENCES "taxonomic_taxon_rank" ("id")
+            ON UPDATE CASCADE
+            ON DELETE SET NULL
+            NOT VALID
+            """
         )
         conn.commit()
         logger.info("Ejecutando consulta")
@@ -753,22 +610,16 @@ def link_taxonrank_reference(db, table_name):
 # -----------------------------------------------------------------------------------------------------
 
 def add_gbifid_index(db, table_name):
-    # Prepara estructura base en la integrada (PK sobre gbifid).
-    # Parámetros:
-    # - db: Conexión al pool de conexiones de PostgreSQL.
-    # - table_name: Nombre de la tabla integrada dwc_integrated.
-    # Retorna:
-    # - None: No retorna nada.
+    """Añade PRIMARY KEY sobre gbifid en la tabla integrada."""
     integrated = table_name
+    pk_name = f"pk_{integrated}_gbifid"
     with db.connect() as conn:
-        # Se agrega la Primary Key a la columna gbifid de la integrada
-        logger.info("Ejecutando consulta")
-        conn.execute(
-            f'ALTER TABLE "{integrated}" ADD PRIMARY KEY ("gbifid")'
-        )
+        conn.execute(f"SET maintenance_work_mem = '{_MAINTENANCE_WORK_MEM}'")
+        conn.execute(f"SET max_parallel_maintenance_workers = {_MAX_PARALLEL_MAINTENANCE_WORKERS}")
+        conn.execute(f'ALTER TABLE "{integrated}" DROP CONSTRAINT IF EXISTS "{pk_name}"')
+        conn.execute(f'ALTER TABLE "{integrated}" ADD CONSTRAINT "{pk_name}" PRIMARY KEY ("gbifid")')
         conn.commit()
-        logger.info("PK a campo gbifid agregada a %s", integrated)
-        conn.commit()
+    logger.info("PK %s agregada en %s", pk_name, integrated)
 
 # --------------------------------------------------------------------------------------------------------------------------------------
 # Cruces espaciales con la tabla MGN_ADM_MPIO_2025 (división político-administrativa) e Invemar_maritime_regions (regiones marítimas)
@@ -791,21 +642,21 @@ def spatials_joins(db, table_name):
         total_mgn = 0
         while True:
             logger.info("Ejecutando consulta")
-            result = conn.execute(
-                f'WITH batch AS ('
-                f'    SELECT ctid '
-                f'    FROM "geo_locality_validation" '
-                f'    WHERE geom IS NOT NULL '
-                f'      AND "stateprovincemgn" IS NULL '
-                f'    LIMIT {batch_size}'
-                f') '
-                f'UPDATE "geo_locality_validation" i '
-                f'SET "stateprovincemgn" = m."dpto_cnmbr", '
-                f'    "countymgn" = m."mpio_cnmbr" '
-                f'FROM batch b, "MGN_ADM_MPIO_2025" m '
-                f'WHERE i.ctid = b.ctid '
-                f'AND ST_Intersects(i.geom, m.geom)'
-            )
+            result = conn.execute(f"""
+                WITH batch AS (
+                    SELECT ctid
+                    FROM "geo_locality_validation"
+                    WHERE geom IS NOT NULL
+                      AND "stateprovincemgn" IS NULL
+                    LIMIT {batch_size}
+                )
+                UPDATE "geo_locality_validation" i
+                SET "stateprovincemgn" = m."dpto_cnmbr",
+                    "countymgn"        = m."mpio_cnmbr"
+                FROM batch b, "MGN_ADM_MPIO_2025" m
+                WHERE i.ctid = b.ctid
+                  AND ST_Intersects(i.geom, m.geom)
+            """)
             conn.commit()
             batch_updated = result.rowcount
             conn.commit()
@@ -818,21 +669,21 @@ def spatials_joins(db, table_name):
         total_invemar = 0
         while True:
             logger.info("Ejecutando consulta")
-            result = conn.execute(
-                f'WITH batch AS ('
-                f'    SELECT ctid '
-                f'    FROM "geo_locality_validation" '
-                f'    WHERE geom IS NOT NULL '
-                f'      AND "countymgn" IS NULL '
-                f'      AND "maritimeregion" IS NULL '
-                f'    LIMIT {batch_size}'
-                f') '
-                f'UPDATE "geo_locality_validation" i '
-                f'SET "maritimeregion" = m."DESCRIP" '
-                f'FROM batch b, "INVEMAR_MARITIME_REGIONS" m '
-                f'WHERE i.ctid = b.ctid '
-                f'AND ST_Intersects(i.geom, m.geom)'
-            )
+            result = conn.execute(f"""
+                WITH batch AS (
+                    SELECT ctid
+                    FROM "geo_locality_validation"
+                    WHERE geom IS NOT NULL
+                      AND "countymgn" IS NULL
+                      AND "maritimeregion" IS NULL
+                    LIMIT {batch_size}
+                )
+                UPDATE "geo_locality_validation" i
+                SET "maritimeregion" = m."DESCRIP"
+                FROM batch b, "INVEMAR_MARITIME_REGIONS" m
+                WHERE i.ctid = b.ctid
+                  AND ST_Intersects(i.geom, m.geom)
+            """)
             conn.commit()
             batch_updated = result.rowcount
             conn.commit()
@@ -845,20 +696,20 @@ def spatials_joins(db, table_name):
         total_narino = 0
         while True:
             logger.info("Ejecutando consulta")
-            result = conn.execute(
-                f'WITH batch AS ('
-                f'    SELECT ctid '
-                f'    FROM "geo_locality_validation" '
-                f'    WHERE geom IS NOT NULL '
-                f'      AND "narinomaritimeregion" IS NULL '
-                f'    LIMIT {batch_size}'
-                f') '
-                f'UPDATE "geo_locality_validation" i '
-                f'SET "narinomaritimeregion" = m."Nombre" '
-                f'FROM batch b, "NARINO_MARITIME_REGION" m '
-                f'WHERE i.ctid = b.ctid '
-                f'AND ST_Intersects(i.geom, m.geom)'
-            )
+            result = conn.execute(f"""
+                WITH batch AS (
+                    SELECT ctid
+                    FROM "geo_locality_validation"
+                    WHERE geom IS NOT NULL
+                      AND "narinomaritimeregion" IS NULL
+                    LIMIT {batch_size}
+                )
+                UPDATE "geo_locality_validation" i
+                SET "narinomaritimeregion" = m."Nombre"
+                FROM batch b, "NARINO_MARITIME_REGION" m
+                WHERE i.ctid = b.ctid
+                  AND ST_Intersects(i.geom, m.geom)
+            """)
             conn.commit()
             batch_updated = result.rowcount
             conn.commit()
@@ -877,11 +728,12 @@ def spatials_joins(db, table_name):
                 expr = f"REPLACE({expr}, '{word}', '{word.lower()}')"
 
             logger.info("Ejecutando consulta")
-            conn.execute(
-                f'UPDATE "geo_locality_validation" SET "{col}" = {expr} '
-                f'WHERE "{col}" IS NOT NULL '
-                f'AND "{col}" IS DISTINCT FROM {expr}'
-            )
+            conn.execute(f"""
+                UPDATE "geo_locality_validation"
+                SET "{col}" = {expr}
+                WHERE "{col}" IS NOT NULL
+                  AND "{col}" IS DISTINCT FROM {expr}
+            """)
             conn.commit()
 
             logger.info("INITCAP con estandarizaciones de nombres aplicado a %s en %s", col, "geo_locality_validation")
@@ -891,12 +743,12 @@ def spatials_joins(db, table_name):
         # Santiago de Cali -> Cali
 
         logger.info("Ejecutando consulta")
-        conn.execute(
-            f'UPDATE "geo_locality_validation" '
-            f'SET "stateprovincemgn" = \'Bogotá, D. C.\', '
-            f'    "countymgn" = \'Bogotá, D. C.\' '
-            f'WHERE "stateprovincemgn" = \'Bogotá, D.C.\' '
-        )
+        conn.execute("""
+            UPDATE "geo_locality_validation"
+            SET "stateprovincemgn" = 'Bogotá, D. C.',
+                "countymgn"        = 'Bogotá, D. C.'
+            WHERE "stateprovincemgn" = 'Bogotá, D.C.'
+        """)
         conn.commit()
 
         logger.info("Reemplazos manuales para mantener consistencia con la salida de sintesis de cifras de biodiversidad completados en %s", "geo_locality_validation")
@@ -921,25 +773,25 @@ def normalize_stateprovince_county(db, table_name):
         total_v1 = 0
         while True:
             logger.info("Ejecutando consulta")
-            result = conn.execute(
-                f'WITH candidates AS ('
-                f'    SELECT DISTINCT i.ctid '
-                f'    FROM "{locality}" i '
-                f'    INNER JOIN "geo_stateprovince_validation" a '
-                f'      ON UPPER(TRIM(i."stateprovince")) = UPPER(TRIM(a."originalstateprovince")) '
-                f'    INNER JOIN "geo_master_geography" d ON d."id" = a."geo_master_geography_id" '
-                f'    WHERE i."stateprovincevalidated" IS NULL '
-                f'      AND a."geo_master_geography_id" IS NOT NULL'
-                f'), batch AS ('
-                f'    SELECT ctid FROM candidates LIMIT {batch_size}'
-                f') '
-                f'UPDATE "{locality}" i '
-                f'SET "stateprovincevalidated" = TRIM(d."name") '
-                f'FROM batch b, "geo_stateprovince_validation" a, "geo_master_geography" d '
-                f'WHERE i.ctid = b.ctid '
-                f'AND UPPER(TRIM(i."stateprovince")) = UPPER(TRIM(a."originalstateprovince")) '
-                f'AND d."id" = a."geo_master_geography_id"'
-            )
+            result = conn.execute(f"""
+                WITH candidates AS (
+                    SELECT DISTINCT i.ctid
+                    FROM "{locality}" i
+                    INNER JOIN "geo_stateprovince_validation" a
+                      ON UPPER(TRIM(i."stateprovince")) = UPPER(TRIM(a."originalstateprovince"))
+                    INNER JOIN "geo_master_geography" d ON d."id" = a."geo_master_geography_id"
+                    WHERE i."stateprovincevalidated" IS NULL
+                      AND a."geo_master_geography_id" IS NOT NULL
+                ), batch AS (
+                    SELECT ctid FROM candidates LIMIT {batch_size}
+                )
+                UPDATE "{locality}" i
+                SET "stateprovincevalidated" = TRIM(d."name")
+                FROM batch b, "geo_stateprovince_validation" a, "geo_master_geography" d
+                WHERE i.ctid = b.ctid
+                  AND UPPER(TRIM(i."stateprovince")) = UPPER(TRIM(a."originalstateprovince"))
+                  AND d."id" = a."geo_master_geography_id"
+            """)
             conn.commit()
             n = result.rowcount
             conn.commit()
@@ -962,19 +814,19 @@ def normalize_stateprovince_county(db, table_name):
         total_v2 = 0
         while True:
             logger.info("Ejecutando consulta")
-            result = conn.execute(
-                f'WITH batch AS ('
-                f'    SELECT ctid '
-                f'    FROM "{locality}" '
-                f'    WHERE BTRIM(COALESCE("narinomaritimeregion", \'\')) <> \'\' '
-                f'      AND "stateprovincevalidated" IS DISTINCT FROM \'Nariño\' '
-                f'    LIMIT {batch_size}'
-                f') '
-                f'UPDATE "{locality}" t '
-                f'SET "stateprovincevalidated" = \'Nariño\' '
-                f'FROM batch b '
-                f'WHERE t.ctid = b.ctid'
-            )
+            result = conn.execute(f"""
+                WITH batch AS (
+                    SELECT ctid
+                    FROM "{locality}"
+                    WHERE BTRIM(COALESCE("narinomaritimeregion", '')) <> ''
+                      AND "stateprovincevalidated" IS DISTINCT FROM 'Nariño'
+                    LIMIT {batch_size}
+                )
+                UPDATE "{locality}" t
+                SET "stateprovincevalidated" = 'Nariño'
+                FROM batch b
+                WHERE t.ctid = b.ctid
+            """)
             conn.commit()
             n = result.rowcount
             conn.commit()
@@ -997,20 +849,20 @@ def normalize_stateprovince_county(db, table_name):
         total_v3 = 0
         while True:
             logger.info("Ejecutando consulta")
-            result = conn.execute(
-                f'WITH batch AS ('
-                f'    SELECT ctid '
-                f'    FROM "{locality}" '
-                f'    WHERE "stateprovincemgn" IS NOT NULL '
-                f'      AND "stateprovincevalidated" IS NULL '
-                f'      AND "stateprovince" IS NULL '
-                f'    LIMIT {batch_size}'
-                f') '
-                f'UPDATE "{locality}" i '
-                f'SET "stateprovincevalidated" = TRIM(i."stateprovincemgn") '
-                f'FROM batch b '
-                f'WHERE i.ctid = b.ctid'
-            )
+            result = conn.execute(f"""
+                WITH batch AS (
+                    SELECT ctid
+                    FROM "{locality}"
+                    WHERE "stateprovincemgn" IS NOT NULL
+                      AND "stateprovincevalidated" IS NULL
+                      AND "stateprovince" IS NULL
+                    LIMIT {batch_size}
+                )
+                UPDATE "{locality}" i
+                SET "stateprovincevalidated" = TRIM(i."stateprovincemgn")
+                FROM batch b
+                WHERE i.ctid = b.ctid
+            """)
             conn.commit()
             n = result.rowcount
             conn.commit()
@@ -1034,24 +886,24 @@ def normalize_stateprovince_county(db, table_name):
         total_county_v1 = 0
         while True:
             logger.info("Ejecutando consulta")
-            result = conn.execute(
-                f'WITH candidates AS ('
-                f'    SELECT DISTINCT i.ctid '
-                f'    FROM "{locality}" i '
-                f'    INNER JOIN "geo_county_validation" c '
-                f'      ON UPPER(TRIM(i."county")) = UPPER(TRIM(c."originalcounty")) '
-                f'    WHERE i."countyvalidated" IS NULL '
-                f'      AND i."county" IS NOT NULL '
-                f'      AND c."revisedcounty" IS NOT NULL'
-                f'), batch AS ('
-                f'    SELECT ctid FROM candidates LIMIT {batch_size}'
-                f') '
-                f'UPDATE "{locality}" i '
-                f'SET "countyvalidated" = TRIM(c."revisedcounty") '
-                f'FROM batch b, "geo_county_validation" c '
-                f'WHERE i.ctid = b.ctid '
-                f'AND UPPER(TRIM(i."county")) = UPPER(TRIM(c."originalcounty"))'
-            )
+            result = conn.execute(f"""
+                WITH candidates AS (
+                    SELECT DISTINCT i.ctid
+                    FROM "{locality}" i
+                    INNER JOIN "geo_county_validation" c
+                      ON UPPER(TRIM(i."county")) = UPPER(TRIM(c."originalcounty"))
+                    WHERE i."countyvalidated" IS NULL
+                      AND i."county" IS NOT NULL
+                      AND c."revisedcounty" IS NOT NULL
+                ), batch AS (
+                    SELECT ctid FROM candidates LIMIT {batch_size}
+                )
+                UPDATE "{locality}" i
+                SET "countyvalidated" = TRIM(c."revisedcounty")
+                FROM batch b, "geo_county_validation" c
+                WHERE i.ctid = b.ctid
+                  AND UPPER(TRIM(i."county")) = UPPER(TRIM(c."originalcounty"))
+            """)
             conn.commit()
             n = result.rowcount
             conn.commit()
@@ -1074,19 +926,19 @@ def normalize_stateprovince_county(db, table_name):
         total_county_v2 = 0
         while True:
             logger.info("Ejecutando consulta")
-            result = conn.execute(
-                f'WITH batch AS ('
-                f'    SELECT ctid '
-                f'    FROM "{locality}" '
-                f'    WHERE "countymgn" IS NOT NULL '
-                f'      AND "countyvalidated" IS NULL '
-                f'    LIMIT {batch_size}'
-                f') '
-                f'UPDATE "{locality}" i '
-                f'SET "countyvalidated" = TRIM(i."countymgn") '
-                f'FROM batch b '
-                f'WHERE i.ctid = b.ctid'
-            )
+            result = conn.execute(f"""
+                WITH batch AS (
+                    SELECT ctid
+                    FROM "{locality}"
+                    WHERE "countymgn" IS NOT NULL
+                      AND "countyvalidated" IS NULL
+                    LIMIT {batch_size}
+                )
+                UPDATE "{locality}" i
+                SET "countyvalidated" = TRIM(i."countymgn")
+                FROM batch b
+                WHERE i.ctid = b.ctid
+            """)
             conn.commit()
             n = result.rowcount
             conn.commit()
@@ -1108,40 +960,40 @@ def normalize_stateprovince_county(db, table_name):
         # Validación 3 (municipio): pareja (stateprovincevalidated, countyvalidated) debe existir en DIVIPOLA.
         # Dos pasos: (3a) sustituir por countymgn si MGN coincide con depto validado y la pareja MGN es válida;
         # (3b) NULL al resto con pareja inválida. Evita CASE + EXISTS duplicado y el bucle infinito.
-        _invalid_county_pair = (
-            f'NULLIF(BTRIM(i."countyvalidated"), \'\') IS NOT NULL '
-            f'AND NOT EXISTS ('
-            f'    SELECT 1 FROM "geo_master_geography" m '
-            f'    INNER JOIN "geo_master_geography" d ON d."id" = m."parent_id" '
-            f'    WHERE m."subtype" = \'municipio\' '
-            f'      AND UPPER(TRIM(m."name")) = UPPER(TRIM(i."countyvalidated")) '
-            f'      AND UPPER(TRIM(d."name")) = UPPER(TRIM(i."stateprovincevalidated"))'
-            f')'
-        )
+        _invalid_county_pair = """
+            NULLIF(BTRIM(i."countyvalidated"), '') IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM "geo_master_geography" m
+                INNER JOIN "geo_master_geography" d ON d."id" = m."parent_id"
+                WHERE m."subtype" = 'municipio'
+                  AND UPPER(TRIM(m."name")) = UPPER(TRIM(i."countyvalidated"))
+                  AND UPPER(TRIM(d."name")) = UPPER(TRIM(i."stateprovincevalidated"))
+            )
+        """
         total_county_v3 = 0
         while True:
             logger.info("Ejecutando consulta")
-            result = conn.execute(
-                f'WITH batch AS ('
-                f'    SELECT i.ctid '
-                f'    FROM "{locality}" i '
-                f'    INNER JOIN "geo_master_geography" m '
-                f'      ON m."subtype" = \'municipio\' '
-                f'     AND UPPER(TRIM(m."name")) = UPPER(TRIM(i."countymgn")) '
-                f'    INNER JOIN "geo_master_geography" d '
-                f'      ON d."id" = m."parent_id" '
-                f'     AND UPPER(TRIM(d."name")) = UPPER(TRIM(i."stateprovincevalidated")) '
-                f'    WHERE {_invalid_county_pair} '
-                f'      AND NULLIF(BTRIM(i."countymgn"), \'\') IS NOT NULL '
-                f'      AND UPPER(TRIM(COALESCE(i."stateprovincemgn", \'\'))) = '
-                f'          UPPER(TRIM(COALESCE(i."stateprovincevalidated", \'\'))) '
-                f'    LIMIT {batch_size}'
-                f') '
-                f'UPDATE "{locality}" i '
-                f'SET "countyvalidated" = TRIM(i."countymgn") '
-                f'FROM batch b '
-                f'WHERE i.ctid = b.ctid'
-            )
+            result = conn.execute(f"""
+                WITH batch AS (
+                    SELECT i.ctid
+                    FROM "{locality}" i
+                    INNER JOIN "geo_master_geography" m
+                      ON m."subtype" = 'municipio'
+                     AND UPPER(TRIM(m."name")) = UPPER(TRIM(i."countymgn"))
+                    INNER JOIN "geo_master_geography" d
+                      ON d."id" = m."parent_id"
+                     AND UPPER(TRIM(d."name")) = UPPER(TRIM(i."stateprovincevalidated"))
+                    WHERE {_invalid_county_pair}
+                      AND NULLIF(BTRIM(i."countymgn"), '') IS NOT NULL
+                      AND UPPER(TRIM(COALESCE(i."stateprovincemgn", ''))) =
+                          UPPER(TRIM(COALESCE(i."stateprovincevalidated", '')))
+                    LIMIT {batch_size}
+                )
+                UPDATE "{locality}" i
+                SET "countyvalidated" = TRIM(i."countymgn")
+                FROM batch b
+                WHERE i.ctid = b.ctid
+            """)
             conn.commit()
             n = result.rowcount
             conn.commit()
@@ -1156,18 +1008,18 @@ def normalize_stateprovince_county(db, table_name):
             )
         while True:
             logger.info("Ejecutando consulta")
-            result = conn.execute(
-                f'WITH batch AS ('
-                f'    SELECT i.ctid '
-                f'    FROM "{locality}" i '
-                f'    WHERE {_invalid_county_pair} '
-                f'    LIMIT {batch_size}'
-                f') '
-                f'UPDATE "{locality}" i '
-                f'SET "countyvalidated" = NULL '
-                f'FROM batch b '
-                f'WHERE i.ctid = b.ctid'
-            )
+            result = conn.execute(f"""
+                WITH batch AS (
+                    SELECT i.ctid
+                    FROM "{locality}" i
+                    WHERE {_invalid_county_pair}
+                    LIMIT {batch_size}
+                )
+                UPDATE "{locality}" i
+                SET "countyvalidated" = NULL
+                FROM batch b
+                WHERE i.ctid = b.ctid
+            """)
             conn.commit()
             n = result.rowcount
             conn.commit()
@@ -1193,26 +1045,26 @@ def normalize_stateprovince_county(db, table_name):
         total_geo_divipola_municipio = 0
         while True:
             logger.info("Ejecutando consulta")
-            result = conn.execute(
-                f'WITH batch AS ('
-                f'    SELECT i.ctid, m."id" AS geo_master_geography_id '
-                f'    FROM "{locality}" i '
-                f'    INNER JOIN "geo_master_geography" m '
-                f'      ON m."subtype" = \'municipio\' '
-                f'     AND UPPER(TRIM(m."name")) = UPPER(TRIM(i."countyvalidated")) '
-                f'    INNER JOIN "geo_master_geography" d '
-                f'      ON d."id" = m."parent_id" '
-                f'     AND UPPER(TRIM(d."name")) = UPPER(TRIM(i."stateprovincevalidated")) '
-                f'    WHERE NULLIF(BTRIM(i."stateprovincevalidated"), \'\') IS NOT NULL '
-                f'      AND NULLIF(BTRIM(i."countyvalidated"), \'\') IS NOT NULL '
-                f'      AND i."geo_master_geography_id" IS DISTINCT FROM m."id" '
-                f'    LIMIT {batch_size}'
-                f') '
-                f'UPDATE "{locality}" i '
-                f'SET "geo_master_geography_id" = b.geo_master_geography_id '
-                f'FROM batch b '
-                f'WHERE i.ctid = b.ctid'
-            )
+            result = conn.execute(f"""
+                WITH batch AS (
+                    SELECT i.ctid, m."id" AS geo_master_geography_id
+                    FROM "{locality}" i
+                    INNER JOIN "geo_master_geography" m
+                      ON m."subtype" = 'municipio'
+                     AND UPPER(TRIM(m."name")) = UPPER(TRIM(i."countyvalidated"))
+                    INNER JOIN "geo_master_geography" d
+                      ON d."id" = m."parent_id"
+                     AND UPPER(TRIM(d."name")) = UPPER(TRIM(i."stateprovincevalidated"))
+                    WHERE NULLIF(BTRIM(i."stateprovincevalidated"), '') IS NOT NULL
+                      AND NULLIF(BTRIM(i."countyvalidated"), '') IS NOT NULL
+                      AND i."geo_master_geography_id" IS DISTINCT FROM m."id"
+                    LIMIT {batch_size}
+                )
+                UPDATE "{locality}" i
+                SET "geo_master_geography_id" = b.geo_master_geography_id
+                FROM batch b
+                WHERE i.ctid = b.ctid
+            """)
             conn.commit()
             n = result.rowcount
             conn.commit()
@@ -1235,23 +1087,23 @@ def normalize_stateprovince_county(db, table_name):
         total_geo_divipola_departamento = 0
         while True:
             logger.info("Ejecutando consulta")
-            result = conn.execute(
-                f'WITH batch AS ('
-                f'    SELECT i.ctid, d."id" AS geo_master_geography_id '
-                f'    FROM "{locality}" i '
-                f'    INNER JOIN "geo_master_geography" d '
-                f'      ON d."subtype" = \'departamento\' '
-                f'     AND UPPER(TRIM(d."name")) = UPPER(TRIM(i."stateprovincevalidated")) '
-                f'    WHERE NULLIF(BTRIM(i."stateprovincevalidated"), \'\') IS NOT NULL '
-                f'      AND NULLIF(BTRIM(i."countyvalidated"), \'\') IS NULL '
-                f'      AND i."geo_master_geography_id" IS DISTINCT FROM d."id" '
-                f'    LIMIT {batch_size}'
-                f') '
-                f'UPDATE "{locality}" i '
-                f'SET "geo_master_geography_id" = b.geo_master_geography_id '
-                f'FROM batch b '
-                f'WHERE i.ctid = b.ctid'
-            )
+            result = conn.execute(f"""
+                WITH batch AS (
+                    SELECT i.ctid, d."id" AS geo_master_geography_id
+                    FROM "{locality}" i
+                    INNER JOIN "geo_master_geography" d
+                      ON d."subtype" = 'departamento'
+                     AND UPPER(TRIM(d."name")) = UPPER(TRIM(i."stateprovincevalidated"))
+                    WHERE NULLIF(BTRIM(i."stateprovincevalidated"), '') IS NOT NULL
+                      AND NULLIF(BTRIM(i."countyvalidated"), '') IS NULL
+                      AND i."geo_master_geography_id" IS DISTINCT FROM d."id"
+                    LIMIT {batch_size}
+                )
+                UPDATE "{locality}" i
+                SET "geo_master_geography_id" = b.geo_master_geography_id
+                FROM batch b
+                WHERE i.ctid = b.ctid
+            """)
             conn.commit()
             n = result.rowcount
             conn.commit()
@@ -1301,47 +1153,47 @@ def validate_taxonomic_species(db, table_name):
 
     with db.connect() as conn:
         logger.info("Ejecutando consulta")
-        conn.execute(
-            f'CREATE TABLE "{species_tbl}" ('
-            f'  "id" SERIAL PRIMARY KEY, '
-            f'  "kingdom" TEXT, '
-            f'  "phylum" TEXT, '
-            f'  "class" TEXT, '
-            f'  "order" TEXT, '
-            f'  "family" TEXT, '
-            f'  "genus" TEXT, '
-            f'  "species" TEXT NOT NULL, '
-            f'  "cites" TEXT, '
-            f'  "threatstatusuicn" TEXT, '
-            f'  "threatstatusmads" TEXT, '
-            f'  "exotic" TEXT, '
-            f'  "exoticriskinvasion" TEXT, '
-            f'  "invasiveness" TEXT, '
-            f'  "invasive" TEXT, '
-            f'  "transplanted" TEXT, '
-            f'  "migratory" TEXT, '
-            f'  "endemic" TEXT, '
-            f'  "referencelist" TEXT, '
-            f'  "flagtaxo" TEXT, '
-            f'  CONSTRAINT "uq_{species_tbl}_species" UNIQUE ("species")'
-            f')'
-        )
+        conn.execute(f"""
+            CREATE TABLE "{species_tbl}" (
+                "id"                 SERIAL PRIMARY KEY,
+                "kingdom"            TEXT,
+                "phylum"             TEXT,
+                "class"              TEXT,
+                "order"              TEXT,
+                "family"             TEXT,
+                "genus"              TEXT,
+                "species"            TEXT NOT NULL,
+                "cites"              TEXT,
+                "threatstatusuicn"   TEXT,
+                "threatstatusmads"   TEXT,
+                "exotic"             TEXT,
+                "exoticriskinvasion" TEXT,
+                "invasiveness"       TEXT,
+                "invasive"           TEXT,
+                "transplanted"       TEXT,
+                "migratory"          TEXT,
+                "endemic"            TEXT,
+                "referencelist"      TEXT,
+                "flagtaxo"           TEXT,
+                CONSTRAINT "uq_{species_tbl}_species" UNIQUE ("species")
+            )
+        """)
         conn.commit()
         logger.info("Tabla de validación taxonómica por especie creada: %s", species_tbl)
 
         logger.info("Ejecutando consulta")
-        conn.execute(
-            f'INSERT INTO "{species_tbl}" ('
-            f'  "kingdom", "phylum", "class", "order", "family", '
-            f'  "genus", "species"'
-            f') '
-            f'SELECT DISTINCT ON (i."species") '
-            f'  i."kingdom", i."phylum", i."class", i."order", i."family", '
-            f'  i."genus", i."species" '
-            f'FROM "{integrated}" i '
-            f'WHERE i."species" IS NOT NULL AND BTRIM(i."species") <> \'\' '
-            f'ORDER BY i."species", i."gbifid"'
-        )
+        conn.execute(f"""
+            INSERT INTO "{species_tbl}" (
+                "kingdom", "phylum", "class", "order", "family",
+                "genus", "species"
+            )
+            SELECT DISTINCT ON (i."species")
+                i."kingdom", i."phylum", i."class", i."order", i."family",
+                i."genus", i."species"
+            FROM "{integrated}" i
+            WHERE i."species" IS NOT NULL AND BTRIM(i."species") <> ''
+            ORDER BY i."species", i."gbifid"
+        """)
         conn.commit()
         logger.info(
             "Catálogo taxonómico %s poblado desde %s",
@@ -1370,31 +1222,31 @@ def link_integrated_taxonomic_species_id(db, table_name):
         conn.commit()
 
         logger.info("Ejecutando consulta")
-        conn.execute(
-            f'CREATE INDEX IF NOT EXISTS "{pending_idx}" '
-            f'ON "{integrated}" ("species") '
-            f'WHERE "taxonomic_species_id" IS NULL '
-            f'  AND "species" IS NOT NULL '
-            f'  AND BTRIM("species") <> \'\''
-        )
+        conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS "{pending_idx}"
+            ON "{integrated}" ("species")
+            WHERE "taxonomic_species_id" IS NULL
+              AND "species" IS NOT NULL
+              AND BTRIM("species") <> ''
+        """)
         conn.commit()
         logger.info("Indice parcial creado: %s", pending_idx)
 
         while True:
             logger.info("Ejecutando consulta")
-            result = conn.execute(
-                f'WITH batch AS ('
-                f'    SELECT i.ctid, s.id AS taxonomic_species_id '
-                f'    FROM "{integrated}" i '
-                f'    INNER JOIN "{species_tbl}" s ON i."species" = s."species" '
-                f'    WHERE i."taxonomic_species_id" IS NULL '
-                f'    LIMIT {batch_size}'
-                f') '
-                f'UPDATE "{integrated}" i '
-                f'SET "taxonomic_species_id" = b.taxonomic_species_id '
-                f'FROM batch b '
-                f'WHERE i.ctid = b.ctid'
-            )
+            result = conn.execute(f"""
+                WITH batch AS (
+                    SELECT i.ctid, s.id AS taxonomic_species_id
+                    FROM "{integrated}" i
+                    INNER JOIN "{species_tbl}" s ON i."species" = s."species"
+                    WHERE i."taxonomic_species_id" IS NULL
+                    LIMIT {batch_size}
+                )
+                UPDATE "{integrated}" i
+                SET "taxonomic_species_id" = b.taxonomic_species_id
+                FROM batch b
+                WHERE i.ctid = b.ctid
+            """)
             conn.commit()
             batch_linked = result.rowcount
             conn.commit()
@@ -1429,6 +1281,8 @@ def link_integrated_taxonomic_species_id(db, table_name):
 def validate_localities(db, table_name):
     # Crea geo_locality_validation (borrada en tables_operations) y la puebla desde la integrada.
     # Completa geom por lotes. El enlace locality_id: link_integrated_locality_id (main).
+    # locality_key (md5 de las 4 claves con sentinel '__NULL__') es columna generada STORED y
+    # tiene UNIQUE → trata NULL como igual a NULL y habilita ON CONFLICT estricto.
     # Parámetros:
     # - db: Conexión al pool de conexiones de PostgreSQL.
     # - table_name: Nombre de la tabla integrada dwc_integrated.
@@ -1441,29 +1295,35 @@ def validate_localities(db, table_name):
 
     with db.connect() as conn:
         logger.info("Ejecutando consulta")
-        conn.execute(
-            f'CREATE TABLE "{locality_tbl}" ('
-            f'  "id" SERIAL PRIMARY KEY, '
-            f'  "decimallatitude" DOUBLE PRECISION, '
-            f'  "decimallongitude" DOUBLE PRECISION, '
-            f'  "stateprovince" TEXT, '
-            f'  "county" TEXT, '
-            f'  "geom" geometry(Point, 4326), '
-            f'  "stateprovincemgn" TEXT, '
-            f'  "countymgn" TEXT, '
-            f'  "maritimeregion" TEXT, '
-            f'  "narinomaritimeregion" TEXT, '
-            f'  "stateprovincevalidated" TEXT, '
-            f'  "countyvalidated" TEXT, '
-            f'  "stateprovincevalidation" BOOLEAN, '
-            f'  "countyvalidation" BOOLEAN, '
-            f'  "flaggeo" TEXT, '
-            f'  "geo_master_geography_id" INT4, '
-            f'  CONSTRAINT "uq_{locality_tbl}_coords" UNIQUE ('
-            f'    "decimallatitude", "decimallongitude", "stateprovince", "county"'
-            f'  )'
-            f')'
-        )
+        conn.execute(f"""
+            CREATE TABLE "{locality_tbl}" (
+                "id"                       SERIAL PRIMARY KEY,
+                "decimallatitude"          DOUBLE PRECISION,
+                "decimallongitude"         DOUBLE PRECISION,
+                "stateprovince"            TEXT,
+                "county"                   TEXT,
+                "locality_key"             TEXT GENERATED ALWAYS AS (
+                    md5(
+                        coalesce("decimallatitude"::text, '__NULL__') || '|' ||
+                        coalesce("decimallongitude"::text, '__NULL__') || '|' ||
+                        coalesce("stateprovince", '__NULL__') || '|' ||
+                        coalesce("county", '__NULL__')
+                    )
+                ) STORED,
+                "geom"                     geometry(Point, 4326),
+                "stateprovincemgn"         TEXT,
+                "countymgn"                TEXT,
+                "maritimeregion"           TEXT,
+                "narinomaritimeregion"     TEXT,
+                "stateprovincevalidated"   TEXT,
+                "countyvalidated"          TEXT,
+                "stateprovincevalidation"  BOOLEAN,
+                "countyvalidation"         BOOLEAN,
+                "flaggeo"                  TEXT,
+                "geo_master_geography_id"  INT4,
+                CONSTRAINT "uq_{locality_tbl}_locality_key" UNIQUE ("locality_key")
+            )
+        """)
         conn.commit()
         logger.info("Tabla de validación de localidades creada: %s", locality_tbl)
 
@@ -1474,46 +1334,39 @@ def validate_localities(db, table_name):
         )
         conn.commit()
         logger.info("Columna locality_id creada en %s", integrated)
-        # Inserta combinaciones nuevas desde integrated (orden = índice único en BD).
+        # Inserta combinaciones nuevas desde integrated. ON CONFLICT (locality_key) cubre NULL
+        # como igual a NULL (la 4-tupla queda única vía locality_key).
         logger.info("Ejecutando consulta")
-        conn.execute(
-            f'INSERT INTO "{locality_tbl}" '
-            f'("decimallatitude", "decimallongitude", "stateprovince", "county") '
-            f'SELECT DISTINCT '
-            f'i."decimallatitude", '
-            f'i."decimallongitude", '
-            f'i."stateprovince", '
-            f'i."county" '
-            f'FROM "{integrated}" i '
-            f'WHERE NOT EXISTS ('
-            f'    SELECT 1 '
-            f'    FROM "{locality_tbl}" l '
-            f'    WHERE l."decimallatitude" IS NOT DISTINCT FROM i."decimallatitude" '
-            f'      AND l."decimallongitude" IS NOT DISTINCT FROM i."decimallongitude" '
-            f'      AND l."stateprovince" IS NOT DISTINCT FROM i."stateprovince" '
-            f'      AND l."county" IS NOT DISTINCT FROM i."county"'
-            f') '
-            f'ON CONFLICT ("decimallatitude", "decimallongitude", "stateprovince", "county") DO NOTHING'
-        )
+        conn.execute(f"""
+            INSERT INTO "{locality_tbl}"
+                ("decimallatitude", "decimallongitude", "stateprovince", "county")
+            SELECT DISTINCT
+                i."decimallatitude",
+                i."decimallongitude",
+                i."stateprovince",
+                i."county"
+            FROM "{integrated}" i
+            ON CONFLICT ("locality_key") DO NOTHING
+        """)
         conn.commit()
         logger.info("Combinaciones nuevas de integrada insertadas en %s: %s", integrated, locality_tbl)
         # Completa geom por lotes solo cuando falta geometría y hay coordenadas.
         while True:
             logger.info("Ejecutando consulta")
-            result = conn.execute(
-                f'WITH batch AS ('
-                f'    SELECT ctid '
-                f'    FROM "{locality_tbl}" '
-                f'    WHERE "geom" IS NULL '
-                f'      AND "decimallatitude" IS NOT NULL '
-                f'      AND "decimallongitude" IS NOT NULL '
-                f'    LIMIT {batch_size}'
-                f') '
-                f'UPDATE "{locality_tbl}" t '
-                f'SET "geom" = ST_SetSRID(ST_MakePoint(t."decimallongitude", t."decimallatitude"), 4326) '
-                f'FROM batch '
-                f'WHERE t.ctid = batch.ctid'
-            )
+            result = conn.execute(f"""
+                WITH batch AS (
+                    SELECT ctid
+                    FROM "{locality_tbl}"
+                    WHERE "geom" IS NULL
+                      AND "decimallatitude" IS NOT NULL
+                      AND "decimallongitude" IS NOT NULL
+                    LIMIT {batch_size}
+                )
+                UPDATE "{locality_tbl}" t
+                SET "geom" = ST_SetSRID(ST_MakePoint(t."decimallongitude", t."decimallatitude"), 4326)
+                FROM batch
+                WHERE t.ctid = batch.ctid
+            """)
             conn.commit()
             batch_updated = result.rowcount
             conn.commit()
@@ -1537,13 +1390,15 @@ def validate_localities(db, table_name):
 
 def link_integrated_locality_id(db, table_name):
     # Propaga id de geo_locality_validation (~2M) a la integrada (~40M) por lat/lon/state/county.
-    # Por lote: LIMIT de filas pendientes y JOIN al catálogo (UNIQUE en 4 campos). Sin índice
-    # parcial de 4 columnas sobre ~40M (muy costoso). UPDATE_BATCH_SIZE acota WAL por commit.
+    # Join por igualdad sobre locality_key (md5 con sentinel '__NULL__'); la UNIQUE de
+    # geo_locality_validation ya provee el índice btree usado por el join.
     integrated = table_name
     locality_tbl = 'geo_locality_validation'
     fk_name = f"fk_{integrated}_locality_id"
-    batch_size = UPDATE_BATCH_SIZE
+    pending_gbifid_idx = f'idx_{integrated}_locality_pending_gbifid'
+    batch_size = 50_000  # prueba locality; luego usar UPDATE_BATCH_SIZE
     total_linked = 0
+    last_gbifid = 0
 
     with db.connect() as conn:
         logger.info("Ejecutando add_locality_id_column")
@@ -1553,45 +1408,77 @@ def link_integrated_locality_id(db, table_name):
         )
         conn.commit()
 
+        logger.info(
+            "Creando índice parcial gbifid para filas con locality_id IS NULL: %s",
+            pending_gbifid_idx,
+        )
+        conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS "{pending_gbifid_idx}"
+            ON "{integrated}" ("gbifid")
+            WHERE "locality_id" IS NULL
+        """)
+        conn.commit()
+        logger.info("Índice parcial creado: %s", pending_gbifid_idx)
+
         while True:
-            logger.info("Ejecutando consulta")
+            logger.info(
+                "locality_id: seleccionando hasta %s gbifid pendientes (después de %s)",
+                f"{batch_size:,}",
+                f"{last_gbifid:,}",
+            )
+            gbifid_rows = conn.execute(
+                f"""
+                SELECT "gbifid"
+                FROM "{integrated}"
+                WHERE "locality_id" IS NULL AND "gbifid" > %s
+                ORDER BY "gbifid"
+                LIMIT {batch_size}
+                """,
+                (last_gbifid,),
+            ).fetchall()
+            conn.commit()
+            if not gbifid_rows:
+                break
+            gbifids = [row[0] for row in gbifid_rows]
+            last_gbifid = gbifids[-1]
+
+            logger.info(
+                "locality_id: actualizando %s filas (gbifid hasta %s)",
+                f"{len(gbifids):,}",
+                f"{last_gbifid:,}",
+            )
             result = conn.execute(
-                f'WITH pending AS ('
-                f'    SELECT '
-                f'      i.ctid, '
-                f'      i."decimallatitude", '
-                f'      i."decimallongitude", '
-                f'      i."stateprovince", '
-                f'      i."county" '
-                f'    FROM "{integrated}" i '
-                f'    WHERE i."locality_id" IS NULL '
-                f'    LIMIT {batch_size}'
-                f'), batch AS ('
-                f'    SELECT p.ctid, l."id" AS locality_id '
-                f'    FROM pending p '
-                f'    INNER JOIN "{locality_tbl}" l '
-                f'      ON p."decimallatitude" IS NOT DISTINCT FROM l."decimallatitude" '
-                f'     AND p."decimallongitude" IS NOT DISTINCT FROM l."decimallongitude" '
-                f'     AND p."stateprovince" IS NOT DISTINCT FROM l."stateprovince" '
-                f'     AND p."county" IS NOT DISTINCT FROM l."county"'
-                f') '
-                f'UPDATE "{integrated}" i '
-                f'SET "locality_id" = b.locality_id '
-                f'FROM batch b '
-                f'WHERE i.ctid = b.ctid'
+                f"""
+                UPDATE "{integrated}" i
+                SET "locality_id" = lk."id"
+                FROM "{locality_tbl}" lk
+                WHERE i."gbifid" = ANY(%s::bigint[])
+                  AND lk."locality_key" = md5(
+                      coalesce(i."decimallatitude"::text, '__NULL__') || '|' ||
+                      coalesce(i."decimallongitude"::text, '__NULL__') || '|' ||
+                      coalesce(i."stateprovince", '__NULL__') || '|' ||
+                      coalesce(i."county", '__NULL__')
+                  )
+                """,
+                (gbifids,),
             )
             conn.commit()
             batch_linked = result.rowcount
-            conn.commit()
-            if batch_linked == 0:
-                break
             total_linked += batch_linked
             logger.info(
-                "locality_id batch en %s: %s filas (total %s)",
+                "locality_id batch en %s: %s filas enlazadas (total %s; avance gbifid %s)",
                 integrated,
                 f"{batch_linked:,}",
                 f"{total_linked:,}",
+                f"{last_gbifid:,}",
             )
+            if len(gbifids) < batch_size:
+                break
+
+        logger.info("Ejecutando consulta")
+        conn.execute(f'DROP INDEX IF EXISTS "{pending_gbifid_idx}"')
+        conn.commit()
+        logger.info("Índice parcial eliminado: %s", pending_gbifid_idx)
 
         logger.info("Ejecutando consulta")
         conn.execute(
@@ -1605,15 +1492,15 @@ def link_integrated_locality_id(db, table_name):
         conn.execute(f'ALTER TABLE "{integrated}" DROP CONSTRAINT IF EXISTS "{fk_name}"')
         conn.commit()
         logger.info("Ejecutando consulta")
-        conn.execute(
-            f'ALTER TABLE "{integrated}" '
-            f'ADD CONSTRAINT "{fk_name}" '
-            f'FOREIGN KEY ("locality_id") '
-            f'REFERENCES "geo_locality_validation" ("id") '
-            f'ON UPDATE CASCADE '
-            f'ON DELETE SET NULL '
-            f'NOT VALID'
-        )
+        conn.execute(f"""
+            ALTER TABLE "{integrated}"
+            ADD CONSTRAINT "{fk_name}"
+            FOREIGN KEY ("locality_id")
+            REFERENCES "geo_locality_validation" ("id")
+            ON UPDATE CASCADE
+            ON DELETE SET NULL
+            NOT VALID
+        """)
         conn.commit()
         logger.info(
             "Enlace integrada → geo_locality_validation: %s filas con locality_id",
@@ -1647,26 +1534,30 @@ def validate_geography(db, table_name):
             # Se actualiza stateprovincevalidation por lotes (ctid + LIMIT) para acotar WAL y locks.
             logger.info("Ejecutando consulta")
             result = conn.execute(
-                f'WITH batch AS ('
-                f'    SELECT t.ctid '
-                f'    FROM "{locality_tbl}" t '
-                f'    WHERE t."id" > %s '
-                f'    ORDER BY t."id" '
-                f'    LIMIT {batch_size}'
-                f') '
-                f'UPDATE "{locality_tbl}" t SET '
-                f'"stateprovincevalidation" = CASE '
-                f'WHEN NULLIF(BTRIM(t."stateprovincevalidated"), \'\') IS NULL THEN NULL '
-                f'WHEN UPPER(TRIM(t."stateprovincevalidated")) = '
-                f'     UPPER(TRIM(COALESCE(t."stateprovincemgn", \'\'))) THEN TRUE '
-                f'WHEN (t."decimallatitude" IS NULL AND t."decimallongitude" IS NULL) '
-                f'     OR (COALESCE(t."decimallatitude", 0) = 0 AND COALESCE(t."decimallongitude", 0) = 0) '
-                f'     THEN NULL '
-                f'WHEN NULLIF(BTRIM(t."maritimeregion"), \'\') IS NOT NULL THEN NULL '
-                f'ELSE FALSE END '
-                f'FROM batch b '
-                f'WHERE t.ctid = b.ctid '
-                f'RETURNING t."id"',
+                f"""
+                WITH batch AS (
+                    SELECT t.ctid
+                    FROM "{locality_tbl}" t
+                    WHERE t."id" > %s
+                    ORDER BY t."id"
+                    LIMIT {batch_size}
+                )
+                UPDATE "{locality_tbl}" t SET
+                    "stateprovincevalidation" = CASE
+                        WHEN NULLIF(BTRIM(t."stateprovincevalidated"), '') IS NULL THEN NULL
+                        WHEN UPPER(TRIM(t."stateprovincevalidated"))
+                             = UPPER(TRIM(COALESCE(t."stateprovincemgn", ''))) THEN TRUE
+                        WHEN (t."decimallatitude" IS NULL AND t."decimallongitude" IS NULL)
+                             OR (COALESCE(t."decimallatitude", 0) = 0
+                                 AND COALESCE(t."decimallongitude", 0) = 0)
+                            THEN NULL
+                        WHEN NULLIF(BTRIM(t."maritimeregion"), '') IS NOT NULL THEN NULL
+                        ELSE FALSE
+                    END
+                FROM batch b
+                WHERE t.ctid = b.ctid
+                RETURNING t."id"
+                """,
                 (last_id,),
             )
             conn.commit()
@@ -1697,26 +1588,30 @@ def validate_geography(db, table_name):
         while True:
             logger.info("Ejecutando consulta")
             result = conn.execute(
-                f'WITH batch AS ('
-                f'    SELECT t.ctid '
-                f'    FROM "{locality_tbl}" t '
-                f'    WHERE t."id" > %s '
-                f'    ORDER BY t."id" '
-                f'    LIMIT {batch_size}'
-                f') '
-                f'UPDATE "{locality_tbl}" t SET '
-                f'"countyvalidation" = CASE '
-                f'WHEN NULLIF(BTRIM(t."countyvalidated"), \'\') IS NULL THEN NULL '
-                f'WHEN UPPER(TRIM(t."countyvalidated")) = '
-                f'     UPPER(TRIM(COALESCE(t."countymgn", \'\'))) THEN TRUE '
-                f'WHEN (t."decimallatitude" IS NULL AND t."decimallongitude" IS NULL) '
-                f'     OR (COALESCE(t."decimallatitude", 0) = 0 AND COALESCE(t."decimallongitude", 0) = 0) '
-                f'     THEN NULL '
-                f'WHEN NULLIF(BTRIM(t."maritimeregion"), \'\') IS NOT NULL THEN NULL '
-                f'ELSE FALSE END '
-                f'FROM batch b '
-                f'WHERE t.ctid = b.ctid '
-                f'RETURNING t."id"',
+                f"""
+                WITH batch AS (
+                    SELECT t.ctid
+                    FROM "{locality_tbl}" t
+                    WHERE t."id" > %s
+                    ORDER BY t."id"
+                    LIMIT {batch_size}
+                )
+                UPDATE "{locality_tbl}" t SET
+                    "countyvalidation" = CASE
+                        WHEN NULLIF(BTRIM(t."countyvalidated"), '') IS NULL THEN NULL
+                        WHEN UPPER(TRIM(t."countyvalidated"))
+                             = UPPER(TRIM(COALESCE(t."countymgn", ''))) THEN TRUE
+                        WHEN (t."decimallatitude" IS NULL AND t."decimallongitude" IS NULL)
+                             OR (COALESCE(t."decimallatitude", 0) = 0
+                                 AND COALESCE(t."decimallongitude", 0) = 0)
+                            THEN NULL
+                        WHEN NULLIF(BTRIM(t."maritimeregion"), '') IS NOT NULL THEN NULL
+                        ELSE FALSE
+                    END
+                FROM batch b
+                WHERE t.ctid = b.ctid
+                RETURNING t."id"
+                """,
                 (last_id,),
             )
             conn.commit()
@@ -1747,32 +1642,41 @@ def validate_geography(db, table_name):
         while True:
             logger.info("Ejecutando consulta")
             result = conn.execute(
-                f'WITH batch AS ('
-                f'    SELECT t.ctid '
-                f'    FROM "{locality_tbl}" t '
-                f'    WHERE t."id" > %s '
-                f'    ORDER BY t."id" '
-                f'    LIMIT {batch_size}'
-                f') '
-                f'UPDATE "{locality_tbl}" t SET '
-                f'"flaggeo" = CASE '
-                f'WHEN t."stateprovincevalidation" IS FALSE AND t."countyvalidation" IS FALSE '
-                f"THEN 'Departamento y municipio no coinciden con ubicación de la coordenada' "
-                f'WHEN t."stateprovincevalidation" IS TRUE AND t."countyvalidation" IS FALSE '
-                f"THEN 'Municipio no coincide con ubicación de la coordenada' "
-                f'WHEN t."stateprovincevalidation" IS FALSE AND t."countyvalidation" IS TRUE '
-                f"THEN 'Departamento no coincide con ubicación de la coordenada' "
-                f'WHEN t."stateprovincevalidation" IS NULL AND t."countyvalidation" IS NULL '
-                f'AND NULLIF(BTRIM(t."maritimeregion"), \'\') IS NOT NULL '
-                f"THEN 'Coordenada en área marítima' "
-                f'WHEN t."stateprovincevalidation" IS NULL AND t."countyvalidation" IS NULL '
-                f'AND (t."decimallatitude" IS NULL AND t."decimallongitude" IS NULL '
-                f'     OR (COALESCE(t."decimallatitude", 0) = 0 AND COALESCE(t."decimallongitude", 0) = 0)) '
-                f"THEN 'Sin coordenadas' "
-                f'ELSE NULL END '
-                f'FROM batch b '
-                f'WHERE t.ctid = b.ctid '
-                f'RETURNING t."id"',
+                f"""
+                WITH batch AS (
+                    SELECT t.ctid
+                    FROM "{locality_tbl}" t
+                    WHERE t."id" > %s
+                    ORDER BY t."id"
+                    LIMIT {batch_size}
+                )
+                UPDATE "{locality_tbl}" t SET
+                    "flaggeo" = CASE
+                        WHEN t."stateprovincevalidation" IS FALSE
+                             AND t."countyvalidation" IS FALSE
+                            THEN 'Departamento y municipio no coinciden con ubicación de la coordenada'
+                        WHEN t."stateprovincevalidation" IS TRUE
+                             AND t."countyvalidation" IS FALSE
+                            THEN 'Municipio no coincide con ubicación de la coordenada'
+                        WHEN t."stateprovincevalidation" IS FALSE
+                             AND t."countyvalidation" IS TRUE
+                            THEN 'Departamento no coincide con ubicación de la coordenada'
+                        WHEN t."stateprovincevalidation" IS NULL
+                             AND t."countyvalidation" IS NULL
+                             AND NULLIF(BTRIM(t."maritimeregion"), '') IS NOT NULL
+                            THEN 'Coordenada en área marítima'
+                        WHEN t."stateprovincevalidation" IS NULL
+                             AND t."countyvalidation" IS NULL
+                             AND (t."decimallatitude" IS NULL AND t."decimallongitude" IS NULL
+                                  OR (COALESCE(t."decimallatitude", 0) = 0
+                                      AND COALESCE(t."decimallongitude", 0) = 0))
+                            THEN 'Sin coordenadas'
+                        ELSE NULL
+                    END
+                FROM batch b
+                WHERE t.ctid = b.ctid
+                RETURNING t."id"
+                """,
                 (last_id,),
             )
             conn.commit()
@@ -1871,23 +1775,23 @@ def taxonomic_joins(db, table_name):
                     )
                 else:
                     set_parts.append(f'"{dest}" = t."{src}"')
-            set_clause = ', '.join(set_parts)
+            set_clause = ',\n                    '.join(set_parts)
             logger.info("Ejecutando consulta")
-            conn.execute(
-                f'UPDATE "{species_tbl}" v '
-                f'SET {set_clause} '
-                f'FROM "{src_table}" t '
-                f'WHERE v."species" = t."species"'
-            )
+            conn.execute(f"""
+                UPDATE "{species_tbl}" v
+                SET {set_clause}
+                FROM "{src_table}" t
+                WHERE v."species" = t."species"
+            """)
             conn.commit()
             logger.info("Join con %s completado en %s", src_table, species_tbl)
 
         logger.info("Ejecutando consulta")
-        conn.execute(
-            f'UPDATE "{species_tbl}" '
-            f"SET \"referencelist\" = 'Presente en lista taxonómica: ' || \"referencelist\" "
-            f'WHERE "referencelist" IS NOT NULL'
-        )
+        conn.execute(f"""
+            UPDATE "{species_tbl}"
+            SET "referencelist" = 'Presente en lista taxonómica: ' || "referencelist"
+            WHERE "referencelist" IS NOT NULL
+        """)
         conn.commit()
         logger.info("Campo referencelist actualizado en %s", species_tbl)
 
@@ -1895,31 +1799,33 @@ def taxonomic_joins(db, table_name):
         orders_list = ', '.join(f"'{o}'" for o in _FLAGTAXO_ORDERS)
 
         logger.info("Ejecutando consulta")
-        conn.execute(
-            f'UPDATE "{species_tbl}" SET "flagtaxo" = CASE '
-            f'WHEN "referencelist" IS NULL AND "species" IS NOT NULL '
-            f"AND \"transplanted\" = 'Trasplantada' "
-            f"THEN 'Ausente en lista taxonómica_Trasplantada' "
-            f'WHEN "referencelist" IS NULL AND "species" IS NOT NULL '
-            f"AND \"migratory\" = 'Migratorio' "
-            f"THEN 'Ausente en lista taxonómica_Migratoria' "
-            f'WHEN "referencelist" IS NULL AND "species" IS NOT NULL '
-            f"AND \"exoticriskinvasion\" = 'Exótica con potencial de invasión' "
-            f"THEN 'Ausente en lista taxonómica_Exótica con potencial de invasión' "
-            f'WHEN "referencelist" IS NULL AND "species" IS NOT NULL '
-            f"AND \"invasive\" = 'Invasora' "
-            f"THEN 'Ausente en lista taxonómica_Invasora' "
-            f'WHEN "referencelist" IS NULL AND "species" IS NOT NULL '
-            f"AND \"exotic\" = 'Exótica' "
-            f"THEN 'Ausente en lista taxonómica_Exótica' "
-            f'WHEN "referencelist" IS NULL AND "species" IS NOT NULL '
-            f'AND "class" IN ({classes_list}) '
-            f"THEN 'Ausente en lista taxonómica' "
-            f'WHEN "referencelist" IS NULL AND "species" IS NOT NULL '
-            f'AND "order" IN ({orders_list}) '
-            f"THEN 'Ausente en lista taxonómica' "
-            f'ELSE NULL END'
-        )
+        conn.execute(f"""
+            UPDATE "{species_tbl}"
+            SET "flagtaxo" = CASE
+                WHEN "referencelist" IS NULL AND "species" IS NOT NULL
+                     AND "transplanted" = 'Trasplantada'
+                    THEN 'Ausente en lista taxonómica_Trasplantada'
+                WHEN "referencelist" IS NULL AND "species" IS NOT NULL
+                     AND "migratory" = 'Migratorio'
+                    THEN 'Ausente en lista taxonómica_Migratoria'
+                WHEN "referencelist" IS NULL AND "species" IS NOT NULL
+                     AND "exoticriskinvasion" = 'Exótica con potencial de invasión'
+                    THEN 'Ausente en lista taxonómica_Exótica con potencial de invasión'
+                WHEN "referencelist" IS NULL AND "species" IS NOT NULL
+                     AND "invasive" = 'Invasora'
+                    THEN 'Ausente en lista taxonómica_Invasora'
+                WHEN "referencelist" IS NULL AND "species" IS NOT NULL
+                     AND "exotic" = 'Exótica'
+                    THEN 'Ausente en lista taxonómica_Exótica'
+                WHEN "referencelist" IS NULL AND "species" IS NOT NULL
+                     AND "class" IN ({classes_list})
+                    THEN 'Ausente en lista taxonómica'
+                WHEN "referencelist" IS NULL AND "species" IS NOT NULL
+                     AND "order" IN ({orders_list})
+                    THEN 'Ausente en lista taxonómica'
+                ELSE NULL
+            END
+        """)
         conn.commit()
         logger.info("Campo flagtaxo completado en %s", species_tbl)
 
@@ -1935,27 +1841,27 @@ def clean_threatstatus_fields(db, table_name):
     species_tbl = 'taxonomic_species_validation'
     with db.connect() as conn:
         logger.info("Ejecutando consulta")
-        conn.execute(
-            f'UPDATE "{species_tbl}" '
-            f'SET "threatstatusuicn" = NULLIF(TRIM("threatstatusuicn"), \'\'), '
-            f'    "threatstatusmads" = NULLIF(TRIM("threatstatusmads"), \'\') '
-            f'WHERE "threatstatusuicn" IS NOT NULL OR "threatstatusmads" IS NOT NULL'
-        )
+        conn.execute(f"""
+            UPDATE "{species_tbl}"
+            SET "threatstatusuicn" = NULLIF(TRIM("threatstatusuicn"), ''),
+                "threatstatusmads" = NULLIF(TRIM("threatstatusmads"), '')
+            WHERE "threatstatusuicn" IS NOT NULL OR "threatstatusmads" IS NOT NULL
+        """)
         conn.commit()
         logger.info("Ejecutando consulta")
-        conn.execute(
-            f'UPDATE "{species_tbl}" '
-            f'SET "threatstatusuicn" = CASE '
-            f'    WHEN "threatstatusuicn" IS NULL THEN NULL '
-            f'    WHEN "threatstatusuicn" LIKE \'%_IUCN\' THEN "threatstatusuicn" '
-            f'    ELSE "threatstatusuicn" || \'_IUCN\' '
-            f'END, '
-            f'    "threatstatusmads" = CASE '
-            f'    WHEN "threatstatusmads" IS NULL THEN NULL '
-            f'    WHEN "threatstatusmads" LIKE \'%_MADS\' THEN "threatstatusmads" '
-            f'    ELSE "threatstatusmads" || \'_MADS\' '
-            f'END'
-        )
+        conn.execute(f"""
+            UPDATE "{species_tbl}"
+            SET "threatstatusuicn" = CASE
+                    WHEN "threatstatusuicn" IS NULL THEN NULL
+                    WHEN "threatstatusuicn" LIKE '%_IUCN' THEN "threatstatusuicn"
+                    ELSE "threatstatusuicn" || '_IUCN'
+                END,
+                "threatstatusmads" = CASE
+                    WHEN "threatstatusmads" IS NULL THEN NULL
+                    WHEN "threatstatusmads" LIKE '%_MADS' THEN "threatstatusmads"
+                    ELSE "threatstatusmads" || '_MADS'
+                END
+        """)
         conn.commit()
         logger.info(
             "Validación de threatstatus (vacíos/sufijos por fuente) completada en %s (integrada: %s)",
@@ -2041,13 +1947,13 @@ def gbif_api_calls(db, table_name):
 
         # Datasetkeys presentes en la integrada sin fila en catálogo o sin título en gbif_datasets.
         logger.info("Ejecutando gbif_api_calls")
-        dataset_rows = conn.execute(
-            f'SELECT DISTINCT i."datasetkey" '
-            f'FROM "{integrated}" i '
-            f'LEFT JOIN "gbif_datasets" d ON i."datasetkey" = d."datasetkey" '
-            f'WHERE i."datasetkey" IS NOT NULL '
-            f'  AND (d."datasetkey" IS NULL OR d."datasettitle" IS NULL)'
-        ).fetchall()
+        dataset_rows = conn.execute(f"""
+            SELECT DISTINCT i."datasetkey"
+            FROM "{integrated}" i
+            LEFT JOIN "gbif_datasets" d ON i."datasetkey" = d."datasetkey"
+            WHERE i."datasetkey" IS NOT NULL
+              AND (d."datasetkey" IS NULL OR d."datasettitle" IS NULL)
+        """).fetchall()
         conn.commit()
         missing_dataset_keys = [row[0] for row in dataset_rows if row[0]]
         logger.info("Datasetkeys sin datasettitle en %s: %s", integrated, f"{len(missing_dataset_keys):,}")
@@ -2105,13 +2011,13 @@ def gbif_api_calls(db, table_name):
 
         # Publishingorgkeys en la integrada sin fila en catálogo o sin organization en gbif_publishers.
         logger.info("Ejecutando consulta")
-        publisher_rows = conn.execute(
-            f'SELECT DISTINCT i."publishingorgkey" '
-            f'FROM "{integrated}" i '
-            f'LEFT JOIN "gbif_publishers" p ON i."publishingorgkey" = p."publishingorgkey" '
-            f'WHERE i."publishingorgkey" IS NOT NULL '
-            f'  AND (p."publishingorgkey" IS NULL OR p."organization" IS NULL)'
-        ).fetchall()
+        publisher_rows = conn.execute(f"""
+            SELECT DISTINCT i."publishingorgkey"
+            FROM "{integrated}" i
+            LEFT JOIN "gbif_publishers" p ON i."publishingorgkey" = p."publishingorgkey"
+            WHERE i."publishingorgkey" IS NOT NULL
+              AND (p."publishingorgkey" IS NULL OR p."organization" IS NULL)
+        """).fetchall()
         conn.commit()
         missing_publisher_keys = [row[0] for row in publisher_rows if row[0]]
         logger.info(
@@ -2167,15 +2073,15 @@ def gbif_api_calls(db, table_name):
         )
         conn.commit()
         logger.info("Ejecutando consulta")
-        conn.execute(
-            f'ALTER TABLE "{integrated}" '
-            f'ADD CONSTRAINT "{fk_dataset}" '
-            f'FOREIGN KEY ("datasetkey") '
-            f'REFERENCES "gbif_datasets" ("datasetkey") '
-            f'ON UPDATE CASCADE '
-            f'ON DELETE NO ACTION '
-            f'NOT VALID'
-        )
+        conn.execute(f"""
+            ALTER TABLE "{integrated}"
+            ADD CONSTRAINT "{fk_dataset}"
+            FOREIGN KEY ("datasetkey")
+            REFERENCES "gbif_datasets" ("datasetkey")
+            ON UPDATE CASCADE
+            ON DELETE NO ACTION
+            NOT VALID
+        """)
         conn.commit()
         logger.info("Ejecutando consulta")
         conn.execute(
@@ -2183,15 +2089,15 @@ def gbif_api_calls(db, table_name):
         )
         conn.commit()
         logger.info("Ejecutando consulta")
-        conn.execute(
-            f'ALTER TABLE "{integrated}" '
-            f'ADD CONSTRAINT "{fk_publisher}" '
-            f'FOREIGN KEY ("publishingorgkey") '
-            f'REFERENCES "gbif_publishers" ("publishingorgkey") '
-            f'ON UPDATE CASCADE '
-            f'ON DELETE NO ACTION '
-            f'NOT VALID'
-        )
+        conn.execute(f"""
+            ALTER TABLE "{integrated}"
+            ADD CONSTRAINT "{fk_publisher}"
+            FOREIGN KEY ("publishingorgkey")
+            REFERENCES "gbif_publishers" ("publishingorgkey")
+            ON UPDATE CASCADE
+            ON DELETE NO ACTION
+            NOT VALID
+        """)
         conn.commit()
         logger.info(
             "FK NOT VALID añadidas en %s: %s, %s (VALIDATE CONSTRAINT cuando no queden huérfanos)",
