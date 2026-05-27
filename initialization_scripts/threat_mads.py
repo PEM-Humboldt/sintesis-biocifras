@@ -10,11 +10,11 @@ load_dotenv()
 sys.path.append('..')
 import utils.connection as c
 
+pathfile=os.getenv("FILE_TAXONOMIC_MADS")
+#datadir = "../../data_sintesis-biocifras/fuentesExternas/"
+#file = "ListaAmenazadasMADS_2024.tsv"
 
-datadir = "../../data_sintesis-biocifras/fuentesExternas/"
-file = "ListaAmenazadasMADS_2024.tsv"
-
-lista_thMADS=pd.read_csv(datadir+file, sep="\t",low_memory=False)
+lista_thMADS=pd.read_csv(pathfile, sep="\t",low_memory=False)
 lista_thMADS=lista_thMADS.rename(columns={i: i.lower() for i in list(lista_thMADS.columns)})
 lista_thMADS=lista_thMADS.rename(columns={"taxonid" : "originaltaxonid"})
 

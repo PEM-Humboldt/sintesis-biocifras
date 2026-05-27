@@ -8,11 +8,12 @@ load_dotenv()
 
 
 #TODO: pass that as env variables
-datadir = "../../data_sintesis-biocifras/fuentesExternas/RegionesMaritimas/"
-file="RegionesMaritimas.shp"
+pathfile=os.getenv("FILE_SPAT_REGIONES_MARITIMAS")
+#datadir = "../../data_sintesis-biocifras/fuentesExternas/RegionesMaritimas/"
+#file="RegionesMaritimas.shp"
 
 
-gdf_RM=gpd.read_file(datadir+file)
+gdf_RM=gpd.read_file(pathfile)
 #TODO: el nombre "DESCRIP" no es una buena idea para el nombre de columna en Postgres, pero cambiar este nombre se debe hacer en todos los tratamientos que utilizan esta tabla
 gdf_RM=gdf_RM.rename(columns={'OBJECTID':'id', 'geometry': 'geom'}).set_geometry('geom')
 gdf_RM

@@ -3,6 +3,28 @@
 -- En el flujo normal, main.py crea las tablas con sufijo de fecha (ej: dwc_occurrence_20260304)
 
 -- Tabla de registro de versiones de tablas
+
+CREATE EXTENSION IF NOT EXISTS postgis;
+
+
+CREATE TABLE IF NOT EXISTS public.gbif_publishers (
+    publishingorgkey text PRIMARY KEY,
+    organization text,
+    institutionid text
+);
+
+CREATE TABLE IF NOT EXISTS public.gbif_datasets (
+    datasetkey text PRIMARY KEY,
+    license text,
+    doi text,
+    datasettitle text,
+    logourl text,
+    datatype text,
+    created date
+);
+
+
+
 CREATE TABLE IF NOT EXISTS table_registry (
     id SERIAL PRIMARY KEY,
     table_name TEXT NOT NULL,

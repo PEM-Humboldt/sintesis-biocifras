@@ -10,11 +10,11 @@ load_dotenv()
 sys.path.append('..')
 import utils.connection as c
 
+pathfile=os.getenv("FILE_TAXONOMIC_CITES")
+#datadir = "../../data_sintesis-biocifras/fuentesExternas/"
+#file = "Lista_CITES_20241231.tsv"
 
-datadir = "../../data_sintesis-biocifras/fuentesExternas/"
-file = "Lista_CITES_20241231.tsv"
-
-lista_thCITES=pd.read_csv(datadir+file, sep="\t",low_memory=False)
+lista_thCITES=pd.read_csv(pathfile, sep="\t",low_memory=False)
 lista_thCITES=lista_thCITES.rename(columns={i: i.lower() for i in list(lista_thCITES.columns)})
 lista_thCITES=lista_thCITES.rename(columns={"taxonid" : "originaltaxonid", 'appendixcites': 'cites'})
 

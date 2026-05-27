@@ -10,11 +10,11 @@ load_dotenv()
 sys.path.append('..')
 import utils.connection as c
 
+pathfile=os.getenv("FILE_MASTER_GEOGRAPHY")
+#datadir = "../../data_sintesis-biocifras/fuentesExternas/"
+#file = "geo_master_geography_20260525.tsv"
 
-datadir = "../../data_sintesis-biocifras/fuentesExternas/"
-file = "geo_master_geography_20260525.tsv"
-
-master_geog=pd.read_csv(datadir+file, sep="\t",low_memory=False)
+master_geog=pd.read_csv(pathfile, sep="\t",low_memory=False)
 #master_geog=master_geog.rename(columns={i: i.lower() for i in list(master_geog.columns)})
 #master_geog=master_geog.rename(columns={"file" : "sourcefile"})
 
@@ -49,8 +49,8 @@ with db.connect() as conn:
     codedane text,
     ismarine boolean,
     description text,
-    parent_id integer REFERENCES geo_master_geography (id),
-    region_id integer REFERENCES geo_master_geography (id),
+    parent_id integer REFERENCES geo_master_geography (id) ON DELETE SET NULL,
+    region_id integer REFERENCES geo_master_geography (id) ON DELETE SET NULL,
     UNIQUE (name, parent_id)
   );
   ''')

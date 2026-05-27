@@ -10,11 +10,11 @@ load_dotenv()
 sys.path.append('..')
 import utils.connection as c
 
+pathfile = os.getenv("FILE_TAXONOMIC_INVASIVE_EXOTIC")
+#datadir = "../../data_sintesis-biocifras/fuentesExternas/"
+#file = "lista-invasoras-exoticas-2024T4.tsv"
 
-datadir = "../../data_sintesis-biocifras/fuentesExternas/"
-file = "lista-invasoras-exoticas-2024T4.tsv"
-
-lista_inex=pd.read_csv(datadir+file, sep="\t",low_memory=False)
+lista_inex=pd.read_csv(pathfile, sep="\t",low_memory=False)
 lista_inex=lista_inex.rename(columns={i: i.lower() for i in list(lista_inex.columns)})
 lista_inex=lista_inex.rename(columns={"fuente" : "source", "especies_exoticas": "exotic", "especies_exotica_riesgo_invasion": "exoticriskinvasion",'species_invasiveness': "invasiveness", 'especies_invasoras':"invasive", 'especies_trasplantadas':"transplanted"})
 

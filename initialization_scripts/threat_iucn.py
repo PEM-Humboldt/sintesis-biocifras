@@ -10,11 +10,11 @@ load_dotenv()
 sys.path.append('..')
 import utils.connection as c
 
+pathfile=os.getenv("FILE_TAXONOMIC_IUCN")
+#datadir = "../../data_sintesis-biocifras/fuentesExternas/"
+#file = "Lista_UICNRedList_2024T4.tsv"
 
-datadir = "../../data_sintesis-biocifras/fuentesExternas/"
-file = "Lista_UICNRedList_2024T4.tsv"
-
-lista_thIUCN=pd.read_csv(datadir+file, sep="\t",low_memory=False)
+lista_thIUCN=pd.read_csv(pathfile, sep="\t",low_memory=False)
 lista_thIUCN=lista_thIUCN.rename(columns={i: i.lower() for i in list(lista_thIUCN.columns)})
 lista_thIUCN=lista_thIUCN.rename(columns={"internaltaxonid" : "originaltaxonid",'threatstatus_uicn':"threatstatus"})
 

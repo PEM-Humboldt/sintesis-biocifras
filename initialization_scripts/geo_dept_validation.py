@@ -10,11 +10,11 @@ load_dotenv()
 sys.path.append('..')
 import utils.connection as c
 
+pathfile=os.getenv("FILE_DEPT_VALIDATION")
+#datadir = "../../data_sintesis-biocifras/fuentesExternas/"
+#file = "geo_stateprovince_validation_20260522.csv"
 
-datadir = "../../data_sintesis-biocifras/fuentesExternas/"
-file = "geo_stateprovince_validation_20260522.csv"
-
-stateprovince_val=pd.read_csv(datadir+file, sep="\t",low_memory=False)
+stateprovince_val=pd.read_csv(pathfile, sep="\t",low_memory=False)
 #stateprovince_val=stateprovince_val.rename(columns={i: i.lower() for i in list(stateprovince_val.columns)})
 #stateprovince_val=stateprovince_val.rename(columns={"file" : "sourcefile"})
 
@@ -54,7 +54,7 @@ with db.connect() as conn:
   conn.execute('''CREATE TABLE public.geo_stateprovince_validation (
     id serial PRIMARY KEY,
     originalstateprovince text NOT NULL UNIQUE,
-    geo_master_geography_id int REFERENCES geo_master_geography (id)
+    geo_master_geography_id int REFERENCES geo_master_geography (id) ON DELETE CASCADE
   );
   ''')
   conn.commit()

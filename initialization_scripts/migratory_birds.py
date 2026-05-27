@@ -10,11 +10,11 @@ load_dotenv()
 sys.path.append('..')
 import utils.connection as c
 
+pathfile=os.getenv("FILE_TAXONOMIC_AVES_MIGRATORIAS")
+#datadir = "../../data_sintesis-biocifras/fuentesExternas/"
+#file = "Lista_Migratorias_2025.tsv"
 
-datadir = "../../data_sintesis-biocifras/fuentesExternas/"
-file = "Lista_Migratorias_2025.tsv"
-
-lista_migrat=pd.read_csv(datadir+file, sep="\t",low_memory=False)
+lista_migrat=pd.read_csv(pathfile, sep="\t",low_memory=False)
 lista_migrat=lista_migrat.rename(columns={i: i.lower() for i in list(lista_migrat.columns)})
 lista_migrat=lista_migrat.rename(columns={"especies_migratorias" : "migratory"})
 

@@ -10,10 +10,9 @@ load_dotenv()
 
 
 
-#TODO: pass that as env variables
-url = "https://geoportal.dane.gov.co/descargas/mgn_2025/MGN2025_MPIO_GRAFICO.zip"
-dirzip = "/home/marius_gt/tmp/"
-zipName="MGN_MPIO_POLITICO_2025.zip"
+url = os.getenv("URL_MGN_DEPT_MUNI")
+dirzip = os.getenv("DIR_DOWNLOAD_ZIP")
+zipName="MGN_MPIO_POLITICO.zip"
 
 
 r=requests.get(url)
@@ -22,7 +21,7 @@ with open(dirzip+zipName, 'wb') as file:
 
 
 #TODO: pass that as env variables
-datadir = "../../data_sintesis-biocifras/fuentesExternas/MGN_MPIO_POLITICO_2025/"
+datadir = os.getenv("EXTDATADIR")+"/adm_dept_muni/"
 
 if not os.path.exists(datadir):
   os.makedirs(datadir)
@@ -36,7 +35,6 @@ shpFile=[f for f in listFiles_zip if re.search(".*.shp$",f)][0]
 gdf_adm=gpd.read_file(datadir+shpFile)
 gdf_adm=gdf_adm.rename(columns={'geometry': 'geom'}).set_geometry('geom')
 gdf_adm.geom = gdf_adm.geom.to_crs(4326)
-gdf_adm.geom = gdf_adm.geom.to_multipolygon()
 gdf_adm.insert(0, "id", [i+1 for i in range(gdf_adm.shape[0])], True)
 
 dropColumns=['shape_Leng','shape_Area','mpio_narea']
@@ -49,7 +47,9 @@ engine=create_engine("postgresql://"+os.getenv("DATABASE_USER")+":"+os.getenv("D
 gdf_adm.to_postgis("MGN_ADM_MPIO_2025",engine, if_exists='replace')
 
 #TODO: define "id" as a primary key
+#TODO: eliminate 2025 from the name so it can work later
 
 
 
 engine.dispose()
+

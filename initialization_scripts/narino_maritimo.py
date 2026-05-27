@@ -8,12 +8,13 @@ load_dotenv()
 
 
 #TODO: pass that as env variables
-datadir = "../../data_sintesis-biocifras/fuentesExternas/Narino_maritimo/"
-shpFile = "Narino_maritimo_WGS84.shp"
-gdf_nm=gpd.read_file(datadir+shpFile)
+pathfile=os.getenv("FILE_SPAT_NARINO_MARITIMO")
+#datadir = "../../data_sintesis-biocifras/fuentesExternas/Narino_maritimo/"
+#shpFile = "Narino_maritimo_WGS84.shp"
+gdf_nm=gpd.read_file(pathfile)
 gdf_nm=gdf_nm.rename(columns={'geometry': 'geom'}).set_geometry('geom')
 gdf_nm.geom = gdf_nm.geom.to_crs(4326)
-gdf_nm.geom = gdf_nm.geom.to_multipolygon()
+#gdf_nm.geom = gdf_nm.geom.to_multipolygon()
 gdf_nm.insert(0, "id", [i+1 for i in range(gdf_nm.shape[0])], True)
 
 dropColumns=['shape_Leng','Shape_Leng','shape_Area','mpio_narea','FID_AreaEs', 'OBJECTID', 'Area', 'Shape_Le_1', 'Shape_Le_2','Shape_Le_1', 'Shape_Le_2', 'FID_UAC_LL', 'OBJECTID_2','FID_Limite', 'OBJECTID_3','SHAPE_Le_3', 'SHAPE_Ar_1', 'Area_ha','Shape_Le_4', 'Shape_Area']

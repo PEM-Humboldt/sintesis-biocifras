@@ -10,11 +10,11 @@ load_dotenv()
 sys.path.append('..')
 import utils.connection as c
 
+pathfile=os.getenv("FILE_MUNI_VALIDATION")
+#datadir = "../../data_sintesis-biocifras/fuentesExternas/"
+#file = "geo_county_validation_20260522.csv"
 
-datadir = "../../data_sintesis-biocifras/fuentesExternas/"
-file = "geo_county_validation_20260522.csv"
-
-county_val=pd.read_csv(datadir+file, sep="\t",low_memory=False)
+county_val=pd.read_csv(pathfile, sep="\t",low_memory=False)
 #county_val=county_val.rename(columns={i: i.lower() for i in list(county_val.columns)})
 #county_val=county_val.rename(columns={"file" : "sourcefile"})
 
