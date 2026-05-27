@@ -47,6 +47,11 @@ Modificar los parámetros dentro del .env
 ```bash
 vi .env
 ```
+Inicializar la base de datos
+
+```bash
+python3 initialize.py
+```
 
 Ejecutar el script
 
@@ -56,11 +61,12 @@ python3 main.py
 
 ## Problemas conocidos
 
-Ninguno hasta el momento :P
+¡Ver los problemas en issues! No duden en documentar otros problemas potenciales.
 
 ## Autores(as) y contacto
 
 * **Diego Moreno** - *PS* - [damorenov](https://github.com/damorenov)
+* **Marius Bottin** - supervisor del contrato para el instituto Humboldt, apoyo punctual en la programación - [marbotte](https://github.com/marbotte)
 
 ## Licencia
 
