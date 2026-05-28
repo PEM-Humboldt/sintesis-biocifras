@@ -739,7 +739,7 @@ def _locality_queries_helper(conn, sql, label):
 
 def normalize_stateprovince_county(db, table_name):
     """Normaliza stateprovince/county en geo_locality_validation antes de validar geografía
-    y luego asigna geo_master_geography_id desde DIVIPOLA. Todo por lotes (ctid + LIMIT)."""
+    y luego asigna geo_master_geography_id desde DIVIPOLA. Todo por lotes"""
     _ = table_name  # firma mantenida para compatibilidad con el orquestador.
     locality = 'geo_locality_validation'
     batch_size = UPDATE_BATCH_SIZE
@@ -1742,206 +1742,144 @@ def _parse_gbif_created_date(value):
             return None
 
 
+_DATASET_UPSERT_SQL = """
+    INSERT INTO gbif_datasets (datasetkey, license, doi, datasettitle, logourl, datatype, created)
+    VALUES (%(datasetkey)s, %(license)s, %(doi)s, %(datasettitle)s, %(logourl)s, %(datatype)s, %(created)s)
+    ON CONFLICT (datasetkey) DO UPDATE
+    SET license      = EXCLUDED.license,
+        doi          = EXCLUDED.doi,
+        datasettitle = EXCLUDED.datasettitle,
+        logourl      = EXCLUDED.logourl,
+        datatype     = EXCLUDED.datatype,
+        created      = EXCLUDED.created
+"""
+
+_PUBLISHER_UPSERT_SQL = """
+    INSERT INTO gbif_publishers (publishingorgkey, organization, institutionid)
+    VALUES (%(publishingorgkey)s, %(organization)s, %(institutionid)s)
+    ON CONFLICT (publishingorgkey) DO UPDATE
+    SET organization  = EXCLUDED.organization,
+        institutionid = EXCLUDED.institutionid
+"""
+
+
+def _enrich_from_gbif_api(conn, integrated, *,
+                          integrated_column,
+                          catalog_table,
+                          catalog_title_col,
+                          api_url_template,
+                          upsert_sql,
+                          upsert_kwargs,
+                          log_label):
+    """Backfill genérico de catálogo GBIF desde la API.
+
+    Lee de `integrated` las claves faltantes (o sin título/organización) en el catálogo,
+    consulta la API GBIF en paralelo (ThreadPoolExecutor) y hace UPSERT con ON CONFLICT.
+    Retorna (n_faltantes, n_consultados, n_upsertados, n_errores).
+    """
+    rows = conn.execute(f"""
+        SELECT DISTINCT i."{integrated_column}"
+        FROM "{integrated}" i
+        LEFT JOIN "{catalog_table}" c
+          ON i."{integrated_column}" = c."{integrated_column}"
+        WHERE i."{integrated_column}" IS NOT NULL
+          AND (c."{integrated_column}" IS NULL OR c."{catalog_title_col}" IS NULL)
+    """).fetchall()
+    conn.commit()
+    missing = [r[0] for r in rows if r[0]]
+    logger.info("%s: %s claves faltantes", log_label, f"{len(missing):,}")
+
+    fetched = upserted = errors = 0
+    if missing:
+        max_workers = min(20, max(4, len(missing)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_fetch_gbif_json,
+                                api_url_template.format(key=k),
+                                k,
+                                integrated_column): k
+                for k in missing
+            }
+            for future in as_completed(futures):
+                key = futures[future]
+                try:
+                    data, ok = future.result()
+                except Exception as e:
+                    logger.warning("Error tarea GBIF %s %s: %s", integrated_column, key, e)
+                    errors += 1
+                    continue
+                if not ok:
+                    errors += 1
+                    continue
+                fetched += 1
+                conn.execute(upsert_sql, upsert_kwargs(data, key))
+                conn.commit()
+                upserted += 1
+    return len(missing), fetched, upserted, errors
+
+
 def gbif_api_calls(db, table_name):
-    # Completa gbif_datasets y gbif_publishers desde tablas locales y API GBIF. La integrada solo
-    # aporta datasetkey y publishingorgkey; los campos descriptivos se leen con JOIN en consultas.
-    # Al final añade FK NOT VALID hacia gbif_datasets y gbif_publishers (claves TEXT). Las filas con
-    # clave NULL no participan en la FK. Huérfanos existentes siguen permitidos hasta
-    # ALTER TABLE ... VALIDATE CONSTRAINT ...; nuevas filas ya se validan contra el catálogo actual.
+    """Backfill de gbif_datasets y gbif_publishers desde la API GBIF; añade FK NOT VALID
+    hacia ambos catálogos. Filas con clave NULL no participan en la FK."""
     integrated = table_name
-    fk_dataset = f"fk_{integrated}_gbif_datasetkey"
-    fk_publisher = f"fk_{integrated}_gbif_publishingorgkey"
-    missing_dataset_keys = []
-    missing_publisher_keys = []
     with db.connect() as conn:
-        dataset_upsert_sql = """
-            INSERT INTO gbif_datasets (datasetkey, license, doi, datasettitle, logourl, datatype, created)
-            VALUES (%(datasetkey)s, %(license)s, %(doi)s, %(datasettitle)s, %(logourl)s, %(datatype)s, %(created)s)
-            ON CONFLICT (datasetkey) DO UPDATE
-            SET license = EXCLUDED.license,
-                doi = EXCLUDED.doi,
-                datasettitle = EXCLUDED.datasettitle,
-                logourl = EXCLUDED.logourl,
-                datatype = EXCLUDED.datatype,
-                created = EXCLUDED.created
-        """
-
-        # Datasetkeys presentes en la integrada sin fila en catálogo o sin título en gbif_datasets.
-        logger.info("Ejecutando gbif_api_calls")
-        dataset_rows = conn.execute(f"""
-            SELECT DISTINCT i."datasetkey"
-            FROM "{integrated}" i
-            LEFT JOIN "gbif_datasets" d ON i."datasetkey" = d."datasetkey"
-            WHERE i."datasetkey" IS NOT NULL
-              AND (d."datasetkey" IS NULL OR d."datasettitle" IS NULL)
-        """).fetchall()
-        conn.commit()
-        missing_dataset_keys = [row[0] for row in dataset_rows if row[0]]
-        logger.info("Datasetkeys sin datasettitle en %s: %s", integrated, f"{len(missing_dataset_keys):,}")
-
-        ds_fetched = 0
-        ds_upserted = 0
-        ds_errors = 0
-        if missing_dataset_keys:
-            max_workers = min(20, max(4, len(missing_dataset_keys)))
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(
-                        _fetch_gbif_json,
-                        f'https://api.gbif.org/v1/dataset/{key}',
-                        key,
-                        'datasetkey',
-                    ): key
-                    for key in missing_dataset_keys
-                }
-                for future in as_completed(futures):
-                    key = futures[future]
-                    try:
-                        data, ok = future.result()
-                    except Exception as e:
-                        logger.warning("Error ejecutando tarea GBIF para datasetkey %s: %s", key, e)
-                        ds_errors += 1
-                        continue
-
-                    if not ok:
-                        ds_errors += 1
-                        continue
-
-                    ds_fetched += 1
-                    logger.info("Ejecutando gbif_api_calls")
-                    conn.execute(dataset_upsert_sql, {
-                        'datasetkey': data.get('key') or key,
-                        'license': data.get('license'),
-                        'doi': data.get('doi'),
-                        'datasettitle': data.get('title'),
-                        'logourl': data.get('logoUrl'),
-                        'datatype': data.get('type'),
-                        'created': _parse_gbif_created_date(data.get('created')),
-                    })
-                    conn.commit()
-                    ds_upserted += 1
-                    time.sleep(0.002)
-
-        publisher_upsert_sql = """
-            INSERT INTO gbif_publishers (publishingorgkey, organization, institutionid)
-            VALUES (%(publishingorgkey)s, %(organization)s, %(institutionid)s)
-            ON CONFLICT (publishingorgkey) DO UPDATE
-            SET organization = EXCLUDED.organization,
-                institutionid = EXCLUDED.institutionid
-        """
-
-        # Publishingorgkeys en la integrada sin fila en catálogo o sin organization en gbif_publishers.
-        logger.info("Ejecutando consulta")
-        publisher_rows = conn.execute(f"""
-            SELECT DISTINCT i."publishingorgkey"
-            FROM "{integrated}" i
-            LEFT JOIN "gbif_publishers" p ON i."publishingorgkey" = p."publishingorgkey"
-            WHERE i."publishingorgkey" IS NOT NULL
-              AND (p."publishingorgkey" IS NULL OR p."organization" IS NULL)
-        """).fetchall()
-        conn.commit()
-        missing_publisher_keys = [row[0] for row in publisher_rows if row[0]]
-        logger.info(
-            "PublishingOrgKeys sin organization en %s: %s",
-            integrated,
-            f"{len(missing_publisher_keys):,}",
+        ds_total, ds_fetched, ds_upserted, ds_errors = _enrich_from_gbif_api(
+            conn, integrated,
+            integrated_column='datasetkey',
+            catalog_table='gbif_datasets',
+            catalog_title_col='datasettitle',
+            api_url_template='https://api.gbif.org/v1/dataset/{key}',
+            upsert_sql=_DATASET_UPSERT_SQL,
+            upsert_kwargs=lambda data, key: {
+                'datasetkey': data.get('key') or key,
+                'license': data.get('license'),
+                'doi': data.get('doi'),
+                'datasettitle': data.get('title'),
+                'logourl': data.get('logoUrl'),
+                'datatype': data.get('type'),
+                'created': _parse_gbif_created_date(data.get('created')),
+            },
+            log_label='GBIF datasets',
+        )
+        pub_total, pub_fetched, pub_upserted, pub_errors = _enrich_from_gbif_api(
+            conn, integrated,
+            integrated_column='publishingorgkey',
+            catalog_table='gbif_publishers',
+            catalog_title_col='organization',
+            api_url_template='https://api.gbif.org/v1/organization/{key}',
+            upsert_sql=_PUBLISHER_UPSERT_SQL,
+            upsert_kwargs=lambda data, key: {
+                'publishingorgkey': data.get('key') or key,
+                'organization': data.get('title'),
+                'institutionid': f"https://www.gbif.org/publisher/{data.get('key') or key}",
+            },
+            log_label='GBIF publishers',
         )
 
-        pub_fetched = 0
-        pub_upserted = 0
-        pub_errors = 0
-        if missing_publisher_keys:
-            max_workers = min(20, max(4, len(missing_publisher_keys)))
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(
-                        _fetch_gbif_json,
-                        f'https://api.gbif.org/v1/organization/{key}',
-                        key,
-                        'publishingorgkey',
-                    ): key
-                    for key in missing_publisher_keys
-                }
-                for future in as_completed(futures):
-                    key = futures[future]
-                    try:
-                        data, ok = future.result()
-                    except Exception as e:
-                        logger.warning("Error ejecutando tarea GBIF para publishingorgkey %s: %s", key, e)
-                        pub_errors += 1
-                        continue
-
-                    if not ok:
-                        pub_errors += 1
-                        continue
-
-                    pub_fetched += 1
-                    pub_key = data.get('key') or key
-                    logger.info("Ejecutando consulta")
-                    conn.execute(publisher_upsert_sql, {
-                        'publishingorgkey': pub_key,
-                        'organization': data.get('title'),
-                        'institutionid': f'https://www.gbif.org/publisher/{pub_key}',
-                    })
-                    conn.commit()
-                    pub_upserted += 1
-                    time.sleep(0.002)
-
-        # Integridad referencial: FK sobre claves TEXT del catálogo (NOT VALID = no escanea huérfanos).
-        logger.info("Ejecutando consulta")
-        conn.execute(
-            f'ALTER TABLE "{integrated}" DROP CONSTRAINT IF EXISTS "{fk_dataset}"'
-        )
-        conn.commit()
-        logger.info("Ejecutando consulta")
-        conn.execute(f"""
-            ALTER TABLE "{integrated}"
-            ADD CONSTRAINT "{fk_dataset}"
-            FOREIGN KEY ("datasetkey")
-            REFERENCES "gbif_datasets" ("datasetkey")
-            ON UPDATE CASCADE
-            ON DELETE NO ACTION
-            NOT VALID
-        """)
-        conn.commit()
-        logger.info("Ejecutando consulta")
-        conn.execute(
-            f'ALTER TABLE "{integrated}" DROP CONSTRAINT IF EXISTS "{fk_publisher}"'
-        )
-        conn.commit()
-        logger.info("Ejecutando consulta")
-        conn.execute(f"""
-            ALTER TABLE "{integrated}"
-            ADD CONSTRAINT "{fk_publisher}"
-            FOREIGN KEY ("publishingorgkey")
-            REFERENCES "gbif_publishers" ("publishingorgkey")
-            ON UPDATE CASCADE
-            ON DELETE NO ACTION
-            NOT VALID
-        """)
-        conn.commit()
-        logger.info(
-            "FK NOT VALID añadidas en %s: %s, %s (VALIDATE CONSTRAINT cuando no queden huérfanos)",
-            integrated,
-            fk_dataset,
-            fk_publisher,
-        )
-
-        conn.commit()
+        # Integridad referencial: FK NOT VALID (no escanea huérfanos). VALIDATE CONSTRAINT
+        # se ejecuta aparte cuando no queden huérfanos.
+        for fk_name, fk_column, ref_table in (
+            (f"fk_{integrated}_gbif_datasetkey",       'datasetkey',       'gbif_datasets'),
+            (f"fk_{integrated}_gbif_publishingorgkey", 'publishingorgkey', 'gbif_publishers'),
+        ):
+            conn.execute(f'ALTER TABLE "{integrated}" DROP CONSTRAINT IF EXISTS "{fk_name}"')
+            conn.execute(f"""
+                ALTER TABLE "{integrated}"
+                ADD CONSTRAINT "{fk_name}"
+                FOREIGN KEY ("{fk_column}")
+                REFERENCES "{ref_table}" ("{fk_column}")
+                ON UPDATE CASCADE
+                ON DELETE NO ACTION
+                NOT VALID
+            """)
+            conn.commit()
+            logger.info("FK %s añadida en %s (NOT VALID)", fk_name, integrated)
 
     logger.info(
-        "Enriquecimiento GBIF datasets en %s (faltantes=%s, consultados=%s, upserts=%s, errores=%s)",
-        integrated,
-        f"{len(missing_dataset_keys):,}",
-        f"{ds_fetched:,}",
-        f"{ds_upserted:,}",
-        f"{ds_errors:,}",
+        "GBIF datasets en %s: faltantes=%s consultados=%s upserts=%s errores=%s",
+        integrated, f"{ds_total:,}", f"{ds_fetched:,}", f"{ds_upserted:,}", f"{ds_errors:,}",
     )
     logger.info(
-        "Enriquecimiento GBIF publishers en %s (faltantes=%s, consultados=%s, upserts=%s, errores=%s)",
-        integrated,
-        f"{len(missing_publisher_keys):,}",
-        f"{pub_fetched:,}",
-        f"{pub_upserted:,}",
-        f"{pub_errors:,}",
+        "GBIF publishers en %s: faltantes=%s consultados=%s upserts=%s errores=%s",
+        integrated, f"{pub_total:,}", f"{pub_fetched:,}", f"{pub_upserted:,}", f"{pub_errors:,}",
     )
