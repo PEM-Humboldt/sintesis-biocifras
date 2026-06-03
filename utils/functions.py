@@ -489,7 +489,7 @@ def fill_species_from_scientificname(db, table_name):
 
 
 # -----------------------------------------------------------------------------------------------------
-# Nombre de país Colombia en integrada (DwC country) a partir de countrycode
+# Nombre de país Colombia en integrada (DwC country)
 # -----------------------------------------------------------------------------------------------------
 
 def normalize_integrated_country(db, table_name):
@@ -764,7 +764,7 @@ def normalize_stateprovince_county(db, table_name):
         """)
         conn.commit()
 
-        # Estadísticas frescas tras spatials_joins para que el planner elija bien.
+        # Estadísticas actualizadastras spatials_joins para que el planner.
         conn.execute(f'ANALYZE "{locality}"')
         conn.execute(f"SET work_mem = '{_WORK_MEM}'")
         conn.execute("SET max_parallel_workers_per_gather = 4")
@@ -790,7 +790,7 @@ def normalize_stateprovince_county(db, table_name):
               AND d."id" = a."geo_master_geography_id"
         """, label="Validación 1 (alias departamento)")
 
-        # Validación 2 (departamento): región marina Nariño → 'Nariño'.
+        # Validación 2 (departamento): región marina Nariño  (Afluvial) se asigna a todo nariño 'Nariño'.
         _locality_queries_helper(conn, f"""
             WITH batch AS (
                 SELECT ctid
@@ -805,14 +805,13 @@ def normalize_stateprovince_county(db, table_name):
             WHERE t.ctid = b.ctid
         """, label="Validación 2 (Nariño marítimo)")
 
-        # Validación 3 (departamento): copia MGN sólo cuando falta verbatim.
+        # Validación 3 (departamento): copia MGN sólo cuando falta stateprovincevalidated.
         _locality_queries_helper(conn, f"""
             WITH batch AS (
                 SELECT ctid
                 FROM "{locality}"
                 WHERE "stateprovincemgn" IS NOT NULL
                   AND "stateprovincevalidated" IS NULL
-                  AND "stateprovince" IS NULL
                 LIMIT {batch_size}
             )
             UPDATE "{locality}" i
@@ -983,6 +982,10 @@ def validate_taxonomic_species(db, table_name):
                 "transplanted"       TEXT,
                 "migratory"          TEXT,
                 "endemic"            TEXT,
+                "ismarine"           TEXT,
+                "isbrackish"         TEXT,
+                "isfreshwater"       TEXT,
+                "isterrestrial"      TEXT,
                 "referencelist"      TEXT,
                 "flagtaxo"           TEXT,
                 CONSTRAINT "uq_{species_tbl}_species" UNIQUE ("species")
@@ -1127,6 +1130,8 @@ def validate_localities(db, table_name):
                 "narinomaritimeregion"     TEXT,
                 "stateprovincevalidated"   TEXT,
                 "countyvalidated"          TEXT,
+                "stateprovinceslug"        TEXT,
+                "countyslug"               TEXT,
                 "stateprovincevalidation"  BOOLEAN,
                 "countyvalidation"         BOOLEAN,
                 "flaggeo"                  TEXT,
@@ -1521,7 +1526,7 @@ def validate_geography(db, table_name):
             f"{total_fg:,}",
         )
 
-    logger.info("Ejecutando vacuum analyze")
+
     _run_table_maintenance(db, locality_tbl)
     logger.info("VACUUM (ANALYZE) en %s tras validación geográfica (tabla de localidades)", locality_tbl)
 
@@ -1539,6 +1544,7 @@ def validate_geography(db, table_name):
 # UPDATE "taxonomic_species_validation" v SET "exotic" = t."exotic", ... FROM "taxonomic_invasive_exotic" t WHERE v."species" = t."species"
 # UPDATE "taxonomic_species_validation" v SET "migratory" = t."migratory", "endemic" = t."endemic" FROM "taxonomic_col_list" t WHERE v."species" = t."species"
 # UPDATE "taxonomic_species_validation" v SET "referencelist" = t."datasetid" FROM "taxonomic_col_list" t WHERE v."species" = t."species"
+# UPDATE ... SET ismarine/isbrackish/isfreshwater/isterrestrial desde taxonomic_worms.environmentaphiaworms (ILIKE)
 _FLAGTAXO_CLASSES = ('Aves', 'Mammalia', 'Reptilia', 'Squamata', 'Crocodylia', 'Testudines')
 _FLAGTAXO_ORDERS = ('Lepidoptera','Odonota')
 
@@ -1573,7 +1579,39 @@ _TAXONOMIC_JOINS = {
             'datasetid': 'referencelist',
         },
     },
+    'taxonomic_worms': {
+        'source_column': 'environmentaphiaworms',
+        'columns': {
+            'ismarine': 'Marine',
+            'isbrackish': 'Brackish',
+            'isfreshwater': 'Freshwater',
+            'isterrestrial': 'Terrestrial',
+        },
+    },
 }
+
+
+def _taxonomic_join_set_parts(col_map, *, source_column=None):
+    """Arma queries SET para UPDATE ... FROM en taxonomic_joins."""
+    set_parts = []
+    if source_column:
+        for dest_col, flag in col_map.items():
+            set_parts.append(
+                f'"{dest_col}" = CASE '
+                f'WHEN t."{source_column}" ILIKE \'%{flag}%\' THEN \'{flag}\' '
+                f'ELSE v."{dest_col}" END'
+            )
+        return set_parts
+    for src, dest in col_map.items():
+        if dest == 'migratory':
+            set_parts.append(
+                f'"{dest}" = CASE '
+                f'WHEN v."migratory" IS NULL THEN t."{src}" '
+                f'ELSE v."migratory" END'
+            )
+        else:
+            set_parts.append(f'"{dest}" = t."{src}"')
+    return set_parts
 
 
 def taxonomic_joins(db, table_name):
@@ -1583,19 +1621,10 @@ def taxonomic_joins(db, table_name):
     with db.connect() as conn:
         for src_table, config in _TAXONOMIC_JOINS.items():
             col_map = config['columns']
-
-            # migratory solo se completa si está nulo, para no depender del orden
-            # entre taxonomic_migratory y taxonomic_col_list.
-            set_parts = []
-            for src, dest in col_map.items():
-                if dest == 'migratory':
-                    set_parts.append(
-                        f'"{dest}" = CASE '
-                        f'WHEN v."migratory" IS NULL THEN t."{src}" '
-                        f'ELSE v."migratory" END'
-                    )
-                else:
-                    set_parts.append(f'"{dest}" = t."{src}"')
+            set_parts = _taxonomic_join_set_parts(
+                col_map,
+                source_column=config.get('source_column'),
+            )
             set_clause = ',\n                    '.join(set_parts)
             logger.info("Ejecutando consulta")
             conn.execute(f"""
