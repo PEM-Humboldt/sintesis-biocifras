@@ -1552,8 +1552,8 @@ _TAXONOMIC_JOINS = {
     'taxonomic_cites': {
         'columns': {'cites': 'cites'},
     },
-    'taxonomic_threat_uicn': {
-        'columns': {'threatstatus': 'threatstatusuicn'},
+    'taxonomic_threat_iucn': {
+        'columns': {'threatstatus': 'threatstatusiucn'},
     },
     'taxonomic_threat_mads': {
         'columns': {'threatstatus': 'threatstatusmads'},
