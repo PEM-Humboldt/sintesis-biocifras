@@ -30,8 +30,8 @@ from utils.connection import get_db, check_connection
 load_dotenv()
 
 from utils.functions import (
-    OCCURRENCE_COLS,
-    VERBATIM_COLS,
+    SIMPLE_COLS,
+    OCURRENCE_COLS,
     SQL_COLS,
     register_load,
     tables_operations,
@@ -40,11 +40,14 @@ from utils.functions import (
     create_staging_indexes,
     create_integrated_table,
     fill_species_from_scientificname,
+    normalize_integrated_country,
     link_taxonrank_reference,
     add_gbifid_index,
     validate_localities,
-    create_join_validation_columns,
     create_species_index,
+    validate_taxonomic_species,
+    link_integrated_taxonomic_species_id,
+    link_integrated_locality_id,
     spatials_joins,
     normalize_stateprovince_county,
     validate_geography,
@@ -55,15 +58,13 @@ from utils.functions import (
 
 # Tipo de carga: sql (descarga GBIF desde GBIF API SQL API) o regular (descarga archivo interpretado y DwC-A desde GBIF
 UPLOAD_TYPE = "sql"
-# Tamaño del buffer para la carga de datos.
-FLUSH_EVERY = int(os.getenv('FLUSH_EVERY', '500000'))
 
 logger = setup_logger(os.getenv('LOG_FILE_PATH'))
 today = date.today()
 #Formato de la fecha para el sufijo de las tablas de staging y la tabla integrada
 suffix = today.strftime('%Y%m%d')
 
-logger.info("Inicio del proceso de carga — sufijo: %s", suffix)
+logger.info("Inicio del proceso de carga con fecha: %s", suffix)
 # Obtener la conexión a la base de datos PostgreSQL usando psycopg2
 db = get_db()
 
@@ -75,44 +76,48 @@ logger.info("Conectado a la base de datos.")
 
 try:
     table_integrated_name = f'dwc_integrated_{suffix}'
+    #table_names = {'integrated': table_integrated_name}
+    #origin = 'SQL download'
+    if True: # Si la tabla integrada ya existe, no ejecuta la carga ni los pasos 80-107 (staging, COPY, PK, species, etc.).
+        if UPLOAD_TYPE == "sql":
+            table_names = timer(tables_operations, "Operaciones sobre la tabla de staging dwc_sql")(
+                db, suffix, upload_type=UPLOAD_TYPE
+            )
+            timer(data_upload, "Carga de datos desde SQL_FILE")(
+                db, os.getenv('SQL_FILE'), table_names['sql'], SQL_COLS
+            )
+            timer(finalize_sql_table, "Renombrando campos y tabla SQL a integrated")(
+                db, table_names['sql'], table_integrated_name
+            )
+            table_names = {'integrated': table_integrated_name}
+            origin = 'SQL download'
+        else:
+            table_names = timer(tables_operations, "Operaciones sobre las tablas de staging dwc_occurrence y dwc_verbatim")(db, suffix)
+            timer(data_upload, "Carga de datos desde occurrence.txt")(
+                db, os.getenv('SIMPLE_FILE'), table_names['occurrence'], SIMPLE_COLS
+            )
+            timer(data_upload, "Carga de datos desde verbatim.txt")(
+                db, os.getenv('OCURRENCE_FILE'), table_names['verbatim'], OCURRENCE_COLS
+            )
+            timer(create_staging_indexes, "Creación de índices en las tablas de staging dwc_occurrence y dwc_verbatim")(db, table_names)
+            timer(create_integrated_table, "Creación de la tabla integrada dwc_occurrence_integrated")(db, table_names)
+            origin = 'DwC-A download'
 
-    if UPLOAD_TYPE == "sql":
-        table_names = timer(tables_operations, "Operaciones sobre la tabla de staging dwc_sql")(
-            db, suffix, upload_type=UPLOAD_TYPE
-        )
-        timer(data_upload, "Carga de datos desde SQL_FILE")(
-            db, os.getenv('SQL_FILE'), table_names['sql'], SQL_COLS, FLUSH_EVERY
-        )
-        timer(finalize_sql_table, "Renombrando campos y tabla SQL a integrated")(
-            db, table_names['sql'], table_integrated_name
-        )
-        table_names = {'integrated': table_integrated_name}
-        origin = 'SQL download'
-    else:
-        table_names = timer(tables_operations, "Operaciones sobre las tablas de staging dwc_occurrence y dwc_verbatim")(db, suffix)
-        timer(data_upload, "Carga de datos desde occurrence.txt")(
-            db, os.getenv('OCCURRENCE_FILE'), table_names['occurrence'], OCCURRENCE_COLS, FLUSH_EVERY
-        )
-        timer(data_upload, "Carga de datos desde verbatim.txt")(
-            db, os.getenv('VERBATIM_FILE'), table_names['verbatim'], VERBATIM_COLS, FLUSH_EVERY
-        )
-        timer(create_staging_indexes, "Creación de índices en las tablas de staging dwc_occurrence y dwc_verbatim")(db, table_names)
-        timer(create_integrated_table, "Creación de la tabla integrada dwc_occurrence_integrated")(db, table_names)
-        origin = 'DwC-A download'
-
-    timer(create_join_validation_columns, "Crando columnas para cruces y validaciones en la tabla integrada")(db, table_names['integrated'])
-    timer(fill_species_from_scientificname, "Completando campo species desde scientificname")(db, table_names['integrated'])
-    timer(link_taxonrank_reference, "Vinculando taxonrank con catálogo de referencia")(db, table_names['integrated'])
-    timer(add_gbifid_index, "Añadiendo PK la tabla integrada")(db, table_names['integrated'])
-    timer(validate_localities, "Creando tabla de localidades únicas y referencia en integrada")(db, table_names['integrated'])
+        timer(fill_species_from_scientificname, "Completando campo species desde scientificname")(db, table_names['integrated'])
+        timer(add_gbifid_index, "Añadiendo PK la tabla integrada")(db, table_names['integrated'])
+        timer(link_taxonrank_reference, "Vinculando taxonrank con catálogo de referencia")(db, table_names['integrated'])
+        timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(db, table_names['integrated'])
+    timer(validate_taxonomic_species, "Catálogo taxonomic_species_validation desde integrada")(db, table_names['integrated'])
+    timer(taxonomic_joins, "Cruces taxonómicos con listados")(db, table_names['integrated'])
+    timer(clean_threatstatus_fields, "Normalizando campos threatstatus antes de API")(db, table_names['integrated'])
+    timer(validate_localities, "Catálogo geo_locality_validation desde integrada")(db, table_names['integrated'])
     timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(db, table_names['integrated'])
     timer(normalize_stateprovince_county, "Normalizando stateprovince/county antes de validación")(db, table_names['integrated'])
     timer(validate_geography, "Validación geográfica")(db, table_names['integrated'])
-    #timer(create_species_index, "Creando índice BTREE de species en la tabla integrada")(db, table_names['integrated'])
-    #timer(taxonomic_joins, "Cruces taxonómicos con listados")(db, table_names['integrated'])
-    #timer(clean_threatstatus_fields, "Normalizando campos threatstatus antes de API")(db, table_names['integrated'])
-    #timer(gbif_api_calls, "Enriqueciendo metadatos de datasets y publicadores GBIF")(db, table_names['integrated'])
-
+    timer(gbif_api_calls, "Enriqueciendo metadatos de datasets y publicadores GBIF")(db, table_names['integrated'])
+    timer(link_integrated_taxonomic_species_id, "Enlace integrada → taxonomic_species_validation (lotes)")(db, table_names['integrated'])
+    timer(link_integrated_locality_id, "Enlace integrada → geo_locality_validation (lotes, índice y FK)")(db, table_names['integrated'])
+    #timer(normalize_integrated_country, "Campo country (CO → Colombia) por lotes")(db, table_names['integrated'])
     register_load(db, table_names, today, origin)
     logger.info("Proceso completado.")
 
