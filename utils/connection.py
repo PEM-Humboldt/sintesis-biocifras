@@ -36,6 +36,7 @@ _REQUIRED_REFERENCE_TABLES = (
     'taxonomic_taxon_rank',
     'taxonomic_threat_mads',
     'taxonomic_threat_iucn',
+    'taxonomic_groups',
 )
 
 
