@@ -26,7 +26,7 @@ ESTIMATED_SPECIES_MV_LEGACY = 'estimated_species_totals'
 ESTIMATED_SPECIES_STAGING = '_estimated_species_staging'
 
 TAXON_RANKS = ('kingdom', 'phylum', 'class', 'order', 'family', 'genus', 'species')
-_GROUPS_FILTER = 'grouptype IS NULL'
+_GROUPS_FILTER = "grouptype IS NOT NULL AND BTRIM(grouptype) <> '-'"
 
 _ESTIMATED_REQUIRED_TABLES = (
     'taxonomic_groups',
@@ -266,13 +266,13 @@ def _build_estimated_species_mv_sql() -> str:
             'III': 'especies_cites_iii_estimadas',
         }, 'especies_cites_total_estimadas'),
         ('mads', 'taxonomic_threat_mads', 'threatstatus', None, {
-            'CR': 'especies_amenazadas_nacional_cr_estimadas',
+            'CR': 'especies_amenazadas_nacional_CR_estimadas',
             'EN': 'especies_amenazadas_nacional_EN_estimadas',
             'VU': 'especies_amenazadas_nacional_VU_estimadas',
         }, 'especies_amenazadas_nacional_total_estimadas'),
         ('iucn', 'taxonomic_threat_iucn', 'threatstatus',
          "threatstatus IN ('VU', 'EN', 'CR')", {
-            'CR': 'especies_amenazadas_global_cr_estimadas',
+            'CR': 'especies_amenazadas_global_CR_estimadas',
             'EN': 'especies_amenazadas_global_EN_estimadas',
             'VU': 'especies_amenazadas_global_VU_estimadas',
         }, 'especies_amenazadas_global_total_estimadas'),
@@ -329,13 +329,13 @@ def _build_estimated_species_mv_sql() -> str:
             'especies_cites_total_estimadas',
         ],
         'mads': [
-            'especies_amenazadas_nacional_cr_estimadas',
+            'especies_amenazadas_nacional_CR_estimadas',
             'especies_amenazadas_nacional_EN_estimadas',
             'especies_amenazadas_nacional_VU_estimadas',
             'especies_amenazadas_nacional_total_estimadas',
         ],
         'iucn': [
-            'especies_amenazadas_global_cr_estimadas',
+            'especies_amenazadas_global_CR_estimadas',
             'especies_amenazadas_global_EN_estimadas',
             'especies_amenazadas_global_VU_estimadas',
             'especies_amenazadas_global_total_estimadas',
