@@ -1539,7 +1539,7 @@ def validate_geography(db, table_name):
 # Los cruces actualizan taxonomic_species_validation (v) por species; la integrada enlaza por taxonomic_species_id.
 # Es equivalente a ejecutar la siguiente consulta:
 # UPDATE "taxonomic_species_validation" v SET "cites" = t."cites" FROM "taxonomic_cites" t WHERE v."species" = t."species"
-# UPDATE "taxonomic_species_validation" v SET "threatstatusuicn" = t."threatstatus" FROM "taxonomic_threat_uicn" t WHERE v."species" = t."species"
+# UPDATE "taxonomic_species_validation" v SET "threatstatusuicn" = t."threatstatus" FROM "taxonomic_threat_iucn" t WHERE v."species" = t."species"
 # UPDATE "taxonomic_species_validation" v SET "threatstatusmads" = t."threatstatus" FROM "taxonomic_threat_mads" t WHERE v."species" = t."species"
 # UPDATE "taxonomic_species_validation" v SET "exotic" = t."exotic", ... FROM "taxonomic_invasive_exotic" t WHERE v."species" = t."species"
 # UPDATE "taxonomic_species_validation" v SET "migratory" = t."migratory", "endemic" = t."endemic" FROM "taxonomic_col_list" t WHERE v."species" = t."species"
@@ -1553,7 +1553,7 @@ _TAXONOMIC_JOINS = {
         'columns': {'cites': 'cites'},
     },
     'taxonomic_threat_iucn': {
-        'columns': {'threatstatus': 'threatstatusiucn'},
+        'columns': {'threatstatus': 'threatstatusuicn'},
     },
     'taxonomic_threat_mads': {
         'columns': {'threatstatus': 'threatstatusmads'},

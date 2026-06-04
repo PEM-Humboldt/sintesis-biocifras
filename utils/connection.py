@@ -35,7 +35,7 @@ _REQUIRED_REFERENCE_TABLES = (
     'taxonomic_migratory',
     'taxonomic_taxon_rank',
     'taxonomic_threat_mads',
-    'taxonomic_threat_uicn',
+    'taxonomic_threat_iucn',
 )
 
 
