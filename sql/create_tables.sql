@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS dwc_verbatim (
 
 CREATE TABLE IF NOT EXISTS public.taxonomic_taxon_rank (
     id serial PRIMARY KEY,
-    taxonrank text NOT NULL,
+    taxonrank text NOT NULL UNIQUE,
     taxonranktranslated text
 );
 
@@ -107,4 +107,4 @@ VALUES
 ('SUBSPECIES','Subespecie'),
 ('VARIETY','Variedad'),
 ('FORM','Forma'),
-('UNRANKED','\N');
+('UNRANKED',NULL) ON CONFLICT (taxon) DO UPDATE SET taxonranktranslated=EXCLUDED.taxonranktranslated;
