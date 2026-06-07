@@ -88,3 +88,23 @@ CREATE TABLE IF NOT EXISTS dwc_verbatim (
     "publishingCountry" TEXT,
     "lastParsed" TIMESTAMPTZ
 );
+
+CREATE TABLE IF NOT EXISTS public.taxonomic_taxon_rank (
+    id serial PRIMARY KEY,
+    taxonrank text NOT NULL,
+    taxonranktranslated text
+);
+
+INSERT INTO taxonomic_taxon_rank(taxonrank,taxonranktranslated)
+VALUES
+('KINGDOM','Reino'),
+('PHYLUM','Filo'),
+('CLASS','Clase'),
+('ORDER','Orden'),
+('FAMILY','Familia'),
+('GENUS','Género'),
+('SPECIES','Especie'),
+('SUBSPECIES','Subespecie'),
+('VARIETY','Variedad'),
+('FORM','Forma'),
+('UNRANKED','\N');
