@@ -19,7 +19,7 @@ El script sigue los siguientes pasos:
 
 import os
 import sys
-# Para tener la fecha actual de ejecución del script y para el sufijo de las tablas de staging y la tabla integrada
+# Fecha de ejecución para table_registry.created_at
 from datetime import date
 # Leer variables de entorno desde archivo .env en la raíz del proyecto
 from dotenv import load_dotenv
@@ -30,6 +30,7 @@ from utils.connection import get_db, check_connection
 load_dotenv()
 
 from utils.functions import (
+    DWC_INTEGRATED_TABLE,
     SIMPLE_COLS,
     OCURRENCE_COLS,
     SQL_COLS,
@@ -61,10 +62,8 @@ UPLOAD_TYPE = "sql"
 
 logger = setup_logger(os.getenv('LOG_FILE_PATH'))
 today = date.today()
-#Formato de la fecha para el sufijo de las tablas de staging y la tabla integrada
-suffix = today.strftime('%Y%m%d')
 
-logger.info("Inicio del proceso de carga con fecha: %s", suffix)
+logger.info("Inicio del proceso de carga (fecha registro: %s)", today.isoformat())
 # Obtener la conexión a la base de datos PostgreSQL usando psycopg2
 db = get_db()
 
@@ -75,24 +74,23 @@ if not check_connection(db):
 logger.info("Conectado a la base de datos.")
 
 try:
-    table_integrated_name = f'dwc_integrated_{suffix}'
-    #table_names = {'integrated': table_integrated_name}
-    #origin = 'SQL download'
     if True: # Si la tabla integrada ya existe, no ejecuta la carga ni los pasos 80-107 (staging, COPY, PK, species, etc.).
         if UPLOAD_TYPE == "sql":
             table_names = timer(tables_operations, "Operaciones sobre la tabla de staging dwc_sql")(
-                db, suffix, upload_type=UPLOAD_TYPE
+                db, upload_type=UPLOAD_TYPE
             )
             timer(data_upload, "Carga de datos desde SQL_FILE")(
                 db, os.getenv('SQL_FILE'), table_names['sql'], SQL_COLS
             )
             timer(finalize_sql_table, "Renombrando campos y tabla SQL a integrated")(
-                db, table_names['sql'], table_integrated_name
+                db, table_names['sql'], DWC_INTEGRATED_TABLE
             )
-            table_names = {'integrated': table_integrated_name}
+            table_names = {'integrated': DWC_INTEGRATED_TABLE}
             origin = 'SQL download'
         else:
-            table_names = timer(tables_operations, "Operaciones sobre las tablas de staging dwc_occurrence y dwc_verbatim")(db, suffix)
+            table_names = timer(tables_operations, "Operaciones sobre las tablas de staging dwc_occurrence y dwc_verbatim")(
+                db, upload_type='regular'
+            )
             timer(data_upload, "Carga de datos desde occurrence.txt")(
                 db, os.getenv('SIMPLE_FILE'), table_names['occurrence'], SIMPLE_COLS
             )

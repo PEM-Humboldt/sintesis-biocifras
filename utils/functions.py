@@ -57,6 +57,11 @@ _WORK_MEM = os.getenv('WORK_MEM', '64MB')
 # Sistemas operativos Linux se deja en 4 o con pruebas en valores mayores
 _MAX_PARALLEL_MAINTENANCE_WORKERS = int(os.getenv('MAX_PARALLEL_MAINTENANCE_WORKERS', '4'))
 
+DWC_OCCURRENCE_TABLE = 'dwc_occurrence'
+DWC_VERBATIM_TABLE = 'dwc_verbatim'
+DWC_SQL_TABLE = 'dwc_sql'
+DWC_INTEGRATED_TABLE = 'dwc_integrated'
+
 
 # ------------------------------------------------------------------------------------------------------------
 # Definición de listas y variables para el proceso de carga desde los archivos TSV de GBIF
@@ -213,13 +218,12 @@ def _build_create_ddl(table_name, col_types):
         WITH (autovacuum_enabled = false);
     """
 
-def tables_operations(db, suffix, upload_type=None):
-    # Crea tablas con sufijo de fecha. Si ya existen, las elimina y vuelven a crear para garantizar una carga desde 0.
-    # Recrea staging, elimina la integrada con sufijo y luego las tablas de validación.
+def tables_operations(db, upload_type=None):
+    # Crea tablas de staging e integrada con nombres fijos. Si ya existen, las elimina y vuelven a crear.
+    # Recrea staging, elimina la integrada y luego las tablas de validación.
     # Se tienen el cuenta el tipo de carga: sql o regular.
     # Parámetros:
     # - db: Conexión al pool de conexiones de PostgreSQL.
-    # - suffix: Sufijo de fecha para las tablas de staging y la tabla integrada.
     # - upload_type: Tipo de carga: sql o regular.
     # Retorna:
     # - table_names: Diccionario con los nombres de las tablas de staging y la tabla integrada.
@@ -230,16 +234,15 @@ def tables_operations(db, suffix, upload_type=None):
             f"upload_type inválido: {upload_type}. Debe ser 'sql' o 'regular'."
         )
 
-    integrated_tname = f'dwc_integrated_{suffix}'
     if upload_type == "sql":
-        table_names = {'sql': f'dwc_sql_{suffix}', 'integrated': integrated_tname}
+        table_names = {'sql': DWC_SQL_TABLE, 'integrated': DWC_INTEGRATED_TABLE}
         type_maps = {'sql': _SQL_COL_TYPES}
         keys = ('sql',)
     else:
         table_names = {
-            'occurrence': f'dwc_occurrence_{suffix}',
-            'verbatim': f'dwc_verbatim_{suffix}',
-            'integrated': integrated_tname,
+            'occurrence': DWC_OCCURRENCE_TABLE,
+            'verbatim': DWC_VERBATIM_TABLE,
+            'integrated': DWC_INTEGRATED_TABLE,
         }
         type_maps = {
             'occurrence': _SIMPLE_TYPES,
@@ -250,9 +253,9 @@ def tables_operations(db, suffix, upload_type=None):
     if True:
         with db.connect() as conn:
             logger.info("Ejecutando consulta")
-            conn.execute(f'DROP TABLE IF EXISTS "{integrated_tname}" CASCADE')
+            conn.execute(f'DROP TABLE IF EXISTS "{DWC_INTEGRATED_TABLE}" CASCADE')
             conn.commit()
-            logger.info("DROP TABLE %s", integrated_tname)
+            logger.info("DROP TABLE %s", DWC_INTEGRATED_TABLE)
             for key in keys:
                 tname = table_names[key]
                 logger.info("Ejecutando consulta")
@@ -276,33 +279,29 @@ def tables_operations(db, suffix, upload_type=None):
 # -------------------------------------------------------------------------------------------------------------------------
 
 def register_load(db, table_names, created_at, origin):
-    # Actualiza el campo is_latest de las tablas de staging y la tabla integrada.
+    # Registra la carga en table_registry (created_at = fecha de ejecución; nombres de tabla fijos).
     # Parámetros:
     # - db: Conexión al pool de conexiones de PostgreSQL.
     # - table_names: Diccionario con los nombres de las tablas de staging y la tabla integrada.
-    # - created_at: Fecha de creación de la tabla.
+    # - created_at: Fecha de la carga registrada en table_registry.
     # - origin: Origen de la carga: SQL o DwC-A.
     # Retorna:
     # - None: No retorna nada.
-    prefixes = {
-        'occurrence': 'dwc_occurrence_%',
-        'verbatim': 'dwc_verbatim_%',
-        'integrated': 'dwc_integrated_%',
-    }
     with db.connect() as conn:
-        for key, table_name in table_names.items():
-            prefix = prefixes[key]
+        for table_name in table_names.values():
             logger.info("Ejecutando consulta")
             conn.execute(
                 "UPDATE table_registry SET is_latest = FALSE "
-                "WHERE table_name LIKE %(prefix)s AND is_latest = TRUE"
-            , {'prefix': prefix})
+                "WHERE table_name = %(table_name)s AND is_latest = TRUE",
+                {'table_name': table_name},
+            )
             conn.commit()
             logger.info("Ejecutando consulta")
             conn.execute(
                 "INSERT INTO table_registry (table_name, origin, created_at, is_latest) "
-                "VALUES (%(table_name)s, %(origin)s, %(created_at)s, TRUE)"
-            , {'table_name': table_name, 'origin': origin, 'created_at': created_at})
+                "VALUES (%(table_name)s, %(origin)s, %(created_at)s, TRUE)",
+                {'table_name': table_name, 'origin': origin, 'created_at': created_at},
+            )
         conn.commit()
     logger.info("Datos cargados en table_registry.")
 

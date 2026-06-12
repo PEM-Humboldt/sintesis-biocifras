@@ -15,12 +15,12 @@ import sys
 from dotenv import load_dotenv
 
 from utils.connection import check_connection, get_db, table_exists
+from utils.functions import DWC_INTEGRATED_TABLE
 
 load_dotenv()
 
 logger = logging.getLogger('sintesis_biocifras')
 
-INTEGRATED_PREFIX = 'dwc_integrated_%'
 ESTIMADAS_TOTAL_MV = 'estimadas_total'
 ESTIMATED_SPECIES_MV_LEGACY = 'estimated_species_totals'
 ESTIMATED_SPECIES_STAGING = '_estimated_species_staging'
@@ -57,30 +57,16 @@ def _assert_estimated_tables(db):
         raise ValueError(f'Faltan tablas para cifras estimadas: {", ".join(missing)}')
 
 
-def get_latest_integrated_table(db):
-    with db.connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT table_name
-            FROM table_registry
-            WHERE is_latest = TRUE
-              AND table_name LIKE %(prefix)s
-            ORDER BY created_at DESC, id DESC
-            LIMIT 1
-            """,
-            {'prefix': INTEGRATED_PREFIX},
-        ).fetchall()
-    if not rows:
-        raise ValueError(
-            'No hay tabla integrada con is_latest=TRUE en table_registry.'
-        )
-    return rows[0][0]
+def get_integrated_table(db):
+    if not table_exists(db, DWC_INTEGRATED_TABLE):
+        raise ValueError(f'La tabla integrada {DWC_INTEGRATED_TABLE} no existe en la base de datos.')
+    return DWC_INTEGRATED_TABLE
 
 
 def print_record_count(db, table_name):
     with db.connect() as conn:
         total = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchall()[0][0]
-    print(f'Tabla integrada (is_latest): {table_name}')
+    print(f'Tabla integrada: {table_name}')
     print(f'Registros: {total:,}')
     return total
 
@@ -180,10 +166,10 @@ def _sql_rank_counts_union(table: str, thematic_col: str, where_clause: str | No
             SELECT "{rank}" AS grupo_tax,
                    '{rank}' AS taxon_rank,
                    "{thematic_col}" AS thematic,
-                   COUNT(*)::bigint AS taxones
+                   COUNT(*) AS taxones
             FROM "{table}"
             WHERE "{rank}" IS NOT NULL
-              AND NULLIF(BTRIM("{thematic_col}"::text), '') IS NOT NULL
+              AND NULLIF(BTRIM("{thematic_col}"), '') IS NOT NULL
               {extra}
             GROUP BY 1, 2, 3
         """)
@@ -415,7 +401,7 @@ def main():
             create_municipio_materialized_view(db)
 
         try:
-            table_name = get_latest_integrated_table(db)
+            table_name = get_integrated_table(db)
             print_record_count(db, table_name)
         except ValueError as e:
             logger.warning('Tabla integrada: %s', e)

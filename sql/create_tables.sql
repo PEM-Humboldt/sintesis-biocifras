@@ -1,6 +1,6 @@
 -- DDL de referencia para las tablas del proyecto sintesis-biocifras
 -- Ejecutable directamente en PostgreSQL (psql, pgAdmin, DBeaver, etc.)
--- En el flujo normal, main.py crea las tablas con sufijo de fecha (ej: dwc_occurrence_20260304)
+-- En el flujo normal, main.py crea las tablas con nombres fijos (dwc_occurrence, dwc_verbatim, dwc_integrated)
 
 -- Tabla de registro de versiones de tablas
 
