@@ -62,3 +62,6 @@ with open("initialization_scripts/threat_iucn.py") as f:
 
 with open("initialization_scripts/threat_mads.py") as f:
 	exec(f.read())
+
+with open("initialization_scripts/worms_validation.py") as f:
+	exec(f.read())
