@@ -107,4 +107,4 @@ VALUES
 ('SUBSPECIES','Subespecie'),
 ('VARIETY','Variedad'),
 ('FORM','Forma'),
-('UNRANKED',NULL) ON CONFLICT (taxon) DO UPDATE SET taxonranktranslated=EXCLUDED.taxonranktranslated;
+('UNRANKED',NULL) ON CONFLICT (taxonrank) DO UPDATE SET taxonranktranslated = EXCLUDED.taxonranktranslated;
