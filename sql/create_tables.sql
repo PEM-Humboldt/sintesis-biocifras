@@ -26,10 +26,12 @@ CREATE TABLE IF NOT EXISTS public.gbif_datasets (
 
 
 CREATE TABLE IF NOT EXISTS table_registry (
-    id SERIAL PRIMARY KEY,
-    table_name TEXT NOT NULL,
-    created_at DATE NOT NULL,
-    is_latest BOOLEAN NOT NULL DEFAULT TRUE
+	id serial NOT NULL,
+	table_name text NOT NULL,
+	origin text NULL,
+	created_at date NOT NULL,
+	is_latest bool DEFAULT true NOT NULL,
+	CONSTRAINT table_registry_pkey PRIMARY KEY (id)
 );
 
 -- Tabla staging: occurrence (desde occurrence.txt de GBIF)
