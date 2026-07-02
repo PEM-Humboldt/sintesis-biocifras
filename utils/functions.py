@@ -28,6 +28,7 @@ Rendimiento: FLUSH_EVERY controla el lote de COPY (SQL_BATCH_SIZE); UPDATE_BATCH
 - taxonomic_joins: Cruza taxonomic_species_validation con tablas taxonómicas por species.
 - clean_threatstatus_fields: Normaliza threatstatus en taxonomic_species_validation (IUCN/MADS).
 - gbif_api_calls: Completa gbif_datasets y gbif_publishers desde tablas locales y API GBIF; añade FK NOT VALID desde la integrada hacia esas tablas (validar aparte con VALIDATE CONSTRAINT).
+- create_integrated_fk_indexes: Índices BTREE en datasetkey, publishingorgkey y taxonomic_species_id de la integrada.
 """
 
 import csv
@@ -502,6 +503,28 @@ def normalize_integrated_country(db, table_name):
         )
         conn.commit()
     logger.info("Columna country añadida con DEFAULT 'Colombia' en %s", table_name)
+
+
+# -----------------------------------------------------------------------------------------------------
+# Índices BTREE en columnas FK de la integrada (dataset, publisher, especie)
+# -----------------------------------------------------------------------------------------------------
+
+def create_integrated_fk_indexes(db, table_name):
+    """Crea índices BTREE en columnas con FK hacia catálogos GBIF y taxonomic_species_validation."""
+    integrated = table_name
+    fk_columns = (
+        ('datasetkey', f'idx_{integrated}_datasetkey'),
+        ('publishingorgkey', f'idx_{integrated}_publishingorgkey'),
+        ('taxonomic_species_id', f'idx_{integrated}_taxonomic_species_id'),
+    )
+    with db.connect() as conn:
+        for column, idx_name in fk_columns:
+            conn.execute(
+                f'CREATE INDEX IF NOT EXISTS "{idx_name}" '
+                f'ON "{integrated}" USING BTREE ("{column}")'
+            )
+            conn.commit()
+            logger.info('Indice BTREE creado: %s (%s)', idx_name, column)
 
 
 # -----------------------------------------------------------------------------------------------------

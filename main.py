@@ -56,6 +56,7 @@ from utils.functions import (
     taxonomic_joins,
     clean_threatstatus_fields,
     gbif_api_calls,
+    create_integrated_fk_indexes,
 )
 
 # Tipo de carga: sql (descarga GBIF desde GBIF API SQL API) o regular (descarga archivo interpretado y DwC-A desde GBIF
@@ -118,6 +119,7 @@ try:
     timer(normalize_integrated_country, "Normalizando country desde integrada")(db, table_names['integrated'])
     timer(link_integrated_taxonomic_species_id, "Enlace integrada → taxonomic_species_validation (lotes)")(db, table_names['integrated'])
     timer(link_integrated_locality_id, "Enlace integrada → geo_locality_validation (lotes, índice y FK)")(db, table_names['integrated'])
+    timer(create_integrated_fk_indexes, "Índices BTREE en FKs datasetkey, publishingorgkey y taxonomic_species_id")(db, table_names['integrated'])
     register_load(db, table_names, today, origin)
     logger.info("Proceso completado.")
 
