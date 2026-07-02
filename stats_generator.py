@@ -1,6 +1,8 @@
 # Autor: Diego Moreno-Vargas (github.com/damorenov)
 """
-Estadísticas de síntesis: vistas geo, tabla integrada vigente y cifras estimadas por temática.
+Estadísticas de síntesis: vistas geo, catálogo de especies, tabla integrada vigente y cifras estimadas por temática.
+
+- MV especie: catálogo taxonómico desde taxonomic_species_validation (slug + rangos).
 
 Cifras estimadas:
 - MV taxonomic_estimated_source: unión de taxonomic_col_list, taxonomic_cites, taxonomic_threat_mads, taxonomic_threat_iucn, taxonomic_invasive_exotic y taxonomic_migratory por species y JOIN temático por taxonomía para tener una única vista con todas las taxonomías y temáticas.
@@ -24,6 +26,21 @@ logger = logging.getLogger('sintesis_biocifras')
 ESTIMADAS_TOTAL_MV = 'estimadas_total'
 ESTIMATED_SPECIES_MV_LEGACY = 'estimated_species_totals'
 TAXONOMIC_ESTIMATED_SOURCE_MV = 'taxonomic_estimated_source'
+ESPECIE_MV = 'especie'
+
+_ESPECIE_MV_SQL = """
+    SELECT
+        LOWER(REPLACE(species, ' ', '-')) AS slug,
+        kingdom,
+        phylum,
+        "class",
+        "order",
+        family,
+        genus
+    FROM taxonomic_species_validation
+    WHERE flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
+    ORDER BY slug
+"""
 
 # SQL para crear la vista taxonomic_estimated_source con todas las taxonomías y temáticas.
 _ESTIMATED_SOURCE_MV_SQL = """
@@ -291,6 +308,21 @@ def create_municipio_materialized_view(db):
     return total
 
 
+def create_especie_materialized_view(db):
+    """Crea MV especie desde taxonomic_species_validation (slug + rangos taxonómicos)."""
+    if not table_exists(db, 'taxonomic_species_validation'):
+        raise ValueError('La tabla taxonomic_species_validation no existe en la base de datos.')
+    with db.connect() as conn:
+        conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {ESPECIE_MV}')
+        conn.execute(f'CREATE MATERIALIZED VIEW {ESPECIE_MV} AS {_ESPECIE_MV_SQL}')
+        conn.execute(f'CREATE INDEX IF NOT EXISTS idx_{ESPECIE_MV}_slug ON {ESPECIE_MV} (slug)')
+        conn.commit()
+        total = conn.execute(f'SELECT COUNT(*) FROM {ESPECIE_MV}').fetchall()[0][0]
+    logger.info('Vista materializada %s creada (%s filas)', ESPECIE_MV, total)
+    print(f'Vista materializada {ESPECIE_MV}: {total:,} filas')
+    return total
+
+
 def create_estimated_species_materialized_view(db) -> int:
     """Crea taxonomic_estimated_source y estimadas_total (doble LATERAL + pivot FILTER)."""
 
@@ -326,6 +358,7 @@ def create_estimated_species_materialized_view(db) -> int:
 def parse_args():
     parser = argparse.ArgumentParser(description='Generador de estadísticas y cifras estimadas')
     parser.add_argument('--skip-geo-views', action='store_true', help='Omitir MV geo')
+    parser.add_argument('--skip-especie', action='store_true', help='Omitir MV especie')
     parser.add_argument('--skip-estimated', action='store_true', help='Omitir cifras estimadas')
     return parser.parse_args()
 
@@ -352,6 +385,9 @@ def main():
             print_record_count(db, table_name)
         except ValueError as e:
             logger.warning('Tabla integrada: %s', e)
+
+        if not args.skip_especie:
+            create_especie_materialized_view(db)
 
         if not args.skip_estimated:
             create_estimated_species_materialized_view(db)
