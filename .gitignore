@@ -183,3 +183,6 @@ cython_debug/
 .Rhistory
 
 .positai
+
+#folder
+output/

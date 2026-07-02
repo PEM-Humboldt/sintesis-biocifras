@@ -52,6 +52,7 @@ from utils.functions import (
     spatials_joins,
     normalize_stateprovince_county,
     validate_geography,
+    populate_geo_slugs,
     taxonomic_joins,
     clean_threatstatus_fields,
     gbif_api_calls,
@@ -112,7 +113,9 @@ try:
     timer(spatials_joins, "Cruce espacial con MGN departamentos y municipios y zonas marítimas")(db, table_names['integrated'])
     timer(normalize_stateprovince_county, "Normalizando stateprovince/county antes de validación")(db, table_names['integrated'])
     timer(validate_geography, "Validación geográfica")(db, table_names['integrated'])
+    timer(populate_geo_slugs, "Slugs geo en geo_locality_validation")(db)
     timer(gbif_api_calls, "Enriqueciendo metadatos de datasets y publicadores GBIF")(db, table_names['integrated'])
+    timer(normalize_integrated_country, "Normalizando country desde integrada")(db, table_names['integrated'])
     timer(link_integrated_taxonomic_species_id, "Enlace integrada → taxonomic_species_validation (lotes)")(db, table_names['integrated'])
     timer(link_integrated_locality_id, "Enlace integrada → geo_locality_validation (lotes, índice y FK)")(db, table_names['integrated'])
     register_load(db, table_names, today, origin)

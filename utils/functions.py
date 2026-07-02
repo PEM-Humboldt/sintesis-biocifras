@@ -24,6 +24,7 @@ Rendimiento: FLUSH_EVERY controla el lote de COPY (SQL_BATCH_SIZE); UPDATE_BATCH
 - spatials_joins: Cruza geo_locality_validation con MGN_ADM_MPIO_2025 y capas marítimas usando ST_Intersects.
 - normalize_stateprovince_county: Normaliza stateprovince, county y slugs en geo_locality_validation antes de validar geografía.
 - validate_geography: Valida geografía en geo_locality_validation (tres bloques con db.connect: depto, municipio, flaggeo).
+- populate_geo_slugs: Persiste stateprovinceslug/countyslug en geo_locality_validation desde geo_master_geography.
 - taxonomic_joins: Cruza taxonomic_species_validation con tablas taxonómicas por species.
 - clean_threatstatus_fields: Normaliza threatstatus en taxonomic_species_validation (IUCN/MADS).
 - gbif_api_calls: Completa gbif_datasets y gbif_publishers desde tablas locales y API GBIF; añade FK NOT VALID desde la integrada hacia esas tablas (validar aparte con VALIDATE CONSTRAINT).
@@ -1528,6 +1529,61 @@ def validate_geography(db, table_name):
 
     _run_table_maintenance(db, locality_tbl)
     logger.info("VACUUM (ANALYZE) en %s tras validación geográfica (tabla de localidades)", locality_tbl)
+
+
+def populate_geo_slugs(db):
+    """Persiste slugs departamentales y municipales desde geo_master_geography."""
+    locality_tbl = 'geo_locality_validation'
+    batch_size = UPDATE_BATCH_SIZE
+    total_updated = 0
+    last_id = 0
+
+    with db.connect() as conn:
+        while True:
+            result = conn.execute(
+                f"""
+                WITH batch AS (
+                    SELECT gl.id, gl.geo_master_geography_id
+                    FROM "{locality_tbl}" gl
+                    WHERE gl.id > %s
+                      AND gl.geo_master_geography_id IS NOT NULL
+                    ORDER BY gl.id
+                    LIMIT %s
+                )
+                UPDATE "{locality_tbl}" gl SET
+                    stateprovinceslug = d.slug,
+                    countyslug = m.slug
+                FROM batch b
+                JOIN geo_master_geography gm ON gm.id = b.geo_master_geography_id
+                LEFT JOIN geo_master_geography m
+                    ON m.id = CASE WHEN gm.subtype = 'municipio' THEN gm.id END
+                LEFT JOIN geo_master_geography d
+                    ON d.id = COALESCE(
+                        m.parent_id,
+                        CASE WHEN gm.subtype = 'departamento' THEN gm.id END
+                    )
+                WHERE gl.id = b.id
+                RETURNING gl.id
+                """,
+                (last_id, batch_size),
+            )
+            conn.commit()
+            batch_updated = result.rowcount
+            id_rows = result.fetchall()
+            if batch_updated == 0:
+                break
+            last_id = max(r[0] for r in id_rows)
+            total_updated += batch_updated
+            logger.info(
+                'Slugs geo batch en %s: %s filas (total %s, hasta id=%s)',
+                locality_tbl,
+                f'{batch_updated:,}',
+                f'{total_updated:,}',
+                last_id,
+            )
+
+    logger.info('Slugs geo completados en %s (%s filas)', locality_tbl, f'{total_updated:,}')
+    _run_table_maintenance(db, locality_tbl)
 
 # --------------------------------------------------------------------------------------------------------------------------------------
 # Cruces taxonómicos con listados de referencia
