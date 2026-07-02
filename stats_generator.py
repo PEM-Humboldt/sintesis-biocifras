@@ -4,6 +4,7 @@ Estadísticas de síntesis: vistas geo, catálogo de especies, tabla integrada v
 
 - MV especie: catálogo taxonómico desde taxonomic_species_validation (slug + rangos).
 - MV especie_grupo: relación especie ↔ grupo biológico/interés desde taxonomic_groups.
+- MV especie_region: registros por especie y región (nacional, departamental, municipal).
 
 Cifras estimadas:
 - MV taxonomic_estimated_source: unión de taxonomic_col_list, taxonomic_cites, taxonomic_threat_mads, taxonomic_threat_iucn, taxonomic_invasive_exotic y taxonomic_migratory por species y JOIN temático por taxonomía para tener una única vista con todas las taxonomías y temáticas.
@@ -29,6 +30,7 @@ ESTIMATED_SPECIES_MV_LEGACY = 'estimated_species_totals'
 TAXONOMIC_ESTIMATED_SOURCE_MV = 'taxonomic_estimated_source'
 ESPECIE_MV = 'especie'
 ESPECIE_GRUPO_MV = 'especie_grupo'
+ESPECIE_REGION_MV = 'especie_region'
 
 _ESPECIE_MV_SQL = """
     SELECT
@@ -68,6 +70,43 @@ _ESPECIE_GRUPO_MV_SQL = """
       AND g.grouptype IS NOT NULL
       AND BTRIM(g.grouptype) <> '-'
     ORDER BY slug_especie, slug_grupo
+"""
+
+_ESPECIE_REGION_MV_SQL = f"""
+    WITH base AS (
+        SELECT
+            LOWER(REPLACE(ts.species, ' ', '-')) AS slug_especie,
+            COALESCE(gl.stateprovinceslug, dept.slug) AS dept_slug,
+            COALESCE(gl.countyslug, muni.slug) AS muni_slug
+        FROM "{DWC_INTEGRATED_TABLE}" i
+        INNER JOIN taxonomic_species_validation ts ON ts.id = i.taxonomic_species_id
+        INNER JOIN geo_locality_validation gl ON gl.id = i.locality_id
+        LEFT JOIN geo_master_geography gm ON gm.id = gl.geo_master_geography_id
+        LEFT JOIN geo_master_geography muni
+            ON muni.id = CASE WHEN gm.subtype = 'municipio' THEN gm.id END
+        LEFT JOIN geo_master_geography dept
+            ON dept.id = COALESCE(
+                muni.parent_id,
+                CASE WHEN gm.subtype = 'departamento' THEN gm.id END
+            )
+        WHERE ts.flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
+          AND i.taxonomic_species_id IS NOT NULL
+          AND i.locality_id IS NOT NULL
+    )
+    SELECT 'colombia' AS slug_region, slug_especie, COUNT(*)::bigint AS registros
+    FROM base
+    GROUP BY slug_especie
+    UNION ALL
+    SELECT dept_slug AS slug_region, slug_especie, COUNT(*)::bigint AS registros
+    FROM base
+    WHERE dept_slug IS NOT NULL
+    GROUP BY dept_slug, slug_especie
+    UNION ALL
+    SELECT muni_slug AS slug_region, slug_especie, COUNT(*)::bigint AS registros
+    FROM base
+    WHERE muni_slug IS NOT NULL
+    GROUP BY muni_slug, slug_especie
+    ORDER BY slug_region, slug_especie
 """
 
 # SQL para crear la vista taxonomic_estimated_source con todas las taxonomías y temáticas.
@@ -375,6 +414,39 @@ def create_especie_grupo_materialized_view(db):
     return total
 
 
+def create_especie_region_materialized_view(db):
+    """Crea MV especie_region: conteos por slug_especie y slug_region."""
+    required = (
+        DWC_INTEGRATED_TABLE,
+        'taxonomic_species_validation',
+        'geo_locality_validation',
+        'geo_master_geography',
+    )
+    missing = [name for name in required if not table_exists(db, name)]
+    if missing:
+        raise ValueError(f'Faltan tablas requeridas: {", ".join(missing)}')
+    with db.connect() as conn:
+        conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {ESPECIE_REGION_MV}')
+        conn.execute(f'CREATE MATERIALIZED VIEW {ESPECIE_REGION_MV} AS {_ESPECIE_REGION_MV_SQL}')
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{ESPECIE_REGION_MV}_slug_region '
+            f'ON {ESPECIE_REGION_MV} (slug_region)'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{ESPECIE_REGION_MV}_slug_especie '
+            f'ON {ESPECIE_REGION_MV} (slug_especie)'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{ESPECIE_REGION_MV}_region_especie '
+            f'ON {ESPECIE_REGION_MV} (slug_region, slug_especie)'
+        )
+        conn.commit()
+        total = conn.execute(f'SELECT COUNT(*) FROM {ESPECIE_REGION_MV}').fetchall()[0][0]
+    logger.info('Vista materializada %s creada (%s filas)', ESPECIE_REGION_MV, total)
+    print(f'Vista materializada {ESPECIE_REGION_MV}: {total:,} filas')
+    return total
+
+
 def create_estimated_species_materialized_view(db) -> int:
     """Crea taxonomic_estimated_source y estimadas_total (doble LATERAL + pivot FILTER)."""
 
@@ -412,6 +484,7 @@ def parse_args():
     parser.add_argument('--skip-geo-views', action='store_true', help='Omitir MV geo')
     parser.add_argument('--skip-especie', action='store_true', help='Omitir MV especie')
     parser.add_argument('--skip-especie-grupo', action='store_true', help='Omitir MV especie_grupo')
+    parser.add_argument('--skip-especie-region', action='store_true', help='Omitir MV especie_region')
     parser.add_argument('--skip-estimated', action='store_true', help='Omitir cifras estimadas')
     return parser.parse_args()
 
@@ -444,6 +517,9 @@ def main():
 
         if not args.skip_especie_grupo:
             create_especie_grupo_materialized_view(db)
+
+        if not args.skip_especie_region:
+            create_especie_region_materialized_view(db)
 
         if not args.skip_estimated:
             create_estimated_species_materialized_view(db)
