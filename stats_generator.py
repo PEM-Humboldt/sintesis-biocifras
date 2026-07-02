@@ -3,6 +3,7 @@
 Estadísticas de síntesis: vistas geo, catálogo de especies, tabla integrada vigente y cifras estimadas por temática.
 
 - MV especie: catálogo taxonómico desde taxonomic_species_validation (slug + rangos).
+- MV especie_grupo: relación especie ↔ grupo biológico/interés desde taxonomic_groups.
 
 Cifras estimadas:
 - MV taxonomic_estimated_source: unión de taxonomic_col_list, taxonomic_cites, taxonomic_threat_mads, taxonomic_threat_iucn, taxonomic_invasive_exotic y taxonomic_migratory por species y JOIN temático por taxonomía para tener una única vista con todas las taxonomías y temáticas.
@@ -27,6 +28,7 @@ ESTIMADAS_TOTAL_MV = 'estimadas_total'
 ESTIMATED_SPECIES_MV_LEGACY = 'estimated_species_totals'
 TAXONOMIC_ESTIMATED_SOURCE_MV = 'taxonomic_estimated_source'
 ESPECIE_MV = 'especie'
+ESPECIE_GRUPO_MV = 'especie_grupo'
 
 _ESPECIE_MV_SQL = """
     SELECT
@@ -40,6 +42,32 @@ _ESPECIE_MV_SQL = """
     FROM taxonomic_species_validation
     WHERE flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
     ORDER BY slug
+"""
+
+_ESPECIE_GRUPO_MV_SQL = """
+    SELECT DISTINCT
+        LOWER(REPLACE(s.species, ' ', '-')) AS slug_especie,
+        g.slug AS slug_grupo,
+        g.grouptype AS tipo
+    FROM taxonomic_species_validation s
+    CROSS JOIN LATERAL (VALUES
+        ('kingdom', s.kingdom),
+        ('phylum', s.phylum),
+        ('class', s."class"),
+        ('order', s."order"),
+        ('family', s.family),
+        ('genus', s.genus),
+        ('species', s.species)
+    ) AS r(taxonrank, taxon)
+    INNER JOIN taxonomic_groups g
+        ON g.taxonrank = r.taxonrank
+       AND g.taxon = r.taxon
+    WHERE s.flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
+      AND r.taxon IS NOT NULL
+      AND NULLIF(BTRIM(r.taxon::text), '') IS NOT NULL
+      AND g.grouptype IS NOT NULL
+      AND BTRIM(g.grouptype) <> '-'
+    ORDER BY slug_especie, slug_grupo
 """
 
 # SQL para crear la vista taxonomic_estimated_source con todas las taxonomías y temáticas.
@@ -323,6 +351,30 @@ def create_especie_materialized_view(db):
     return total
 
 
+def create_especie_grupo_materialized_view(db):
+    """Crea MV especie_grupo: slug_especie, slug_grupo y tipo desde taxonomic_groups."""
+    if not table_exists(db, 'taxonomic_species_validation'):
+        raise ValueError('La tabla taxonomic_species_validation no existe en la base de datos.')
+    if not table_exists(db, 'taxonomic_groups'):
+        raise ValueError('La tabla taxonomic_groups no existe en la base de datos.')
+    with db.connect() as conn:
+        conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {ESPECIE_GRUPO_MV}')
+        conn.execute(f'CREATE MATERIALIZED VIEW {ESPECIE_GRUPO_MV} AS {_ESPECIE_GRUPO_MV_SQL}')
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{ESPECIE_GRUPO_MV}_slug_especie '
+            f'ON {ESPECIE_GRUPO_MV} (slug_especie)'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{ESPECIE_GRUPO_MV}_slug_grupo '
+            f'ON {ESPECIE_GRUPO_MV} (slug_grupo)'
+        )
+        conn.commit()
+        total = conn.execute(f'SELECT COUNT(*) FROM {ESPECIE_GRUPO_MV}').fetchall()[0][0]
+    logger.info('Vista materializada %s creada (%s filas)', ESPECIE_GRUPO_MV, total)
+    print(f'Vista materializada {ESPECIE_GRUPO_MV}: {total:,} filas')
+    return total
+
+
 def create_estimated_species_materialized_view(db) -> int:
     """Crea taxonomic_estimated_source y estimadas_total (doble LATERAL + pivot FILTER)."""
 
@@ -359,6 +411,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Generador de estadísticas y cifras estimadas')
     parser.add_argument('--skip-geo-views', action='store_true', help='Omitir MV geo')
     parser.add_argument('--skip-especie', action='store_true', help='Omitir MV especie')
+    parser.add_argument('--skip-especie-grupo', action='store_true', help='Omitir MV especie_grupo')
     parser.add_argument('--skip-estimated', action='store_true', help='Omitir cifras estimadas')
     return parser.parse_args()
 
@@ -388,6 +441,9 @@ def main():
 
         if not args.skip_especie:
             create_especie_materialized_view(db)
+
+        if not args.skip_especie_grupo:
+            create_especie_grupo_materialized_view(db)
 
         if not args.skip_estimated:
             create_estimated_species_materialized_view(db)
