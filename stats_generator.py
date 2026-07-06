@@ -92,20 +92,25 @@ _ESPECIE_REGION_MV_SQL = f"""
         WHERE ts.flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
           AND i.taxonomic_species_id IS NOT NULL
           AND i.locality_id IS NOT NULL
+    ),
+    por_region AS (
+        SELECT
+            b.slug_especie,
+            r.slug_region
+        FROM base b
+        CROSS JOIN LATERAL (VALUES
+            ('colombia'),
+            (b.dept_slug),
+            (b.muni_slug)
+        ) AS r(slug_region)
+        WHERE r.slug_region IS NOT NULL
     )
-    SELECT 'colombia' AS slug_region, slug_especie, COUNT(*)::bigint AS registros
-    FROM base
-    GROUP BY slug_especie
-    UNION ALL
-    SELECT dept_slug AS slug_region, slug_especie, COUNT(*)::bigint AS registros
-    FROM base
-    WHERE dept_slug IS NOT NULL
-    GROUP BY dept_slug, slug_especie
-    UNION ALL
-    SELECT muni_slug AS slug_region, slug_especie, COUNT(*)::bigint AS registros
-    FROM base
-    WHERE muni_slug IS NOT NULL
-    GROUP BY muni_slug, slug_especie
+    SELECT
+        slug_region,
+        slug_especie,
+        COUNT(*)::int AS registros
+    FROM por_region
+    GROUP BY slug_region, slug_especie
     ORDER BY slug_region, slug_especie
 """
 
