@@ -5,6 +5,7 @@ Estadísticas de síntesis: vistas geo, catálogo de especies, tabla integrada v
 - MV especie: catálogo taxonómico desde taxonomic_species_validation (slug + rangos).
 - MV especie_grupo: relación especie ↔ grupo biológico/interés desde taxonomic_groups.
 - MV especie_region: registros por especie y región (nacional, departamental, municipal).
+- MV especie_tematica: relación DISTINCT especie ↔ región ↔ temática (slug_tematica).
 
 Cifras estimadas:
 - MV taxonomic_estimated_source: unión de taxonomic_col_list, taxonomic_cites, taxonomic_threat_mads, taxonomic_threat_iucn, taxonomic_invasive_exotic y taxonomic_migratory por species y JOIN temático por taxonomía para tener una única vista con todas las taxonomías y temáticas.
@@ -31,6 +32,61 @@ TAXONOMIC_ESTIMATED_SOURCE_MV = 'taxonomic_estimated_source'
 ESPECIE_MV = 'especie'
 ESPECIE_GRUPO_MV = 'especie_grupo'
 ESPECIE_REGION_MV = 'especie_region'
+ESPECIE_TEMATICA_MV = 'especie_tematica'
+
+_CATEGORY_TO_SLUG_EXPR = """
+    CASE category
+        WHEN 'Exótica con potencial de invasión Alto Riesgo'
+            THEN 'exotica-riesgo-invasion-alto'
+        WHEN 'Exótica con potencial de invasión Bajo Riesgo'
+            THEN 'exotica-riesgo-invasion-bajo'
+        WHEN 'Exótica con potencial de invasión Riesgo Moderado'
+            THEN 'exotica-riesgo-invasion-moderado'
+        WHEN 'Exótica con potencial de invasión Riesgo Moderado/ Alto'
+            THEN 'exotica-riesgo-invasion-moderado-alto'
+        WHEN 'LC_IUCN' THEN 'amenazadas-global-lc'
+        WHEN 'NT_IUCN' THEN 'amenazadas-global-nt'
+        WHEN 'VU_IUCN' THEN 'amenazadas-global-vu'
+        WHEN 'EN_IUCN' THEN 'amenazadas-global-en'
+        WHEN 'CR_IUCN' THEN 'amenazadas-global-cr'
+        WHEN 'DD_IUCN' THEN 'amenazadas-global-dd'
+        WHEN 'LR/lc_IUCN' THEN 'amenazadas-global-lr-lc'
+        WHEN 'LR/nt_IUCN' THEN 'amenazadas-global-lr-nt'
+        WHEN 'EW_IUCN' THEN 'amenazadas-global-ew'
+        WHEN 'EX_IUCN' THEN 'amenazadas-global-ex'
+        WHEN 'NE_IUCN' THEN 'amenazadas-global-ne'
+        WHEN 'LR/cd_IUCN' THEN 'amenazadas-global-lr-cd'
+        WHEN 'Invasora' THEN 'invasoras'
+        WHEN 'I/II' THEN 'cites-i-ii'
+        WHEN 'III' THEN 'cites-iii'
+        WHEN 'II' THEN 'cites-ii'
+        WHEN 'I' THEN 'cites-i'
+        WHEN 'VU_MADS' THEN 'amenazadas-nacional-vu'
+        WHEN 'EN_MADS' THEN 'amenazadas-nacional-en'
+        WHEN 'CR_MADS' THEN 'amenazadas-nacional-cr'
+        WHEN 'Exótica' THEN 'exoticas'
+        WHEN 'Endémica' THEN 'endemicas'
+        WHEN 'Migratorio' THEN 'migratorias'
+        WHEN 'Errática' THEN 'erraticas'
+        WHEN 'Residente' THEN 'residente'
+        WHEN 'Trasplantada' THEN 'trasplantadas'
+        ELSE LOWER(REPLACE(BTRIM(category::text), ' ', '-'))
+    END
+"""
+
+_THEMATIC_LATERAL_SQL = """
+    CROSS JOIN LATERAL (VALUES
+        (b.threatstatusuicn),
+        (b.threatstatusmads),
+        (b.cites),
+        (b.invasive),
+        (b.exotic),
+        (b.exoticriskinvasion),
+        (b.transplanted),
+        (b.endemic),
+        (b.migratory)
+    ) AS th(category)
+"""
 
 _ESPECIE_MV_SQL = """
     SELECT
@@ -112,6 +168,61 @@ _ESPECIE_REGION_MV_SQL = f"""
     FROM por_region
     GROUP BY slug_region, slug_especie
     ORDER BY slug_region, slug_especie
+"""
+
+_ESPECIE_TEMATICA_MV_SQL = f"""
+    WITH base AS (
+        SELECT
+            LOWER(REPLACE(ts.species, ' ', '-')) AS slug_especie,
+            COALESCE(gl.stateprovinceslug, dept.slug) AS dept_slug,
+            COALESCE(gl.countyslug, muni.slug) AS muni_slug,
+            ts.threatstatusuicn,
+            ts.threatstatusmads,
+            ts.cites,
+            ts.invasive,
+            ts.exotic,
+            ts.exoticriskinvasion,
+            ts.transplanted,
+            ts.endemic,
+            ts.migratory
+        FROM "{DWC_INTEGRATED_TABLE}" i
+        INNER JOIN taxonomic_species_validation ts ON ts.id = i.taxonomic_species_id
+        INNER JOIN geo_locality_validation gl ON gl.id = i.locality_id
+        LEFT JOIN geo_master_geography gm ON gm.id = gl.geo_master_geography_id
+        LEFT JOIN geo_master_geography muni
+            ON muni.id = CASE WHEN gm.subtype = 'municipio' THEN gm.id END
+        LEFT JOIN geo_master_geography dept
+            ON dept.id = COALESCE(
+                muni.parent_id,
+                CASE WHEN gm.subtype = 'departamento' THEN gm.id END
+            )
+        WHERE ts.flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
+          AND ts.species IS NOT NULL
+          AND NULLIF(BTRIM(ts.species::text), '') IS NOT NULL
+          AND i.taxonomic_species_id IS NOT NULL
+          AND i.locality_id IS NOT NULL
+    ),
+    expanded AS (
+        SELECT
+            b.slug_especie,
+            r.slug_region,
+            th.category
+        FROM base b
+        {_THEMATIC_LATERAL_SQL}
+        CROSS JOIN LATERAL (VALUES
+            ('colombia'),
+            (b.dept_slug),
+            (b.muni_slug)
+        ) AS r(slug_region)
+        WHERE r.slug_region IS NOT NULL
+          AND NULLIF(BTRIM(th.category::text), '') IS NOT NULL
+    )
+    SELECT DISTINCT
+        slug_especie,
+        slug_region,
+        {_CATEGORY_TO_SLUG_EXPR} AS slug_tematica
+    FROM expanded
+    ORDER BY slug_region, slug_especie, slug_tematica
 """
 
 # SQL para crear la vista taxonomic_estimated_source con todas las taxonomías y temáticas.
@@ -452,6 +563,43 @@ def create_especie_region_materialized_view(db):
     return total
 
 
+def create_especie_tematica_materialized_view(db):
+    """Crea MV especie_tematica: relación DISTINCT slug_especie, slug_region, slug_tematica."""
+    required = (
+        DWC_INTEGRATED_TABLE,
+        'taxonomic_species_validation',
+        'geo_locality_validation',
+        'geo_master_geography',
+    )
+    missing = [name for name in required if not table_exists(db, name)]
+    if missing:
+        raise ValueError(f'Faltan tablas requeridas: {", ".join(missing)}')
+    with db.connect() as conn:
+        conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {ESPECIE_TEMATICA_MV}')
+        conn.execute(f'CREATE MATERIALIZED VIEW {ESPECIE_TEMATICA_MV} AS {_ESPECIE_TEMATICA_MV_SQL}')
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{ESPECIE_TEMATICA_MV}_slug_region '
+            f'ON {ESPECIE_TEMATICA_MV} (slug_region)'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{ESPECIE_TEMATICA_MV}_slug_especie '
+            f'ON {ESPECIE_TEMATICA_MV} (slug_especie)'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{ESPECIE_TEMATICA_MV}_slug_tematica '
+            f'ON {ESPECIE_TEMATICA_MV} (slug_tematica)'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{ESPECIE_TEMATICA_MV}_region_especie_tematica '
+            f'ON {ESPECIE_TEMATICA_MV} (slug_region, slug_especie, slug_tematica)'
+        )
+        conn.commit()
+        total = conn.execute(f'SELECT COUNT(*) FROM {ESPECIE_TEMATICA_MV}').fetchall()[0][0]
+    logger.info('Vista materializada %s creada (%s filas)', ESPECIE_TEMATICA_MV, total)
+    print(f'Vista materializada {ESPECIE_TEMATICA_MV}: {total:,} filas')
+    return total
+
+
 def create_estimated_species_materialized_view(db) -> int:
     """Crea taxonomic_estimated_source y estimadas_total (doble LATERAL + pivot FILTER)."""
 
@@ -490,6 +638,7 @@ def parse_args():
     parser.add_argument('--skip-especie', action='store_true', help='Omitir MV especie')
     parser.add_argument('--skip-especie-grupo', action='store_true', help='Omitir MV especie_grupo')
     parser.add_argument('--skip-especie-region', action='store_true', help='Omitir MV especie_region')
+    parser.add_argument('--skip-especie-tematica', action='store_true', help='Omitir MV especie_tematica')
     parser.add_argument('--skip-estimated', action='store_true', help='Omitir cifras estimadas')
     return parser.parse_args()
 
@@ -525,6 +674,9 @@ def main():
 
         if not args.skip_especie_region:
             create_especie_region_materialized_view(db)
+
+        if not args.skip_especie_tematica:
+            create_especie_tematica_materialized_view(db)
 
         if not args.skip_estimated:
             create_estimated_species_materialized_view(db)
