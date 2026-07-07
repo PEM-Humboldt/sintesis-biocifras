@@ -7,6 +7,7 @@ Estadísticas de síntesis: vistas geo, catálogo de especies, tabla integrada v
 - MV especie_region: registros por especie y región (nacional, departamental, municipal).
 - MV especie_tematica: relación DISTINCT especie ↔ región ↔ temática (slug_tematica).
 - MV cifras_totales: conteos globales por nivel CDM (registros/especies y hábitat en niveles marinos).
+- MV geografia_resumen: conteos por nivel CDM y slug_region (departamentos o municipios).
 
 Cifras estimadas:
 - MV taxonomic_estimated_source: unión de taxonomic_col_list, taxonomic_cites, taxonomic_threat_mads, taxonomic_threat_iucn, taxonomic_invasive_exotic y taxonomic_migratory por species y JOIN temático por taxonomía para tener una única vista con todas las taxonomías y temáticas.
@@ -35,6 +36,7 @@ ESPECIE_GRUPO_MV = 'especie_grupo'
 ESPECIE_REGION_MV = 'especie_region'
 ESPECIE_TEMATICA_MV = 'especie_tematica'
 CIFRAS_TOTALES_MV = 'cifras_totales'
+GEOGRAFIA_RESUMEN_MV = 'geografia_resumen'
 
 _CIFRAS_TOTALES_NIVEL_LATERAL_SQL = """
     CROSS JOIN LATERAL (VALUES
@@ -45,6 +47,17 @@ _CIFRAS_TOTALES_NIVEL_LATERAL_SQL = """
         ('MCDM', true, 'muni'),
         ('MSDM', false, 'muni')
     ) AS n(nivel, incluye_marino, alcance)
+"""
+
+_GEOGRAFIA_NIVEL_LATERAL_SQL = """
+    CROSS JOIN LATERAL (VALUES
+        ('CCDM', true,  'nacional', 'depto'),
+        ('CSDM', false, 'nacional', 'depto'),
+        ('DCDM', true,  'depto',    'depto'),
+        ('DSDM', false, 'depto',    'depto'),
+        ('MCDM', true,  'muni',     'muni'),
+        ('MSDM', false, 'muni',     'muni')
+    ) AS n(nivel, incluye_marino, alcance, granularidad)
 """
 
 _CATEGORY_TO_SLUG_EXPR = """
@@ -314,6 +327,93 @@ _CIFRAS_TOTALES_MV_SQL = f"""
     FROM por_nivel
     GROUP BY nivel
     ORDER BY nivel
+"""
+
+_GEOGRAFIA_RESUMEN_MV_SQL = f"""
+    WITH enriched AS (
+        SELECT
+            i.gbifid,
+            ts.id AS species_id,
+            COALESCE(gl.stateprovinceslug, dept.slug) AS dept_slug,
+            COALESCE(gl.countyslug, muni.slug) AS muni_slug
+        FROM "{DWC_INTEGRATED_TABLE}" i
+        INNER JOIN taxonomic_species_validation ts ON ts.id = i.taxonomic_species_id
+        INNER JOIN geo_locality_validation gl ON gl.id = i.locality_id
+        LEFT JOIN geo_master_geography gm ON gm.id = gl.geo_master_geography_id
+        LEFT JOIN geo_master_geography muni
+            ON muni.id = CASE WHEN gm.subtype = 'municipio' THEN gm.id END
+        LEFT JOIN geo_master_geography dept
+            ON dept.id = COALESCE(
+                muni.parent_id,
+                CASE WHEN gm.subtype = 'departamento' THEN gm.id END
+            )
+        WHERE ts.flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
+          AND i.taxonomic_species_id IS NOT NULL
+          AND i.locality_id IS NOT NULL
+    ),
+    por_geo AS (
+        SELECT
+            n.nivel,
+            n.incluye_marino,
+            CASE n.granularidad
+                WHEN 'depto' THEN e.dept_slug
+                WHEN 'muni' THEN e.muni_slug
+            END AS slug_region,
+            e.species_id,
+            ts.species,
+            ts.ismarine,
+            ts.isbrackish,
+            ts.isterrestrial
+        FROM enriched e
+        INNER JOIN taxonomic_species_validation ts ON ts.id = e.species_id
+        {_GEOGRAFIA_NIVEL_LATERAL_SQL}
+        WHERE CASE n.alcance
+            WHEN 'nacional' THEN true
+            WHEN 'depto' THEN e.dept_slug IS NOT NULL
+            WHEN 'muni' THEN e.muni_slug IS NOT NULL
+        END
+          AND CASE n.granularidad
+            WHEN 'depto' THEN e.dept_slug IS NOT NULL
+            WHEN 'muni' THEN e.muni_slug IS NOT NULL
+        END
+    )
+    SELECT
+        nivel,
+        slug_region,
+        COUNT(*)::bigint AS registros,
+        CASE WHEN bool_or(incluye_marino) THEN
+            COUNT(*) FILTER (WHERE isterrestrial = 'Terrestrial')::int
+        END AS registros_continentales,
+        CASE WHEN bool_or(incluye_marino) THEN
+            COUNT(*) FILTER (WHERE ismarine = 'Marine')::int
+        END AS registros_marinos,
+        CASE WHEN bool_or(incluye_marino) THEN
+            COUNT(*) FILTER (WHERE isbrackish = 'Brackish')::int
+        END AS registros_salobres,
+        COUNT(DISTINCT species_id) FILTER (
+            WHERE species IS NOT NULL AND NULLIF(BTRIM(species::text), '') IS NOT NULL
+        )::int AS especies,
+        CASE WHEN bool_or(incluye_marino) THEN
+            COUNT(DISTINCT species_id) FILTER (
+                WHERE isterrestrial = 'Terrestrial'
+                  AND species IS NOT NULL AND NULLIF(BTRIM(species::text), '') IS NOT NULL
+            )::int
+        END AS especies_continentales,
+        CASE WHEN bool_or(incluye_marino) THEN
+            COUNT(DISTINCT species_id) FILTER (
+                WHERE ismarine = 'Marine'
+                  AND species IS NOT NULL AND NULLIF(BTRIM(species::text), '') IS NOT NULL
+            )::int
+        END AS especies_marinas,
+        CASE WHEN bool_or(incluye_marino) THEN
+            COUNT(DISTINCT species_id) FILTER (
+                WHERE isbrackish = 'Brackish'
+                  AND species IS NOT NULL AND NULLIF(BTRIM(species::text), '') IS NOT NULL
+            )::int
+        END AS especies_salobres
+    FROM por_geo
+    GROUP BY nivel, slug_region
+    ORDER BY nivel, slug_region
 """
 
 # SQL para crear la vista taxonomic_estimated_source con todas las taxonomías y temáticas.
@@ -716,6 +816,41 @@ def create_cifras_totales_materialized_view(db):
     return total
 
 
+def create_geografia_resumen_materialized_view(db):
+    """Crea MV geografia_resumen: conteos por nivel CDM y slug_region."""
+    required = (
+        DWC_INTEGRATED_TABLE,
+        'taxonomic_species_validation',
+        'geo_locality_validation',
+        'geo_master_geography',
+    )
+    missing = [name for name in required if not table_exists(db, name)]
+    if missing:
+        raise ValueError(f'Faltan tablas requeridas: {", ".join(missing)}')
+    with db.connect() as conn:
+        conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {GEOGRAFIA_RESUMEN_MV}')
+        conn.execute(
+            f'CREATE MATERIALIZED VIEW {GEOGRAFIA_RESUMEN_MV} AS {_GEOGRAFIA_RESUMEN_MV_SQL}'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{GEOGRAFIA_RESUMEN_MV}_nivel '
+            f'ON {GEOGRAFIA_RESUMEN_MV} (nivel)'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{GEOGRAFIA_RESUMEN_MV}_slug_region '
+            f'ON {GEOGRAFIA_RESUMEN_MV} (slug_region)'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{GEOGRAFIA_RESUMEN_MV}_nivel_region '
+            f'ON {GEOGRAFIA_RESUMEN_MV} (nivel, slug_region)'
+        )
+        conn.commit()
+        total = conn.execute(f'SELECT COUNT(*) FROM {GEOGRAFIA_RESUMEN_MV}').fetchall()[0][0]
+    logger.info('Vista materializada %s creada (%s filas)', GEOGRAFIA_RESUMEN_MV, total)
+    print(f'Vista materializada {GEOGRAFIA_RESUMEN_MV}: {total:,} filas')
+    return total
+
+
 def create_estimated_species_materialized_view(db) -> int:
     """Crea taxonomic_estimated_source y estimadas_total (doble LATERAL + pivot FILTER)."""
 
@@ -756,6 +891,7 @@ def parse_args():
     parser.add_argument('--skip-especie-region', action='store_true', help='Omitir MV especie_region')
     parser.add_argument('--skip-especie-tematica', action='store_true', help='Omitir MV especie_tematica')
     parser.add_argument('--skip-cifras-totales', action='store_true', help='Omitir MV cifras_totales')
+    parser.add_argument('--skip-geografia-resumen', action='store_true', help='Omitir MV geografia_resumen')
     parser.add_argument('--skip-estimated', action='store_true', help='Omitir cifras estimadas')
     return parser.parse_args()
 
@@ -797,6 +933,9 @@ def main():
 
         if not args.skip_cifras_totales:
             create_cifras_totales_materialized_view(db)
+
+        if not args.skip_geografia_resumen:
+            create_geografia_resumen_materialized_view(db)
 
         if not args.skip_estimated:
             create_estimated_species_materialized_view(db)
