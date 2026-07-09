@@ -357,15 +357,19 @@ _CIFRAS_TOTALES_MV_SQL = f"""
 """
 
 _GEOGRAFIA_RESUMEN_MV_SQL = f"""
-    WITH enriched AS (
+    WITH base AS (
         SELECT
             i.gbifid,
-            ts.id AS species_id,
+            ts.species,
+            ts.flagtaxo,
+            ts.ismarine,
+            ts.isbrackish,
+            ts.isterrestrial,
             COALESCE(gl.stateprovinceslug, dept.slug) AS dept_slug,
             COALESCE(gl.countyslug, muni.slug) AS muni_slug
         FROM "{DWC_INTEGRATED_TABLE}" i
-        INNER JOIN taxonomic_species_validation ts ON ts.id = i.taxonomic_species_id
-        INNER JOIN geo_locality_validation gl ON gl.id = i.locality_id
+        LEFT JOIN taxonomic_species_validation ts ON ts.id = i.taxonomic_species_id
+        LEFT JOIN geo_locality_validation gl ON gl.id = i.locality_id
         LEFT JOIN geo_master_geography gm ON gm.id = gl.geo_master_geography_id
         LEFT JOIN geo_master_geography muni
             ON muni.id = CASE WHEN gm.subtype = 'municipio' THEN gm.id END
@@ -374,34 +378,25 @@ _GEOGRAFIA_RESUMEN_MV_SQL = f"""
                 muni.parent_id,
                 CASE WHEN gm.subtype = 'departamento' THEN gm.id END
             )
-        WHERE ts.flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
-          AND i.taxonomic_species_id IS NOT NULL
-          AND i.locality_id IS NOT NULL
     ),
     por_geo AS (
         SELECT
             n.nivel,
             n.incluye_marino,
             CASE n.granularidad
-                WHEN 'depto' THEN e.dept_slug
-                WHEN 'muni' THEN e.muni_slug
+                WHEN 'depto' THEN b.dept_slug
+                WHEN 'muni' THEN b.muni_slug
             END AS slug_region,
-            e.species_id,
-            ts.species,
-            ts.ismarine,
-            ts.isbrackish,
-            ts.isterrestrial
-        FROM enriched e
-        INNER JOIN taxonomic_species_validation ts ON ts.id = e.species_id
+            b.species,
+            b.flagtaxo,
+            b.ismarine,
+            b.isbrackish,
+            b.isterrestrial
+        FROM base b
         {_GEOGRAFIA_NIVEL_LATERAL_SQL}
-        WHERE CASE n.alcance
-            WHEN 'nacional' THEN true
-            WHEN 'depto' THEN e.dept_slug IS NOT NULL
-            WHEN 'muni' THEN e.muni_slug IS NOT NULL
-        END
-          AND CASE n.granularidad
-            WHEN 'depto' THEN e.dept_slug IS NOT NULL
-            WHEN 'muni' THEN e.muni_slug IS NOT NULL
+        WHERE CASE n.granularidad
+            WHEN 'depto' THEN b.dept_slug IS NOT NULL
+            WHEN 'muni' THEN b.muni_slug IS NOT NULL
         END
     )
     SELECT
@@ -409,33 +404,41 @@ _GEOGRAFIA_RESUMEN_MV_SQL = f"""
         slug_region,
         COUNT(*)::bigint AS registros,
         CASE WHEN bool_or(incluye_marino) THEN
-            COUNT(*) FILTER (WHERE isterrestrial = 'Terrestrial')::int
+            COUNT(*) FILTER (WHERE isterrestrial IS NOT NULL)::int
         END AS registros_continentales,
         CASE WHEN bool_or(incluye_marino) THEN
-            COUNT(*) FILTER (WHERE ismarine = 'Marine')::int
+            COUNT(*) FILTER (WHERE ismarine IS NOT NULL)::int
         END AS registros_marinos,
         CASE WHEN bool_or(incluye_marino) THEN
-            COUNT(*) FILTER (WHERE isbrackish = 'Brackish')::int
+            COUNT(*) FILTER (WHERE isbrackish IS NOT NULL)::int
         END AS registros_salobres,
-        COUNT(DISTINCT species_id) FILTER (
-            WHERE species IS NOT NULL AND NULLIF(BTRIM(species::text), '') IS NOT NULL
+        COUNT(DISTINCT species) FILTER (
+            WHERE species IS NOT NULL
+              AND NULLIF(BTRIM(species::text), '') IS NOT NULL
+              AND flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
         )::int AS especies,
         CASE WHEN bool_or(incluye_marino) THEN
-            COUNT(DISTINCT species_id) FILTER (
-                WHERE isterrestrial = 'Terrestrial'
-                  AND species IS NOT NULL AND NULLIF(BTRIM(species::text), '') IS NOT NULL
+            COUNT(DISTINCT ROW(species, isterrestrial)) FILTER (
+                WHERE species IS NOT NULL
+                  AND NULLIF(BTRIM(species::text), '') IS NOT NULL
+                  AND flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
+                  AND isterrestrial IS NOT NULL
             )::int
         END AS especies_continentales,
         CASE WHEN bool_or(incluye_marino) THEN
-            COUNT(DISTINCT species_id) FILTER (
-                WHERE ismarine = 'Marine'
-                  AND species IS NOT NULL AND NULLIF(BTRIM(species::text), '') IS NOT NULL
+            COUNT(DISTINCT ROW(species, ismarine)) FILTER (
+                WHERE species IS NOT NULL
+                  AND NULLIF(BTRIM(species::text), '') IS NOT NULL
+                  AND flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
+                  AND ismarine IS NOT NULL
             )::int
         END AS especies_marinas,
         CASE WHEN bool_or(incluye_marino) THEN
-            COUNT(DISTINCT species_id) FILTER (
-                WHERE isbrackish = 'Brackish'
-                  AND species IS NOT NULL AND NULLIF(BTRIM(species::text), '') IS NOT NULL
+            COUNT(DISTINCT ROW(species, isbrackish)) FILTER (
+                WHERE species IS NOT NULL
+                  AND NULLIF(BTRIM(species::text), '') IS NOT NULL
+                  AND flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
+                  AND isbrackish IS NOT NULL
             )::int
         END AS especies_salobres
     FROM por_geo
