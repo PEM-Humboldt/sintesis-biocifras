@@ -8,6 +8,8 @@ Estadísticas de síntesis: vistas geo, catálogo de especies, tabla integrada v
 - MV especie_tematica: relación DISTINCT especie ↔ región ↔ temática (slug_tematica).
 - MV cifras_totales: conteos globales por nivel CDM (registros/especies y hábitat en niveles marinos).
 - MV geografia_resumen: conteos por nivel CDM y slug_region (departamentos o municipios).
+- MV publicador: catálogo de publicadores con registros (integrada total) y especies (validadas).
+- MV region_publicador: cifras por slug_region y publicador (nacional, departamental, municipal).
 
 Cifras estimadas:
 - MV taxonomic_estimated_source: unión de taxonomic_col_list, taxonomic_cites, taxonomic_threat_mads, taxonomic_threat_iucn, taxonomic_invasive_exotic y taxonomic_migratory por species y JOIN temático por taxonomía para tener una única vista con todas las taxonomías y temáticas.
@@ -37,6 +39,8 @@ ESPECIE_REGION_MV = 'especie_region'
 ESPECIE_TEMATICA_MV = 'especie_tematica'
 CIFRAS_TOTALES_MV = 'cifras_totales'
 GEOGRAFIA_RESUMEN_MV = 'geografia_resumen'
+PUBLICADOR_MV = 'publicador'
+REGION_PUBLICADOR_MV = 'region_publicador'
 
 _CIFRAS_TOTALES_NIVEL_LATERAL_SQL = """
     CROSS JOIN LATERAL (VALUES
@@ -200,7 +204,7 @@ _ESPECIE_TEMATICA_MV_SQL = f"""
     WITH base AS (
         SELECT
             ts.slugspecies AS slug_especie,
-clear            COALESCE(gl.stateprovinceslug, dept.slug) AS dept_slug,
+            COALESCE(gl.stateprovinceslug, dept.slug) AS dept_slug,
             COALESCE(gl.countyslug, muni.slug) AS muni_slug,
             ts.threatstatusuicn,
             ts.threatstatusmads,
@@ -414,6 +418,127 @@ _GEOGRAFIA_RESUMEN_MV_SQL = f"""
     FROM por_geo
     GROUP BY nivel, slug_region
     ORDER BY nivel, slug_region
+"""
+
+_PUBLICADOR_MV_SQL = f"""
+    WITH registros_por_pub AS (
+        SELECT
+            i.publishingorgkey,
+            COUNT(*)::bigint AS registros,
+            MAX(
+                REPLACE(BTRIM(i.publishingcountry), 'País publicador: ', '')
+            ) AS pais_publicacion
+        FROM "{DWC_INTEGRATED_TABLE}" i
+        WHERE i.publishingorgkey IS NOT NULL
+          AND NULLIF(BTRIM(i.publishingorgkey::text), '') IS NOT NULL
+        GROUP BY i.publishingorgkey
+    ),
+    especies_por_pub AS (
+        SELECT
+            i.publishingorgkey,
+            COUNT(DISTINCT ts.id)::int AS especies
+        FROM "{DWC_INTEGRATED_TABLE}" i
+        INNER JOIN taxonomic_species_validation ts ON ts.id = i.taxonomic_species_id
+        WHERE i.publishingorgkey IS NOT NULL
+          AND NULLIF(BTRIM(i.publishingorgkey::text), '') IS NOT NULL
+          AND i.taxonomic_species_id IS NOT NULL
+          AND ts.flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
+          AND ts.species IS NOT NULL
+          AND NULLIF(BTRIM(ts.species::text), '') IS NOT NULL
+        GROUP BY i.publishingorgkey
+    )
+    SELECT
+        r.publishingorgkey AS slug,
+        p.organization AS label,
+        r.pais_publicacion,
+        ''::text AS tipo_organizacion,
+        CASE
+            WHEN r.pais_publicacion = 'CO' THEN 'Nacional'
+            ELSE 'Internacional'
+        END AS tipo_publicador,
+        ''::text AS url_logo,
+        'https://biodiversidad.co/data/?publishingOrg=' || r.publishingorgkey AS url_socio,
+        COALESCE(e.especies, 0) AS especies,
+        r.registros
+    FROM registros_por_pub r
+    LEFT JOIN gbif_publishers p ON p.publishingorgkey = r.publishingorgkey
+    LEFT JOIN especies_por_pub e ON e.publishingorgkey = r.publishingorgkey
+    ORDER BY p.organization NULLS LAST, r.publishingorgkey
+"""
+
+_REGION_PUBLICADOR_MV_SQL = f"""
+    WITH enriched AS (
+        SELECT
+            i.publishingorgkey,
+            ts.id AS species_id,
+            ts.species,
+            ts.flagtaxo,
+            ts.ismarine,
+            ts.isbrackish,
+            ts.isterrestrial,
+            COALESCE(gl.stateprovinceslug, dept.slug) AS dept_slug,
+            COALESCE(gl.countyslug, muni.slug) AS muni_slug
+        FROM "{DWC_INTEGRATED_TABLE}" i
+        LEFT JOIN taxonomic_species_validation ts ON ts.id = i.taxonomic_species_id
+        LEFT JOIN geo_locality_validation gl ON gl.id = i.locality_id
+        LEFT JOIN geo_master_geography gm ON gm.id = gl.geo_master_geography_id
+        LEFT JOIN geo_master_geography muni
+            ON muni.id = CASE WHEN gm.subtype = 'municipio' THEN gm.id END
+        LEFT JOIN geo_master_geography dept
+            ON dept.id = COALESCE(
+                muni.parent_id,
+                CASE WHEN gm.subtype = 'departamento' THEN gm.id END
+            )
+        WHERE i.publishingorgkey IS NOT NULL
+          AND NULLIF(BTRIM(i.publishingorgkey::text), '') IS NOT NULL
+    ),
+    por_region AS (
+        SELECT
+            r.slug_region,
+            e.publishingorgkey,
+            e.species_id,
+            e.species,
+            e.flagtaxo,
+            e.ismarine,
+            e.isbrackish,
+            e.isterrestrial
+        FROM enriched e
+        CROSS JOIN LATERAL (VALUES
+            ('colombia'),
+            (e.dept_slug),
+            (e.muni_slug)
+        ) AS r(slug_region)
+        WHERE r.slug_region IS NOT NULL
+    )
+    SELECT
+        slug_region,
+        publishingorgkey AS slug_publicador,
+        COUNT(*)::bigint AS registros,
+        COUNT(*) FILTER (WHERE isterrestrial = 'Terrestrial')::int AS registros_continentales,
+        COUNT(*) FILTER (WHERE ismarine = 'Marine')::int AS registros_marinos,
+        COUNT(*) FILTER (WHERE isbrackish = 'Brackish')::int AS registros_salobres,
+        COUNT(DISTINCT species_id) FILTER (
+            WHERE flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
+              AND species IS NOT NULL AND NULLIF(BTRIM(species::text), '') IS NOT NULL
+        )::int AS especies,
+        COUNT(DISTINCT species_id) FILTER (
+            WHERE isterrestrial = 'Terrestrial'
+              AND flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
+              AND species IS NOT NULL AND NULLIF(BTRIM(species::text), '') IS NOT NULL
+        )::int AS especies_continentales,
+        COUNT(DISTINCT species_id) FILTER (
+            WHERE ismarine = 'Marine'
+              AND flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
+              AND species IS NOT NULL AND NULLIF(BTRIM(species::text), '') IS NOT NULL
+        )::int AS especies_marinas,
+        COUNT(DISTINCT species_id) FILTER (
+            WHERE isbrackish = 'Brackish'
+              AND flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
+              AND species IS NOT NULL AND NULLIF(BTRIM(species::text), '') IS NOT NULL
+        )::int AS especies_salobres
+    FROM por_region
+    GROUP BY slug_region, publishingorgkey
+    ORDER BY slug_region, slug_publicador
 """
 
 # SQL para crear la vista taxonomic_estimated_source con todas las taxonomías y temáticas.
@@ -851,6 +976,69 @@ def create_geografia_resumen_materialized_view(db):
     return total
 
 
+def create_publicador_materialized_view(db):
+    """Crea MV publicador: catálogo de publicadores con cifras nacionales."""
+    required = (
+        DWC_INTEGRATED_TABLE,
+        'taxonomic_species_validation',
+        'gbif_publishers',
+    )
+    missing = [name for name in required if not table_exists(db, name)]
+    if missing:
+        raise ValueError(f'Faltan tablas requeridas: {", ".join(missing)}')
+    with db.connect() as conn:
+        conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {PUBLICADOR_MV}')
+        conn.execute(f'CREATE MATERIALIZED VIEW {PUBLICADOR_MV} AS {_PUBLICADOR_MV_SQL}')
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{PUBLICADOR_MV}_slug '
+            f'ON {PUBLICADOR_MV} (slug)'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{PUBLICADOR_MV}_tipo_publicador '
+            f'ON {PUBLICADOR_MV} (tipo_publicador)'
+        )
+        conn.commit()
+        total = conn.execute(f'SELECT COUNT(*) FROM {PUBLICADOR_MV}').fetchall()[0][0]
+    logger.info('Vista materializada %s creada (%s filas)', PUBLICADOR_MV, total)
+    print(f'Vista materializada {PUBLICADOR_MV}: {total:,} filas')
+    return total
+
+
+def create_region_publicador_materialized_view(db):
+    """Crea MV region_publicador: cifras por slug_region y publicador (todos los niveles)."""
+    required = (
+        DWC_INTEGRATED_TABLE,
+        'taxonomic_species_validation',
+        'geo_locality_validation',
+        'geo_master_geography',
+    )
+    missing = [name for name in required if not table_exists(db, name)]
+    if missing:
+        raise ValueError(f'Faltan tablas requeridas: {", ".join(missing)}')
+    with db.connect() as conn:
+        conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {REGION_PUBLICADOR_MV}')
+        conn.execute(
+            f'CREATE MATERIALIZED VIEW {REGION_PUBLICADOR_MV} AS {_REGION_PUBLICADOR_MV_SQL}'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{REGION_PUBLICADOR_MV}_slug_region '
+            f'ON {REGION_PUBLICADOR_MV} (slug_region)'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{REGION_PUBLICADOR_MV}_slug_publicador '
+            f'ON {REGION_PUBLICADOR_MV} (slug_publicador)'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{REGION_PUBLICADOR_MV}_region_publicador '
+            f'ON {REGION_PUBLICADOR_MV} (slug_region, slug_publicador)'
+        )
+        conn.commit()
+        total = conn.execute(f'SELECT COUNT(*) FROM {REGION_PUBLICADOR_MV}').fetchall()[0][0]
+    logger.info('Vista materializada %s creada (%s filas)', REGION_PUBLICADOR_MV, total)
+    print(f'Vista materializada {REGION_PUBLICADOR_MV}: {total:,} filas')
+    return total
+
+
 def create_estimated_species_materialized_view(db) -> int:
     """Crea taxonomic_estimated_source y estimadas_total (doble LATERAL + pivot FILTER)."""
 
@@ -892,6 +1080,8 @@ def parse_args():
     parser.add_argument('--skip-especie-tematica', action='store_true', help='Omitir MV especie_tematica')
     parser.add_argument('--skip-cifras-totales', action='store_true', help='Omitir MV cifras_totales')
     parser.add_argument('--skip-geografia-resumen', action='store_true', help='Omitir MV geografia_resumen')
+    parser.add_argument('--skip-publicador', action='store_true', help='Omitir MV publicador')
+    parser.add_argument('--skip-region-publicador', action='store_true', help='Omitir MV region_publicador')
     parser.add_argument('--skip-estimated', action='store_true', help='Omitir cifras estimadas')
     return parser.parse_args()
 
@@ -936,6 +1126,12 @@ def main():
 
         if not args.skip_geografia_resumen:
             create_geografia_resumen_materialized_view(db)
+
+        if not args.skip_publicador:
+            create_publicador_materialized_view(db)
+
+        if not args.skip_region_publicador:
+            create_region_publicador_materialized_view(db)
 
         if not args.skip_estimated:
             create_estimated_species_materialized_view(db)

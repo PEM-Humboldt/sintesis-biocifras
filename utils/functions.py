@@ -1248,7 +1248,7 @@ def link_integrated_locality_id(db, table_name):
     locality_tbl = 'geo_locality_validation'
     fk_name = f"fk_{integrated}_locality_id"
     pending_gbifid_idx = f'idx_{integrated}_locality_pending_gbifid'
-    batch_size = 50_000  # prueba locality; luego usar UPDATE_BATCH_SIZE
+    batch_size = UPDATE_BATCH_SIZE  # prueba locality, en caso de error se puede cambiar a 50_000 para comenzar a probar valor
     total_linked = 0
     last_gbifid = 0
 
