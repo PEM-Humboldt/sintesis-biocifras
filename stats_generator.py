@@ -116,7 +116,7 @@ _THEMATIC_LATERAL_SQL = """
 
 _ESPECIE_MV_SQL = """
     SELECT
-        LOWER(REPLACE(species, ' ', '-')) AS slug,
+        slugspecies AS slug,
         kingdom,
         phylum,
         "class",
@@ -130,7 +130,7 @@ _ESPECIE_MV_SQL = """
 
 _ESPECIE_GRUPO_MV_SQL = """
     SELECT DISTINCT
-        LOWER(REPLACE(s.species, ' ', '-')) AS slug_especie,
+        s.slugspecies AS slug_especie,
         g.slug AS slug_grupo,
         g.grouptype AS tipo
     FROM taxonomic_species_validation s
@@ -157,7 +157,7 @@ _ESPECIE_GRUPO_MV_SQL = """
 _ESPECIE_REGION_MV_SQL = f"""
     WITH base AS (
         SELECT
-            LOWER(REPLACE(ts.species, ' ', '-')) AS slug_especie,
+            ts.slugspecies AS slug_especie,
             COALESCE(gl.stateprovinceslug, dept.slug) AS dept_slug,
             COALESCE(gl.countyslug, muni.slug) AS muni_slug
         FROM "{DWC_INTEGRATED_TABLE}" i
@@ -199,8 +199,8 @@ _ESPECIE_REGION_MV_SQL = f"""
 _ESPECIE_TEMATICA_MV_SQL = f"""
     WITH base AS (
         SELECT
-            LOWER(REPLACE(ts.species, ' ', '-')) AS slug_especie,
-            COALESCE(gl.stateprovinceslug, dept.slug) AS dept_slug,
+            ts.slugspecies AS slug_especie,
+clear            COALESCE(gl.stateprovinceslug, dept.slug) AS dept_slug,
             COALESCE(gl.countyslug, muni.slug) AS muni_slug,
             ts.threatstatusuicn,
             ts.threatstatusmads,

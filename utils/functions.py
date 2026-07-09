@@ -995,6 +995,9 @@ def validate_taxonomic_species(db, table_name):
                 "family"             TEXT,
                 "genus"              TEXT,
                 "species"            TEXT NOT NULL,
+                "slugspecies"        TEXT GENERATED ALWAYS AS (
+                    LOWER(REPLACE(BTRIM("species"), ' ', '-'))
+                ) STORED,
                 "cites"              TEXT,
                 "threatstatusuicn"   TEXT,
                 "threatstatusmads"   TEXT,
