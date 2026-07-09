@@ -3,6 +3,7 @@
 Estadísticas de síntesis: vistas geo, catálogo de especies, tabla integrada vigente y cifras estimadas por temática.
 
 - MV especie: catálogo taxonómico desde taxonomic_species_validation (slug + rangos).
+- MV especie_meta: metadatos de especie (vernacular, URLs) desde taxonomic_species_meta por slug.
 - MV especie_grupo: relación especie ↔ grupo biológico/interés desde taxonomic_groups.
 - MV especie_region: registros por especie y región (nacional, departamental, municipal).
 - MV especie_tematica: relación DISTINCT especie ↔ región ↔ temática (slug_tematica).
@@ -34,6 +35,7 @@ ESTIMADAS_TOTAL_MV = 'estimadas_total'
 ESTIMATED_SPECIES_MV_LEGACY = 'estimated_species_totals'
 TAXONOMIC_ESTIMATED_SOURCE_MV = 'taxonomic_estimated_source'
 ESPECIE_MV = 'especie'
+ESPECIE_META_MV = 'especie_meta'
 ESPECIE_GRUPO_MV = 'especie_grupo'
 ESPECIE_REGION_MV = 'especie_region'
 ESPECIE_TEMATICA_MV = 'especie_tematica'
@@ -129,6 +131,19 @@ _ESPECIE_MV_SQL = """
         genus
     FROM taxonomic_species_validation
     WHERE flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
+    ORDER BY slug
+"""
+
+_ESPECIE_META_MV_SQL = """
+    SELECT
+        ts.slugspecies AS slug,
+        m.vernacular_name_es,
+        m.url_gbif_ AS url_gbif,
+        m.url_cbc,
+        m.flagtaxo AS "flagTAXO"
+    FROM taxonomic_species_validation ts
+    LEFT JOIN taxonomic_species_meta m ON m.slug = ts.slugspecies
+    WHERE ts.flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
     ORDER BY slug
 """
 
@@ -822,6 +837,26 @@ def create_especie_materialized_view(db):
     return total
 
 
+def create_especie_meta_materialized_view(db):
+    """Crea MV especie_meta: slug validado + metadatos desde taxonomic_species_meta."""
+    required = ('taxonomic_species_validation', 'taxonomic_species_meta')
+    missing = [name for name in required if not table_exists(db, name)]
+    if missing:
+        raise ValueError(f'Faltan tablas requeridas: {", ".join(missing)}')
+    with db.connect() as conn:
+        conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {ESPECIE_META_MV}')
+        conn.execute(f'CREATE MATERIALIZED VIEW {ESPECIE_META_MV} AS {_ESPECIE_META_MV_SQL}')
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{ESPECIE_META_MV}_slug '
+            f'ON {ESPECIE_META_MV} (slug)'
+        )
+        conn.commit()
+        total = conn.execute(f'SELECT COUNT(*) FROM {ESPECIE_META_MV}').fetchall()[0][0]
+    logger.info('Vista materializada %s creada (%s filas)', ESPECIE_META_MV, total)
+    print(f'Vista materializada {ESPECIE_META_MV}: {total:,} filas')
+    return total
+
+
 def create_especie_grupo_materialized_view(db):
     """Crea MV especie_grupo: slug_especie, slug_grupo y tipo desde taxonomic_groups."""
     if not table_exists(db, 'taxonomic_species_validation'):
@@ -1075,6 +1110,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Generador de estadísticas y cifras estimadas')
     parser.add_argument('--skip-geo-views', action='store_true', help='Omitir MV geo')
     parser.add_argument('--skip-especie', action='store_true', help='Omitir MV especie')
+    parser.add_argument('--skip-especie-meta', action='store_true', help='Omitir MV especie_meta')
     parser.add_argument('--skip-especie-grupo', action='store_true', help='Omitir MV especie_grupo')
     parser.add_argument('--skip-especie-region', action='store_true', help='Omitir MV especie_region')
     parser.add_argument('--skip-especie-tematica', action='store_true', help='Omitir MV especie_tematica')
@@ -1111,6 +1147,9 @@ def main():
 
         if not args.skip_especie:
             create_especie_materialized_view(db)
+
+        if not args.skip_especie_meta:
+            create_especie_meta_materialized_view(db)
 
         if not args.skip_especie_grupo:
             create_especie_grupo_materialized_view(db)

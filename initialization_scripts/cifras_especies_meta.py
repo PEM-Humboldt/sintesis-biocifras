@@ -20,24 +20,14 @@ for col in list(lista_especies_meta.columns):
   if col in dropColumns:
     lista_especies_meta=lista_especies_meta.drop(labels=[col],axis=1)
 
-db=c.get_db()
-with db.connect() as conn:
-  conn.execute("DROP MATERIALIZED VIEW IF EXISTS especie_meta")
-  conn.commit()
-
 engine=sqlal.create_engine("postgresql+psycopg2://"+os.getenv("DATABASE_USER")+":"+os.getenv("DATABASE_PASS")+"@"+os.getenv("DATABASE_HOST")+":"+os.getenv("DATABASE_PORT")+"/"+os.getenv("DATABASE_NAME"))
 lista_especies_meta.to_sql("taxonomic_species_meta",engine, if_exists='replace', index=False)
 engine.dispose()
 
+db=c.get_db()
 with db.connect() as conn:
-  conn.execute('''
-CREATE MATERIALIZED VIEW public.especie_meta AS
-    select * from taxonomic_species_meta
-  WITH DATA;
-  ''')
+  conn.execute("CREATE INDEX idx_taxonomic_species_meta_slug ON taxonomic_species_meta USING btree (slug)")
   conn.commit()
-    
 db.dispose()
-  
 
 
