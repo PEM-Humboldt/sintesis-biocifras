@@ -21,7 +21,7 @@ Rendimiento: FLUSH_EVERY controla el lote de COPY (SQL_BATCH_SIZE); UPDATE_BATCH
 - validate_localities: Crea geo_locality_validation (borrada en tables_operations) y catálogo por coordenadas/localidad.
 - link_integrated_taxonomic_species_id: UPDATE por lotes (CTE) integrada → catálogo por species; índice parcial y VACUUM ANALYZE en integrada.
 - link_integrated_locality_id: UPDATE por lotes (pending + JOIN 4 campos) integrada → geo_locality_validation; FK NOT VALID y VACUUM.
-- spatials_joins: Cruza geo_locality_validation con MGN_ADM_MPIO_2025 y capas marítimas usando ST_Intersects.
+- spatials_joins: Cruza geo_locality_validation con MGN, capas marítimas y capas slug (Amazonía, DFYB, resguardos, reservas) usando ST_Intersects.
 - normalize_stateprovince_county: Normaliza stateprovince, county y slugs en geo_locality_validation antes de validar geografía.
 - validate_geography: Valida geografía en geo_locality_validation (tres bloques con db.connect: depto, municipio, flaggeo).
 - populate_geo_slugs: Persiste stateprovinceslug/countyslug en geo_locality_validation desde geo_master_geography.
@@ -642,7 +642,7 @@ def add_gbifid_index(db, table_name):
     logger.info("PK %s agregada en %s", pk_name, integrated)
 
 # --------------------------------------------------------------------------------------------------------------------------------------
-# Cruces espaciales con la tabla MGN_ADM_MPIO_2025 (división político-administrativa) e Invemar_maritime_regions (regiones marítimas)
+# Cruces espaciales con la tabla MGN_ADM_MPIO_2025 (división político-administrativa), Invemar_maritime_regions (regiones marítimas), NARINO_MARITIME_REGION (regiones marítimas de Nariño), REGION_AMAZONIA (regiones amazónicas), NUCLEOS_DFYB (nucleos de DFYB), RESGUARDOS (resguardos) y RESERVAS (reservas).
 # --------------------------------------------------------------------------------------------------------------------------------------
 
 # Palabras que se deben convertir a minúsculas después de INITCAP en los campos de departamento y municipio
@@ -652,41 +652,57 @@ _LOWERCASE_WORDS = (' De ', ' Y ', ' Del ', ' La ')
 def _run_spatial_join(conn, set_clause, src_table, where_extra, log_label):
     """Helper: corre un UPDATE espacial por lotes sobre geo_locality_validation.
     - set_clause: SET de la sentencia
-    - src_table: tabla externa con la geometría a intersectar (MGN_ADM_MPIO_2025, INVEMAR_MARITIME_REGIONS, NARINO_MARITIME_REGION).
+    - src_table: tabla externa con la geometría a intersectar (MGN_ADM_MPIO_2025, INVEMAR_MARITIME_REGIONS,
+      NARINO_MARITIME_REGION, REGION_AMAZONIA, NUCLEOS_DFYB, RESGUARDOS, RESERVAS).
     - where_extra: WHERE adicional para el batch (debe arrancar con AND).
     - log_label: etiqueta corta para el log de progreso.
+
+    Update por lotes por id ascendente: si un lote no intersecta con alguna capa espacial, avanza el cursor y continúa sin salir del loop. Esto evita salir que antes se presentaba con while.
     """
     locality_tbl = 'geo_locality_validation'
     batch_size = UPDATE_BATCH_SIZE
     total = 0
+    last_id = 0
+
     while True:
-        result = conn.execute(f"""
+        rows = conn.execute(f"""
             WITH batch AS (
-                SELECT ctid
-                FROM "{locality_tbl}"
-                WHERE geom IS NOT NULL
+                SELECT gl.ctid, gl.id
+                FROM "{locality_tbl}" gl
+                WHERE gl.geom IS NOT NULL
+                  AND gl.id > {last_id}
                   {where_extra}
+                ORDER BY gl.id
                 LIMIT {batch_size}
+            ),
+            updated AS (
+                UPDATE "{locality_tbl}" i
+                SET {set_clause}
+                FROM batch b, "{src_table}" m
+                WHERE i.ctid = b.ctid
+                  AND ST_Intersects(i.geom, m.geom)
+                RETURNING i.id
             )
-            UPDATE "{locality_tbl}" i
-            SET {set_clause}
-            FROM batch b, "{src_table}" m
-            WHERE i.ctid = b.ctid
-              AND ST_Intersects(i.geom, m.geom)
-        """)
-        conn.commit()
-        n = result.rowcount
-        if n == 0:
+            SELECT
+                COALESCE((SELECT MAX(id) FROM batch), -1) AS batch_max_id,
+                (SELECT COUNT(*)::int FROM updated) AS n
+        """).fetchall()[0]
+        batch_max_id, n = rows[0], rows[1]
+        if batch_max_id == -1:
             break
+        last_id = batch_max_id
+        conn.commit()
         total += n
-        logger.info("Cruce %s batch: %s filas (total %s)", log_label, f"{n:,}", f"{total:,}")
+        if n > 0:
+            logger.info("Cruce %s batch: %s filas (total %s)", log_label, f"{n:,}", f"{total:,}")
     logger.info("Cruce espacial con %s completado (%s filas)", src_table, f"{total:,}")
     return total
 
 
 def spatials_joins(db, table_name):
-    """Cruza geo_locality_validation con MGN/INVEMAR/NARINO vía ST_Intersects y aplica
-    INITCAP con normalizaciones (` De ` → ` de `, etc.) sobre depto/municipio."""
+    """Cruza geo_locality_validation con MGN/INVEMAR/NARINO/REGION_AMAZONIA/NUCLEOS_DFYB/RESGUARDOS/RESERVAS
+    vía ST_Intersects (las cuatro últimas persisten slug) y aplica INITCAP con normalizaciones
+    (` De ` → ` de `, etc.) sobre depto/municipio."""
     _ = table_name #
     locality_tbl = 'geo_locality_validation'
     with db.connect() as conn:
@@ -713,6 +729,34 @@ def spatials_joins(db, table_name):
             src_table='NARINO_MARITIME_REGION',
             where_extra='AND "narinomaritimeregion" IS NULL',
             log_label='Nariño',
+        )
+        _run_spatial_join(
+            conn,
+            set_clause='"amazonregion" = m."slug"',
+            src_table='REGION_AMAZONIA',
+            where_extra='AND "amazonregion" IS NULL',
+            log_label='Amazonía',
+        )
+        _run_spatial_join(
+            conn,
+            set_clause='"dfybnucleus" = m."slug"',
+            src_table='NUCLEOS_DFYB',
+            where_extra='AND "dfybnucleus" IS NULL',
+            log_label='DFYB',
+        )
+        _run_spatial_join(
+            conn,
+            set_clause='"indigenousreserve" = m."slug"',
+            src_table='RESGUARDOS',
+            where_extra='AND "indigenousreserve" IS NULL',
+            log_label='Resguardos',
+        )
+        _run_spatial_join(
+            conn,
+            set_clause='"reserve" = m."slug"',
+            src_table='RESERVAS',
+            where_extra='AND "reserve" IS NULL',
+            log_label='Reservas',
         )
 
         # INITCAP + normalizaciones (' De ' → ' de ', etc.) para estandarizar nombres.
@@ -1154,6 +1198,10 @@ def validate_localities(db, table_name):
                 "countymgn"                TEXT,
                 "maritimeregion"           TEXT,
                 "narinomaritimeregion"     TEXT,
+                "amazonregion"             TEXT,
+                "reserve"                  TEXT,
+                "indigenousreserve"        TEXT,
+                "dfybnucleus"              TEXT,
                 "stateprovincevalidated"   TEXT,
                 "countyvalidated"          TEXT,
                 "stateprovinceslug"        TEXT,
