@@ -36,6 +36,18 @@ with open("initialization_scripts/narino_maritimo.py") as f:
 with open("initialization_scripts/regiones_maritimas.py") as f:
 	exec(f.read())
 
+with open("initialization_scripts/spt_nucleos_dfyb.py") as f:
+	exec(f.read())
+
+with open("initialization_scripts/spt_region_amazonia.py") as f:
+	exec(f.read())
+
+with open("initialization_scripts/spt_reservas.py") as f:
+	exec(f.read())
+
+with open("initialization_scripts/spt_resguardos.py") as f:
+	exec(f.read())
+
 with open("initialization_scripts/geo_master_geography.py") as f:
 	exec(f.read())
 
@@ -79,4 +91,7 @@ with open("initialization_scripts/cifras_patrocinador.py") as f:
 	exec(f.read())
 
 with open("initialization_scripts/cifras_ranking.py") as f:
+	exec(f.read())
+
+with open("initialization_scripts/cifras_region_patrocinador.py") as f:
 	exec(f.read())

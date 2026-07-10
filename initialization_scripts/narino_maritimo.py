@@ -1,6 +1,6 @@
 import geopandas as gpd
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 import geoalchemy2
 import os
 load_dotenv()
@@ -27,7 +27,10 @@ engine=create_engine("postgresql://"+os.getenv("DATABASE_USER")+":"+os.getenv("D
 gdf_nm.to_postgis("NARINO_MARITIME_REGION",engine, if_exists='replace')
 
 #TODO: define "id" as a primary key
-
+with engine.begin() as conn:
+    conn.execute(text(
+        'CREATE INDEX "sidx_NARINO_MARITIME_REGION_geom" ON public."NARINO_MARITIME_REGION" USING gist (geom)'
+    ))
 
 
 engine.dispose()

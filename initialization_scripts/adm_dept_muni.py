@@ -2,7 +2,7 @@ import requests
 import re
 import geopandas as gpd
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 import geoalchemy2
 import os
 from zipfile import ZipFile
@@ -49,7 +49,10 @@ gdf_adm.to_postgis("MGN_ADM_MPIO_2025",engine, if_exists='replace')
 #TODO: define "id" as a primary key
 #TODO: eliminate 2025 from the name so it can work later
 
-
+with engine.begin() as conn:
+    conn.execute(text(
+        'CREATE INDEX "sidx_MGN_ADM_MPIO_2025_geom" ON public."MGN_ADM_MPIO_2025" USING gist (geom)'
+    ))
 
 engine.dispose()
 

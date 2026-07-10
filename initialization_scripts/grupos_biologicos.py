@@ -61,9 +61,10 @@ CREATE TABLE public.taxonomic_groups (
     conn.execute(query)
     conn.execute("DROP TABLE IF EXISTS tmp_taxonomic_groups")
     conn.execute("CREATE INDEX idx_taxonomic_groups ON taxonomic_groups USING BTREE(taxon)")
+    conn.execute("CREATE INDEX idx_taxonomic_groups_slug ON taxonomic_groups USING BTREE(slug)")
+    conn.execute("CREATE INDEX idx_taxonomic_groups_rank_taxon ON taxonomic_groups (taxonrank, taxon) WHERE grouptype IS NOT NULL AND BTRIM(grouptype) <> '-'")
     conn.commit()
     
 db.dispose()
-  
 
 
