@@ -10,7 +10,7 @@ Estadísticas de síntesis: vistas geo, catálogo de especies, tabla integrada v
 - MV cifras_totales: conteos globales por nivel CDM (registros/especies y hábitat en niveles marinos).
 - MV geografia_resumen: conteos por nivel CDM y slug_region (departamentos o municipios).
 - MV staging_agg_taxon_region: agregados por rango taxonómico y región (solo para region_grupo).
-- MV region_tematica: cifras geográficas anchas por slug_region (nacional, depto, muni, amazonía, reservas, resguardos, núcleos DFYB).
+- MV region_tematica: cifras geográficas anchas por slug_region (nacional, depto, muni, amazonía, reservas, resguardos, núcleos DFYB); incluye especies_region_estimadas y estimada_region_ref_id desde tmp_cifras_estimated_dept.
 - MV region_grupo: cifras anchas por slug_grupo y slug_region (nacional, depto, muni, amazonía, reservas, resguardos, núcleos DFYB).
 - MV publicador: catálogo de publicadores con registros (integrada total) y especies (validadas).
 - MV region_publicador: cifras por slug_region y publicador (nacional, depto, muni, amazonía, reservas, resguardos, núcleos DFYB).
@@ -37,7 +37,7 @@ load_dotenv()
 
 from utils.functions import (
     DWC_INTEGRATED_TABLE,
-    _MAX_PARALLEL_WORKERS_PER_GATHER,
+    _MAX_PARALLEL_WORKERS_MV,
     _WORK_MEM,
 )
 
@@ -59,6 +59,7 @@ REGION_TEMATICA_MV = 'region_tematica'
 REGION_GRUPO_MV = 'region_grupo'
 STAGING_AGG_TAXON_REGION_MV = 'staging_agg_taxon_region'
 STAGING_OCURRENCIA_GEO_MV = 'staging_ocurrencia_geo'  # legacy, se elimina al crear staging_agg
+CIFRAS_ESTIMADAS_DEPT_TABLE = 'tmp_cifras_estimated_dept'
 
 _CIFRAS_TOTALES_NIVEL_LATERAL_SQL = """
     CROSS JOIN LATERAL (VALUES
@@ -1641,11 +1642,15 @@ _REGION_TEMATICA_MV_SQL = f"""
             FROM geo_master_geography
             WHERE "date" IS NOT NULL
         ) AS fecha_corte,
-        NULL::bigint AS especies_region_estimadas,
-        NULL::text AS estimada_region_ref_id,
+        e.estimada::bigint AS especies_region_estimadas,
+        (CASE
+            WHEN m.slug_region = 'colombia' THEN '86'
+            WHEN e.estimada IS NOT NULL THEN '87'
+        END)::text AS estimada_region_ref_id,
         {{metric_cols}},
         {{derived_sql}}
     FROM metricas m
+    LEFT JOIN {CIFRAS_ESTIMADAS_DEPT_TABLE} e ON e.departamento = m.slug_region
 """
 
 _TAXON_RANK_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -1852,6 +1857,7 @@ def create_region_tematica_materialized_view(db) -> int:
         'taxonomic_species_validation',
         'geo_locality_validation',
         'geo_master_geography',
+        CIFRAS_ESTIMADAS_DEPT_TABLE,
     )
     missing = [name for name in required if not table_exists(db, name)]
     if missing:
@@ -1860,10 +1866,10 @@ def create_region_tematica_materialized_view(db) -> int:
     with db.connect() as conn:
         # Tuning local (valores del .env): la agregación larga con COUNT(DISTINCT)
         # y GROUPING SETS necesita más work_mem para evitar volcados a disco.
-        # El paralelismo se controla por MAX_PARALLEL_WORKERS_PER_GATHER
+        # El paralelismo se controla por MAX_PARALLEL_WORKERS_MV
         # (WSL/Docker con /dev/shm pequeño: 0; Linux nativo: 4) para evitar DiskFull.
         conn.execute(f"SET LOCAL work_mem = '{_WORK_MEM}'")
-        conn.execute(f'SET LOCAL max_parallel_workers_per_gather = {_MAX_PARALLEL_WORKERS_PER_GATHER}')
+        conn.execute(f'SET LOCAL max_parallel_workers_per_gather = {_MAX_PARALLEL_WORKERS_MV}')
         for legacy_mv in _LEGACY_REGION_TEMATICA_MVS:
             conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {legacy_mv}')
         conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {REGION_TEMATICA_MV}')

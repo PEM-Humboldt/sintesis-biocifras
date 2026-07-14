@@ -12,7 +12,7 @@ import utils.connection as c
 
 pathfile=os.getenv("FILE_STATS_ESTIMATED_DEPT")
 
-list_estimated_dept=pd.read_csv(pathfile, sep="\t",low_memory=False)
+list_estimated_dept=pd.read_csv(pathfile, sep=";",low_memory=False)
 list_estimated_dept=list_estimated_dept.rename(columns={i: i.lower() for i in list(list_estimated_dept.columns)})
 
 dropColumns=['Put here the columns from the source that you wanna suppress']
