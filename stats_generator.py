@@ -5,12 +5,15 @@ Estadísticas de síntesis: vistas geo, catálogo de especies, tabla integrada v
 - MV especie: catálogo taxonómico desde taxonomic_species_validation (slug + rangos).
 - MV especie_meta: metadatos de especie (vernacular, URLs) desde taxonomic_species_meta por slug.
 - MV especie_grupo: relación especie ↔ grupo biológico/interés desde taxonomic_groups.
-- MV especie_region: registros por especie y región (nacional, departamental, municipal).
-- MV especie_tematica: relación DISTINCT especie ↔ región ↔ temática (slug_tematica).
+- MV especie_region: registros por especie y región (nacional, depto, muni, amazonía, reservas, resguardos, núcleos DFYB).
+- MV especie_tematica: relación DISTINCT especie ↔ región ↔ temática (nacional, depto, muni, amazonía, reservas, resguardos, núcleos DFYB).
 - MV cifras_totales: conteos globales por nivel CDM (registros/especies y hábitat en niveles marinos).
 - MV geografia_resumen: conteos por nivel CDM y slug_region (departamentos o municipios).
+- MV staging_agg_taxon_region: agregados por rango taxonómico y región (solo para region_grupo).
+- MV region_tematica: cifras geográficas anchas por slug_region (nacional, depto, muni, amazonía, reservas, resguardos, núcleos DFYB).
+- MV region_grupo: cifras anchas por slug_grupo y slug_region (nacional, depto, muni, amazonía, reservas, resguardos, núcleos DFYB).
 - MV publicador: catálogo de publicadores con registros (integrada total) y especies (validadas).
-- MV region_publicador: cifras por slug_region y publicador (nacional, departamental, municipal).
+- MV region_publicador: cifras por slug_region y publicador (nacional, depto, muni, amazonía, reservas, resguardos, núcleos DFYB).
 
 Cifras estimadas:
 - MV taxonomic_estimated_source: unión de taxonomic_col_list, taxonomic_cites, taxonomic_threat_mads, taxonomic_threat_iucn, taxonomic_invasive_exotic y taxonomic_migratory por species y JOIN temático por taxonomía para tener una única vista con todas las taxonomías y temáticas.
@@ -21,6 +24,8 @@ import argparse
 import logging
 import os
 import sys
+from dataclasses import dataclass
+from typing import Literal
 
 from dotenv import load_dotenv
 
@@ -43,6 +48,10 @@ CIFRAS_TOTALES_MV = 'cifras_totales'
 GEOGRAFIA_RESUMEN_MV = 'geografia_resumen'
 PUBLICADOR_MV = 'publicador'
 REGION_PUBLICADOR_MV = 'region_publicador'
+REGION_TEMATICA_MV = 'region_tematica'
+REGION_GRUPO_MV = 'region_grupo'
+STAGING_AGG_TAXON_REGION_MV = 'staging_agg_taxon_region'
+STAGING_OCURRENCIA_GEO_MV = 'staging_ocurrencia_geo'  # legacy, se elimina al crear staging_agg
 
 _CIFRAS_TOTALES_NIVEL_LATERAL_SQL = """
     CROSS JOIN LATERAL (VALUES
@@ -173,12 +182,29 @@ _ESPECIE_GRUPO_MV_SQL = """
     ORDER BY slug_especie, slug_grupo
 """
 
+def _slug_region_lateral_values(alias: str) -> str:
+    """Valores LATERAL de expansión geo (nacional, depto, muni y capas slug)."""
+    return f"""
+            ('colombia'),
+            ({alias}.dept_slug),
+            ({alias}.muni_slug),
+            ({alias}.amazonregion),
+            ({alias}.reserve),
+            ({alias}.indigenousreserve),
+            ({alias}.dfybnucleus)
+"""
+
+
 _ESPECIE_REGION_MV_SQL = f"""
     WITH base AS (
         SELECT
             ts.slugspecies AS slug_especie,
             COALESCE(gl.stateprovinceslug, dept.slug) AS dept_slug,
-            COALESCE(gl.countyslug, muni.slug) AS muni_slug
+            COALESCE(gl.countyslug, muni.slug) AS muni_slug,
+            gl.amazonregion,
+            gl.reserve,
+            gl.indigenousreserve,
+            gl.dfybnucleus
         FROM "{DWC_INTEGRATED_TABLE}" i
         INNER JOIN taxonomic_species_validation ts ON ts.id = i.taxonomic_species_id
         INNER JOIN geo_locality_validation gl ON gl.id = i.locality_id
@@ -200,9 +226,7 @@ _ESPECIE_REGION_MV_SQL = f"""
             r.slug_region
         FROM base b
         CROSS JOIN LATERAL (VALUES
-            ('colombia'),
-            (b.dept_slug),
-            (b.muni_slug)
+            {_slug_region_lateral_values('b')}
         ) AS r(slug_region)
         WHERE r.slug_region IS NOT NULL
     )
@@ -221,6 +245,10 @@ _ESPECIE_TEMATICA_MV_SQL = f"""
             ts.slugspecies AS slug_especie,
             COALESCE(gl.stateprovinceslug, dept.slug) AS dept_slug,
             COALESCE(gl.countyslug, muni.slug) AS muni_slug,
+            gl.amazonregion,
+            gl.reserve,
+            gl.indigenousreserve,
+            gl.dfybnucleus,
             ts.threatstatusuicn,
             ts.threatstatusmads,
             ts.cites,
@@ -255,9 +283,7 @@ _ESPECIE_TEMATICA_MV_SQL = f"""
         FROM base b
         {_THEMATIC_LATERAL_SQL}
         CROSS JOIN LATERAL (VALUES
-            ('colombia'),
-            (b.dept_slug),
-            (b.muni_slug)
+            {_slug_region_lateral_values('b')}
         ) AS r(slug_region)
         WHERE r.slug_region IS NOT NULL
           AND NULLIF(BTRIM(th.category::text), '') IS NOT NULL
@@ -503,7 +529,11 @@ _REGION_PUBLICADOR_MV_SQL = f"""
             ts.isbrackish,
             ts.isterrestrial,
             COALESCE(gl.stateprovinceslug, dept.slug) AS dept_slug,
-            COALESCE(gl.countyslug, muni.slug) AS muni_slug
+            COALESCE(gl.countyslug, muni.slug) AS muni_slug,
+            gl.amazonregion,
+            gl.reserve,
+            gl.indigenousreserve,
+            gl.dfybnucleus
         FROM "{DWC_INTEGRATED_TABLE}" i
         LEFT JOIN taxonomic_species_validation ts ON ts.id = i.taxonomic_species_id
         LEFT JOIN geo_locality_validation gl ON gl.id = i.locality_id
@@ -530,9 +560,7 @@ _REGION_PUBLICADOR_MV_SQL = f"""
             e.isterrestrial
         FROM enriched e
         CROSS JOIN LATERAL (VALUES
-            ('colombia'),
-            (e.dept_slug),
-            (e.muni_slug)
+            {_slug_region_lateral_values('e')}
         ) AS r(slug_region)
         WHERE r.slug_region IS NOT NULL
     )
@@ -1022,6 +1050,768 @@ def create_geografia_resumen_materialized_view(db):
     return total
 
 
+# --- region_tematica: métricas y SQL (legacy geografia_total + ajuste_nombres) ---
+
+_RegionTematicaKind = Literal['registros', 'especies']
+_RegionTematicaHabitat = Literal['continental', 'marino', 'salobre'] | None
+
+_REGION_TEMATICA_SPECIES_VALID = """
+    species IS NOT NULL
+    AND NULLIF(BTRIM(species::text), '') IS NOT NULL
+    AND flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
+""".strip()
+
+_REGION_TEMATICA_HABITAT_SQL = {
+    'continental': 'isterrestrial IS NOT NULL',
+    'marino': 'ismarine IS NOT NULL',
+    'salobre': 'isbrackish IS NOT NULL',
+}
+
+_REGION_TEMATICA_HABITAT_COL = {
+    'continental': 'isterrestrial',
+    'marino': 'ismarine',
+    'salobre': 'isbrackish',
+}
+
+_REGION_TEMATICA_THEMATIC_FIELDS = {
+    'threatStatus_MADS': 'threatstatusmads',
+    'appendixCITES': 'cites',
+    'endemic': 'endemic',
+    'migratory': 'migratory',
+}
+
+_REGION_TEMATICA_CATEGORY_MAP = {
+    'CR_MADS': ('threatstatusmads', 'CR_MADS'),
+    'EN_MADS': ('threatstatusmads', 'EN_MADS'),
+    'VU_MADS': ('threatstatusmads', 'VU_MADS'),
+    'I': ('cites', 'I'),
+    'I/II': ('cites', 'I/II'),
+    'II': ('cites', 'II'),
+    'III': ('cites', 'III'),
+    'Exótica': ('exotic', 'Exótica'),
+    'Invasora': ('invasive', 'Invasora'),
+    'Trasplantada': ('transplanted', 'Trasplantada'),
+    'Exótica con potencial de invasión Alto Riesgo': (
+        'exoticriskinvasion',
+        'Exótica con potencial de invasión Alto Riesgo',
+    ),
+    'Exótica con potencial de invasión Bajo Riesgo': (
+        'exoticriskinvasion',
+        'Exótica con potencial de invasión Bajo Riesgo',
+    ),
+    'Exótica con potencial de invasión Riesgo Moderado': (
+        'exoticriskinvasion',
+        'Exótica con potencial de invasión Riesgo Moderado',
+    ),
+    'Exótica con potencial de invasión Riesgo Moderado/ Alto': (
+        'exoticriskinvasion',
+        'Exótica con potencial de invasión Riesgo Moderado/ Alto',
+    ),
+    'EX_IUCN': ('threatstatusuicn', 'EX_IUCN'),
+    'EW_IUCN': ('threatstatusuicn', 'EW_IUCN'),
+    'CR_IUCN': ('threatstatusuicn', 'CR_IUCN'),
+    'EN_IUCN': ('threatstatusuicn', 'EN_IUCN'),
+    'VU_IUCN': ('threatstatusuicn', 'VU_IUCN'),
+    'NT_IUCN': ('threatstatusuicn', 'NT_IUCN'),
+    'LC_IUCN': ('threatstatusuicn', 'LC_IUCN'),
+    'DD_IUCN': ('threatstatusuicn', 'DD_IUCN'),
+    'LR/lc_IUCN': ('threatstatusuicn', 'LR/lc_IUCN'),
+    'LR/nt_IUCN': ('threatstatusuicn', 'LR/nt_IUCN'),
+}
+
+_REGION_TEMATICA_DERIVED_SOURCES = {
+    'especies_exoticas_total': [
+        'especies_exoticas', 'especies_invasoras',
+        'especies_exoticas_riesgo_invasion_alto', 'especies_exoticas_riesgo_invasion_bajo',
+        'especies_exoticas_riesgo_invasion_moderado', 'especies_exoticas_riesgo_invasion_moderado_alto',
+        'especies_trasplantadas',
+    ],
+    'registros_exoticas_total': [
+        'registros_exoticas', 'registros_invasoras',
+        'registros_exoticas_riesgo_invasion_alto', 'registros_exoticas_riesgo_invasion_bajo',
+        'registros_exoticas_riesgo_invasion_moderado', 'registros_exoticas_riesgo_invasion_moderado_alto',
+        'registros_trasplantadas',
+    ],
+    'especies_exoticas_riesgo_invasion_total': [
+        'especies_exoticas_riesgo_invasion_alto', 'especies_exoticas_riesgo_invasion_bajo',
+        'especies_exoticas_riesgo_invasion_moderado', 'especies_exoticas_riesgo_invasion_moderado_alto',
+    ],
+    'registros_exoticas_riesgo_invasion_total': [
+        'registros_exoticas_riesgo_invasion_alto', 'registros_exoticas_riesgo_invasion_bajo',
+        'registros_exoticas_riesgo_invasion_moderado', 'registros_exoticas_riesgo_invasion_moderado_alto',
+    ],
+    'especies_amenazadas_global_total': [
+        'especies_amenazadas_global_en', 'especies_amenazadas_global_cr', 'especies_amenazadas_global_vu',
+    ],
+    'registros_amenazadas_global_total': [
+        'registros_amenazadas_global_en', 'registros_amenazadas_global_cr', 'registros_amenazadas_global_vu',
+    ],
+    'especies_continentales_exoticas_total': [
+        'especies_continentales_exoticas', 'especies_continentales_invasoras',
+        'especies_continentales_exoticas_riesgo_invasion_alto', 'especies_continentales_exoticas_riesgo_invasion_bajo',
+        'especies_continentales_exoticas_riesgo_invasion_moderado',
+        'especies_continentales_exoticas_riesgo_invasion_moderado_alto', 'especies_continentales_trasplantadas',
+    ],
+    'registros_continentales_exoticas_total': [
+        'registros_continentales_exoticas', 'registros_continentales_invasoras',
+        'registros_continentales_exoticas_riesgo_invasion_alto', 'registros_continentales_exoticas_riesgo_invasion_bajo',
+        'registros_continentales_exoticas_riesgo_invasion_moderado',
+        'registros_continentales_exoticas_riesgo_invasion_moderado_alto', 'registros_continentales_trasplantadas',
+    ],
+    'especies_continentales_exoticas_riesgo_invasion_total': [
+        'especies_continentales_exoticas_riesgo_invasion_alto', 'especies_continentales_exoticas_riesgo_invasion_bajo',
+        'especies_continentales_exoticas_riesgo_invasion_moderado',
+        'especies_continentales_exoticas_riesgo_invasion_moderado_alto',
+    ],
+    'registros_continentales_exoticas_riesgo_invasion_total': [
+        'registros_continentales_exoticas_riesgo_invasion_alto', 'registros_continentales_exoticas_riesgo_invasion_bajo',
+        'registros_continentales_exoticas_riesgo_invasion_moderado',
+        'registros_continentales_exoticas_riesgo_invasion_moderado_alto',
+    ],
+    'especies_marinas_exoticas_total': [
+        'especies_marinas_exoticas', 'especies_marinas_invasoras',
+        'especies_marinas_exoticas_riesgo_invasion_alto', 'especies_marinas_exoticas_riesgo_invasion_bajo',
+        'especies_marinas_exoticas_riesgo_invasion_moderado', 'especies_marinas_exoticas_riesgo_invasion_moderado_alto',
+        'especies_marinas_trasplantadas',
+    ],
+    'registros_marinas_exoticas_total': [
+        'registros_marinas_exoticas', 'registros_marinas_invasoras',
+        'registros_marinas_exoticas_riesgo_invasion_alto', 'registros_marinas_exoticas_riesgo_invasion_bajo',
+        'registros_marinas_exoticas_riesgo_invasion_moderado', 'registros_marinas_exoticas_riesgo_invasion_moderado_alto',
+        'registros_marinas_trasplantadas',
+    ],
+    'especies_marinas_exoticas_riesgo_invasion_total': [
+        'especies_marinas_exoticas_riesgo_invasion_alto', 'especies_marinas_exoticas_riesgo_invasion_bajo',
+        'especies_marinas_exoticas_riesgo_invasion_moderado', 'especies_marinas_exoticas_riesgo_invasion_moderado_alto',
+    ],
+    'registros_marinas_exoticas_riesgo_invasion_total': [
+        'registros_marinas_exoticas_riesgo_invasion_alto', 'registros_marinas_exoticas_riesgo_invasion_bajo',
+        'registros_marinas_exoticas_riesgo_invasion_moderado', 'registros_marinas_exoticas_riesgo_invasion_moderado_alto',
+    ],
+    'especies_salobres_exoticas_total': [
+        'especies_salobres_exoticas', 'especies_salobres_invasoras',
+        'especies_salobres_exoticas_riesgo_invasion_alto', 'especies_salobres_exoticas_riesgo_invasion_bajo',
+        'especies_salobres_exoticas_riesgo_invasion_moderado', 'especies_salobres_exoticas_riesgo_invasion_moderado_alto',
+        'especies_salobres_trasplantadas',
+    ],
+    'registros_salobres_exoticas_total': [
+        'registros_salobres_exoticas', 'registros_salobres_invasoras',
+        'registros_salobres_exoticas_riesgo_invasion_alto', 'registros_salobres_exoticas_riesgo_invasion_bajo',
+        'registros_salobres_exoticas_riesgo_invasion_moderado', 'registros_salobres_exoticas_riesgo_invasion_moderado_alto',
+        'registros_salobres_trasplantadas',
+    ],
+    'especies_salobres_exoticas_riesgo_invasion_total': [
+        'especies_salobres_exoticas_riesgo_invasion_alto', 'especies_salobres_exoticas_riesgo_invasion_bajo',
+        'especies_salobres_exoticas_riesgo_invasion_moderado', 'especies_salobres_exoticas_riesgo_invasion_moderado_alto',
+    ],
+    'registros_salobres_exoticas_riesgo_invasion_total': [
+        'registros_salobres_exoticas_riesgo_invasion_alto', 'registros_salobres_exoticas_riesgo_invasion_bajo',
+        'registros_salobres_exoticas_riesgo_invasion_moderado', 'registros_salobres_exoticas_riesgo_invasion_moderado_alto',
+    ],
+    'especies_continentales_amenazadas_global_total': [
+        'especies_continentales_amenazadas_global_en', 'especies_continentales_amenazadas_global_cr',
+        'especies_continentales_amenazadas_global_vu',
+    ],
+    'registros_continentales_amenazadas_global_total': [
+        'registros_continentales_amenazadas_global_en', 'registros_continentales_amenazadas_global_cr',
+        'registros_continentales_amenazadas_global_vu',
+    ],
+    'especies_marinas_amenazadas_global_total': [
+        'especies_marinas_amenazadas_global_en', 'especies_marinas_amenazadas_global_cr',
+        'especies_marinas_amenazadas_global_vu',
+    ],
+    'registros_marinas_amenazadas_global_total': [
+        'registros_marinas_amenazadas_global_en', 'registros_marinas_amenazadas_global_cr',
+        'registros_marinas_amenazadas_global_vu',
+    ],
+    'especies_salobres_amenazadas_global_total': [
+        'especies_salobres_amenazadas_global_en', 'especies_salobres_amenazadas_global_cr',
+        'especies_salobres_amenazadas_global_vu',
+    ],
+    'registros_salobres_amenazadas_global_total': [
+        'registros_salobres_amenazadas_global_en', 'registros_salobres_amenazadas_global_cr',
+        'registros_salobres_amenazadas_global_vu',
+    ],
+}
+
+
+@dataclass(frozen=True)
+class _RegionTematicaMetric:
+    column: str
+    kind: _RegionTematicaKind
+    habitat: _RegionTematicaHabitat = None
+    field: str | None = None
+    value: str | None = None
+    row_distinct_species: bool = False
+
+
+def _region_tematica_parse_habitat(text: str) -> tuple[_RegionTematicaHabitat, str]:
+    for label, hab in (
+        ('Continentales', 'continental'),
+        ('Marinos', 'marino'),
+        ('Marinas', 'marino'),
+        ('Salobres', 'salobre'),
+    ):
+        if text.startswith(label + ' '):
+            return hab, text[len(label) + 1 :]
+        if text == label:
+            return hab, ''
+    return None, text
+
+
+def _region_tematica_resolve_field(label: str) -> tuple[str | None, str | None]:
+    if label in _REGION_TEMATICA_THEMATIC_FIELDS:
+        return _REGION_TEMATICA_THEMATIC_FIELDS[label], None
+    if label in _REGION_TEMATICA_CATEGORY_MAP:
+        return _REGION_TEMATICA_CATEGORY_MAP[label]
+    return None, None
+
+
+def _region_tematica_metric_from_legacy(output_col: str, legacy_key: str) -> _RegionTematicaMetric | None:
+    if legacy_key in ('registros', 'especies'):
+        return _RegionTematicaMetric(
+            column=output_col,
+            kind='registros' if legacy_key == 'registros' else 'especies',
+        )
+    direct_habitat = {
+        'registrosContinentales': ('registros', 'continental'),
+        'registrosMarinos': ('registros', 'marino'),
+        'registrosSalobres': ('registros', 'salobre'),
+        'especiesContinentales': ('especies', 'continental'),
+        'especiesMarinas': ('especies', 'marino'),
+        'especiesSalobres': ('especies', 'salobre'),
+    }
+    if legacy_key in direct_habitat:
+        kind, hab = direct_habitat[legacy_key]
+        return _RegionTematicaMetric(
+            column=output_col, kind=kind, habitat=hab, row_distinct_species=kind == 'especies',
+        )
+    parts = legacy_key.split(' ', 1)
+    if len(parts) != 2:
+        return None
+    kind_word, rest = parts
+    if kind_word not in ('registros', 'especies'):
+        return None
+    habitat, label = _region_tematica_parse_habitat(rest)
+    field, value = _region_tematica_resolve_field(label)
+    if field is None:
+        return None
+    return _RegionTematicaMetric(
+        column=output_col, kind=kind_word, habitat=habitat, field=field, value=value,
+    )
+
+
+_REGION_TEMATICA_LEGACY_MAP: dict[str, str] = {
+    'registros': 'registros_region_total',
+    'registrosContinentales': 'registros_continentales',
+    'registrosMarinos': 'registros_marinos',
+    'registrosSalobres': 'registros_salobres',
+    'especies': 'especies_region_total',
+    'especiesContinentales': 'especies_continentales',
+    'especiesMarinas': 'especies_marinas',
+    'especiesSalobres': 'especies_salobres',
+    'especies threatStatus_MADS': 'especies_amenazadas_nacional_total',
+    'especies CR_MADS': 'especies_amenazadas_nacional_cr',
+    'especies EN_MADS': 'especies_amenazadas_nacional_en',
+    'especies VU_MADS': 'especies_amenazadas_nacional_vu',
+    'registros threatStatus_MADS': 'registros_amenazadas_nacional_total',
+    'registros CR_MADS': 'registros_amenazadas_nacional_cr',
+    'registros EN_MADS': 'registros_amenazadas_nacional_en',
+    'registros VU_MADS': 'registros_amenazadas_nacional_vu',
+    'especies appendixCITES': 'especies_cites_total',
+    'especies I': 'especies_cites_i',
+    'especies I/II': 'especies_cites_i_ii',
+    'especies II': 'especies_cites_ii',
+    'especies III': 'especies_cites_iii',
+    'registros appendixCITES': 'registros_cites_total',
+    'registros I': 'registros_cites_i',
+    'registros I/II': 'registros_cites_i_ii',
+    'registros II': 'registros_cites_ii',
+    'registros III': 'registros_cites_iii',
+    'especies Exótica': 'especies_exoticas',
+    'especies Invasora': 'especies_invasoras',
+    'especies Exótica con potencial de invasión Alto Riesgo': 'especies_exoticas_riesgo_invasion_alto',
+    'especies Exótica con potencial de invasión Bajo Riesgo': 'especies_exoticas_riesgo_invasion_bajo',
+    'especies Exótica con potencial de invasión Riesgo Moderado': 'especies_exoticas_riesgo_invasion_moderado',
+    'especies Exótica con potencial de invasión Riesgo Moderado/ Alto': (
+        'especies_exoticas_riesgo_invasion_moderado_alto'
+    ),
+    'especies Trasplantada': 'especies_trasplantadas',
+    'registros Exótica': 'registros_exoticas',
+    'registros Invasora': 'registros_invasoras',
+    'registros Exótica con potencial de invasión Alto Riesgo': 'registros_exoticas_riesgo_invasion_alto',
+    'registros Exótica con potencial de invasión Bajo Riesgo': 'registros_exoticas_riesgo_invasion_bajo',
+    'registros Exótica con potencial de invasión Riesgo Moderado': 'registros_exoticas_riesgo_invasion_moderado',
+    'registros Exótica con potencial de invasión Riesgo Moderado/ Alto': (
+        'registros_exoticas_riesgo_invasion_moderado_alto'
+    ),
+    'registros Trasplantada': 'registros_trasplantadas',
+    'especies endemic': 'especies_endemicas',
+    'especies migratory': 'especies_migratorias',
+    'registros endemic': 'registros_endemicas',
+    'registros migratory': 'registros_migratorias',
+    'especies EX_IUCN': 'especies_amenazadas_global_ex',
+    'especies EW_IUCN': 'especies_amenazadas_global_ew',
+    'especies CR_IUCN': 'especies_amenazadas_global_cr',
+    'especies EN_IUCN': 'especies_amenazadas_global_en',
+    'especies VU_IUCN': 'especies_amenazadas_global_vu',
+    'especies NT_IUCN': 'especies_amenazadas_global_nt',
+    'especies LC_IUCN': 'especies_amenazadas_global_lc',
+    'especies DD_IUCN': 'especies_amenazadas_global_dd',
+    'especies LR/lc_IUCN': 'especies_amenazadas_global_lr_lc',
+    'especies LR/nt_IUCN': 'especies_amenazadas_global_lr_nt',
+    'registros EX_IUCN': 'registros_amenazadas_global_ex',
+    'registros EW_IUCN': 'registros_amenazadas_global_ew',
+    'registros CR_IUCN': 'registros_amenazadas_global_cr',
+    'registros EN_IUCN': 'registros_amenazadas_global_en',
+    'registros VU_IUCN': 'registros_amenazadas_global_vu',
+    'registros NT_IUCN': 'registros_amenazadas_global_nt',
+    'registros LC_IUCN': 'registros_amenazadas_global_lc',
+    'registros DD_IUCN': 'registros_amenazadas_global_dd',
+    'registros LR/lc_IUCN': 'registros_amenazadas_global_lr_lc',
+    'registros LR/nt_IUCN': 'registros_amenazadas_global_lr_nt',
+}
+
+for _rt_hab, _rt_pfx in (
+    ('continental', 'especies_continentales_'),
+    ('marino', 'especies_marinas_'),
+    ('salobre', 'especies_salobres_'),
+):
+    _rt_hab_reg = {'continental': 'Continentales', 'marino': 'Marinos', 'salobre': 'Salobres'}[_rt_hab]
+    _rt_hab_sp = {'continental': 'Continentales', 'marino': 'Marinas', 'salobre': 'Salobres'}[_rt_hab]
+    for _rt_leg, _rt_out in list(_REGION_TEMATICA_LEGACY_MAP.items()):
+        if (
+            _rt_leg.startswith('especies ')
+            and 'Continentales' not in _rt_leg
+            and 'Marinas' not in _rt_leg
+            and 'Salobres' not in _rt_leg
+        ):
+            _rt_body = _rt_leg.split(' ', 1)[1]
+            _REGION_TEMATICA_LEGACY_MAP[f'especies {_rt_hab_sp} {_rt_body}'] = (
+                _rt_pfx + _rt_out[len('especies_') :]
+            )
+        if (
+            _rt_leg.startswith('registros ')
+            and 'Continentales' not in _rt_leg
+            and 'Marinos' not in _rt_leg
+            and 'Salobres' not in _rt_leg
+        ):
+            _rt_body = _rt_leg.split(' ', 1)[1]
+            _rt_reg_out = _rt_out.replace('especies_', 'registros_')
+            _REGION_TEMATICA_LEGACY_MAP[f'registros {_rt_hab_reg} {_rt_body}'] = (
+                _rt_pfx.replace('especies_', 'registros_') + _rt_reg_out[len('registros_') :]
+            )
+
+
+def _build_region_tematica_metrics() -> list[_RegionTematicaMetric]:
+    metrics: list[_RegionTematicaMetric] = []
+    seen: set[str] = set()
+    for legacy_key, output_col in _REGION_TEMATICA_LEGACY_MAP.items():
+        if output_col in _REGION_TEMATICA_DERIVED_SOURCES or output_col in seen:
+            continue
+        metric = _region_tematica_metric_from_legacy(output_col, legacy_key)
+        if metric is None:
+            continue
+        metrics.append(metric)
+        seen.add(output_col)
+    return metrics
+
+
+def _region_tematica_field_condition(field: str, value: str | None) -> str:
+    if value is None:
+        return f'{field} IS NOT NULL'
+    escaped = value.replace("'", "''")
+    return f"{field} = '{escaped}'"
+
+
+def _region_tematica_metric_agg_sql(metric: _RegionTematicaMetric, incluye_marino: bool) -> str | None:
+    if metric.habitat and not incluye_marino:
+        return f'NULL::bigint AS {metric.column}'
+
+    conditions: list[str] = []
+    if metric.habitat:
+        conditions.append(_REGION_TEMATICA_HABITAT_SQL[metric.habitat])
+    if metric.field:
+        conditions.append(_region_tematica_field_condition(metric.field, metric.value))
+
+    if metric.kind == 'registros' and not conditions and metric.column == 'registros_region_total':
+        return f'COUNT(*)::bigint AS {metric.column}'
+
+    where = ' AND '.join(conditions) if conditions else 'TRUE'
+
+    if metric.kind == 'registros':
+        return f'COUNT(*) FILTER (WHERE {where})::bigint AS {metric.column}'
+
+    if metric.row_distinct_species and metric.habitat:
+        hab_col = _REGION_TEMATICA_HABITAT_COL[metric.habitat]
+        return (
+            f'COUNT(DISTINCT ROW(species, {hab_col})) FILTER '
+            f'(WHERE {_REGION_TEMATICA_SPECIES_VALID} AND {where})::bigint AS {metric.column}'
+        )
+    return (
+        f'COUNT(DISTINCT species) FILTER (WHERE {_REGION_TEMATICA_SPECIES_VALID} AND {where})::bigint '
+        f'AS {metric.column}'
+    )
+
+
+def _region_tematica_derived_select_sql(incluye_marino: bool) -> list[str]:
+    exprs: list[str] = []
+    for target, sources in _REGION_TEMATICA_DERIVED_SOURCES.items():
+        is_habitat_derived = any(
+            token in target for token in ('_continentales_', '_marinas_', '_salobres_')
+        )
+        if is_habitat_derived and not incluye_marino:
+            exprs.append(f'NULL::bigint AS {target}')
+            continue
+        parts = [f'COALESCE(m.{src}, 0)' for src in sources]
+        exprs.append(f'({" + ".join(parts)})::bigint AS {target}')
+    return exprs
+
+
+_REGION_TEMATICA_AGGREGATE_METRICS = _build_region_tematica_metrics()
+
+
+def _build_wide_metric_select_sql(incluye_marino: bool) -> tuple[str, str, str]:
+    """Arma agg_sql, metric_cols y derived_sql para MVs de formato ancho CCDM."""
+    agg_exprs = [
+        expr
+        for metric in _REGION_TEMATICA_AGGREGATE_METRICS
+        if (expr := _region_tematica_metric_agg_sql(metric, incluye_marino))
+    ]
+    agg_sql = ',\n            '.join(agg_exprs)
+    derived_sql = ',\n        '.join(_region_tematica_derived_select_sql(incluye_marino))
+    metric_cols = ',\n        '.join(f'm.{m.column}' for m in _REGION_TEMATICA_AGGREGATE_METRICS)
+    return agg_sql, metric_cols, derived_sql
+
+
+_REGION_TEMATICA_POR_REGION_LATERAL_SQL = f"""
+        CROSS JOIN LATERAL (VALUES
+            {_slug_region_lateral_values('b')}
+        ) AS r(slug_region)
+        WHERE r.slug_region IS NOT NULL
+"""
+
+_REGION_TEMATICA_POR_REGION_LATERAL_JOIN_SQL = f"""
+        CROSS JOIN LATERAL (VALUES
+            {_slug_region_lateral_values('b')}
+        ) AS r(slug_region)
+"""
+
+_OCCURRENCIA_GEO_BASE_SQL = f"""
+        SELECT
+            ts.species,
+            ts.flagtaxo,
+            ts.kingdom,
+            ts.phylum,
+            ts."class",
+            ts."order",
+            ts.family,
+            ts.genus,
+            ts.ismarine,
+            ts.isbrackish,
+            ts.isterrestrial,
+            ts.threatstatusmads,
+            ts.threatstatusuicn,
+            ts.cites,
+            ts.invasive,
+            ts.exotic,
+            ts.exoticriskinvasion,
+            ts.transplanted,
+            ts.endemic,
+            ts.migratory,
+            COALESCE(gl.stateprovinceslug, dept.slug) AS dept_slug,
+            COALESCE(gl.countyslug, muni.slug) AS muni_slug,
+            gl.amazonregion,
+            gl.reserve,
+            gl.indigenousreserve,
+            gl.dfybnucleus
+        FROM "{DWC_INTEGRATED_TABLE}" i
+        LEFT JOIN taxonomic_species_validation ts ON ts.id = i.taxonomic_species_id
+        LEFT JOIN geo_locality_validation gl ON gl.id = i.locality_id
+        LEFT JOIN geo_master_geography gm ON gm.id = gl.geo_master_geography_id
+        LEFT JOIN geo_master_geography muni
+            ON muni.id = CASE WHEN gm.subtype = 'municipio' THEN gm.id END
+        LEFT JOIN geo_master_geography dept
+            ON dept.id = COALESCE(
+                muni.parent_id,
+                CASE WHEN gm.subtype = 'departamento' THEN gm.id END
+            )
+"""
+
+_POR_REGION_COLUMNS_SQL = """
+            b.species,
+            b.flagtaxo,
+            b.ismarine,
+            b.isbrackish,
+            b.isterrestrial,
+            b.threatstatusmads,
+            b.threatstatusuicn,
+            b.cites,
+            b.invasive,
+            b.exotic,
+            b.exoticriskinvasion,
+            b.transplanted,
+            b.endemic,
+            b.migratory,
+            r.slug_region
+"""
+
+_REGION_TEMATICA_MV_SQL = f"""
+    WITH base AS (
+        {_OCCURRENCIA_GEO_BASE_SQL}
+    ),
+    por_region AS (
+        SELECT
+            {_POR_REGION_COLUMNS_SQL}
+        FROM base b
+        {_REGION_TEMATICA_POR_REGION_LATERAL_SQL}
+    ),
+    metricas AS (
+        SELECT
+            slug_region,
+            {{agg_sql}}
+        FROM por_region
+        GROUP BY slug_region
+    )
+    SELECT
+        m.slug_region,
+        (
+            SELECT MAX("date")::date
+            FROM geo_master_geography
+            WHERE "date" IS NOT NULL
+        ) AS fecha_corte,
+        NULL::bigint AS especies_region_estimadas,
+        NULL::text AS estimada_region_ref_id,
+        {{metric_cols}},
+        {{derived_sql}}
+    FROM metricas m
+    ORDER BY slug_region
+"""
+
+_TAXON_RANK_COLUMNS: tuple[tuple[str, str], ...] = (
+    ('kingdom', 'kingdom'),
+    ('phylum', 'phylum'),
+    ('class', '"class"'),
+    ('order', '"order"'),
+    ('family', 'family'),
+    ('genus', 'genus'),
+    ('species', 'species'),
+)
+
+_REGION_GRUPO_MV_SQL = f"""
+    WITH metricas AS (
+        SELECT
+            g.slug AS slug_grupo,
+            g.grouptype AS tipo,
+            ar.slug_region,
+            {{rollup_sum_sql}}
+        FROM {STAGING_AGG_TAXON_REGION_MV} ar
+        INNER JOIN taxonomic_groups g
+            ON g.taxonrank = ar.taxonrank
+           AND g.taxon = ar.taxon
+        WHERE g.grouptype IS NOT NULL
+          AND BTRIM(g.grouptype) <> '-'
+        GROUP BY g.slug, g.grouptype, ar.slug_region
+    )
+    SELECT
+        m.slug_grupo,
+        m.slug_region,
+        m.tipo,
+        {{metric_cols}},
+        {{derived_sql}}
+    FROM metricas m
+"""
+
+
+def _materialized_view_exists(db, name: str) -> bool:
+    with db.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT 1
+            FROM pg_matviews
+            WHERE schemaname = 'public'
+              AND matviewname = %(name)s
+            """,
+            {'name': name},
+        ).fetchall()
+    return bool(rows)
+
+
+def _build_rank_union_from_base_sql(agg_sql: str) -> str:
+    """Agrega por rango taxonómico y región desde base geo (una pasada por rango)."""
+    branches: list[str] = []
+    for rank_name, col_expr in _TAXON_RANK_COLUMNS:
+        branches.append(f"""
+        SELECT
+            '{rank_name}' AS taxonrank,
+            {col_expr} AS taxon,
+            r.slug_region,
+            {agg_sql}
+        FROM base b
+        {_REGION_TEMATICA_POR_REGION_LATERAL_JOIN_SQL}
+        WHERE r.slug_region IS NOT NULL
+          AND {col_expr} IS NOT NULL
+          AND NULLIF(BTRIM({col_expr}::text), '') IS NOT NULL
+        GROUP BY {col_expr}, r.slug_region""")
+    return f"""
+    WITH base AS (
+        {_OCCURRENCIA_GEO_BASE_SQL}
+    )
+    """ + '\n        UNION ALL'.join(branches)
+
+
+def _build_staging_agg_taxon_region_mv_sql() -> str:
+    """Arma SQL de staging_agg_taxon_region (por_rango materializado)."""
+    agg_sql, _, _ = _build_wide_metric_select_sql(incluye_marino=True)
+    return _build_rank_union_from_base_sql(agg_sql)
+
+
+def _build_region_grupo_rollup_sum_sql() -> str:
+    """Suma conteos por rango hacia slug_grupo (estilo legacy sección 14)."""
+    return ',\n            '.join(
+        f'SUM(ar.{metric.column})::bigint AS {metric.column}'
+        for metric in _REGION_TEMATICA_AGGREGATE_METRICS
+    )
+
+
+def _build_region_tematica_mv_sql() -> str:
+    """Arma SQL de region_tematica (CCDM, todas las regiones en una MV)."""
+    agg_sql, metric_cols, derived_sql = _build_wide_metric_select_sql(incluye_marino=True)
+    return _REGION_TEMATICA_MV_SQL.format(
+        agg_sql=agg_sql,
+        metric_cols=metric_cols,
+        derived_sql=derived_sql,
+    )
+
+
+def _build_region_grupo_mv_sql() -> str:
+    """Arma SQL de region_grupo (rollup desde staging_agg_taxon_region)."""
+    _, metric_cols, derived_sql = _build_wide_metric_select_sql(incluye_marino=True)
+    rollup_sum_sql = _build_region_grupo_rollup_sum_sql()
+    return _REGION_GRUPO_MV_SQL.format(
+        rollup_sum_sql=rollup_sum_sql,
+        metric_cols=metric_cols,
+        derived_sql=derived_sql,
+    )
+
+
+_LEGACY_REGION_TEMATICA_MVS = tuple(
+    f'region_tematica_{nivel.lower()}' for nivel in ('CCDM', 'CSDM', 'DCDM', 'DSDM', 'MCDM', 'MSDM')
+)
+
+
+def _drop_region_grupo_dependent_mvs(conn) -> None:
+    """Elimina MVs que dependen de staging_agg_taxon_region."""
+    conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {REGION_GRUPO_MV}')
+
+
+def create_staging_agg_taxon_region_materialized_view(db) -> int:
+    """Crea MV staging_agg_taxon_region: agregados por taxonrank, taxon y slug_region."""
+    required = (
+        DWC_INTEGRATED_TABLE,
+        'taxonomic_species_validation',
+        'geo_locality_validation',
+        'geo_master_geography',
+    )
+    missing = [name for name in required if not table_exists(db, name)]
+    if missing:
+        raise ValueError(f'Faltan tablas requeridas: {", ".join(missing)}')
+
+    with db.connect() as conn:
+        _drop_region_grupo_dependent_mvs(conn)
+        conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {STAGING_OCURRENCIA_GEO_MV}')
+        conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {STAGING_AGG_TAXON_REGION_MV}')
+        conn.execute(
+            f'CREATE MATERIALIZED VIEW {STAGING_AGG_TAXON_REGION_MV} AS '
+            f'{_build_staging_agg_taxon_region_mv_sql()}'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{STAGING_AGG_TAXON_REGION_MV}_taxon '
+            f'ON {STAGING_AGG_TAXON_REGION_MV} (taxonrank, taxon)'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{STAGING_AGG_TAXON_REGION_MV}_taxon_region '
+            f'ON {STAGING_AGG_TAXON_REGION_MV} (taxonrank, taxon, slug_region)'
+        )
+        conn.commit()
+        total = conn.execute(
+            f'SELECT COUNT(*) FROM {STAGING_AGG_TAXON_REGION_MV}'
+        ).fetchall()[0][0]
+    logger.info('Vista materializada %s creada (%s filas)', STAGING_AGG_TAXON_REGION_MV, total)
+    print(f'Vista materializada {STAGING_AGG_TAXON_REGION_MV}: {total:,} filas')
+    return total
+
+
+def _ensure_staging_agg_taxon_region(db) -> None:
+    if not _materialized_view_exists(db, STAGING_AGG_TAXON_REGION_MV):
+        raise ValueError(
+            f'Falta MV {STAGING_AGG_TAXON_REGION_MV}. '
+            f'Ejecute sin --skip-staging-agg-taxon-region o créela antes.'
+        )
+
+
+def create_region_tematica_materialized_view(db) -> int:
+    """Crea MV region_tematica: una fila por slug_region (nacional, depto, muni)."""
+    required = (
+        DWC_INTEGRATED_TABLE,
+        'taxonomic_species_validation',
+        'geo_locality_validation',
+        'geo_master_geography',
+    )
+    missing = [name for name in required if not table_exists(db, name)]
+    if missing:
+        raise ValueError(f'Faltan tablas requeridas: {", ".join(missing)}')
+
+    with db.connect() as conn:
+        for legacy_mv in _LEGACY_REGION_TEMATICA_MVS:
+            conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {legacy_mv}')
+        conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {REGION_TEMATICA_MV}')
+        conn.execute(
+            f'CREATE MATERIALIZED VIEW {REGION_TEMATICA_MV} AS {_build_region_tematica_mv_sql()}'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{REGION_TEMATICA_MV}_slug_region '
+            f'ON {REGION_TEMATICA_MV} (slug_region)'
+        )
+        conn.commit()
+        total = conn.execute(f'SELECT COUNT(*) FROM {REGION_TEMATICA_MV}').fetchall()[0][0]
+    logger.info('Vista materializada %s creada (%s filas)', REGION_TEMATICA_MV, total)
+    print(f'Vista materializada {REGION_TEMATICA_MV}: {total:,} filas')
+    return total
+
+
+def create_region_grupo_materialized_view(db) -> int:
+    """Crea MV region_grupo: una fila por slug_grupo y slug_region (nacional, depto, muni)."""
+    required = ('taxonomic_groups',)
+    missing = [name for name in required if not table_exists(db, name)]
+    if missing:
+        raise ValueError(f'Faltan tablas requeridas: {", ".join(missing)}')
+    _ensure_staging_agg_taxon_region(db)
+
+    with db.connect() as conn:
+        conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {REGION_GRUPO_MV}')
+        conn.execute(
+            f'CREATE MATERIALIZED VIEW {REGION_GRUPO_MV} AS {_build_region_grupo_mv_sql()}'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{REGION_GRUPO_MV}_slug_grupo '
+            f'ON {REGION_GRUPO_MV} (slug_grupo)'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{REGION_GRUPO_MV}_slug_region '
+            f'ON {REGION_GRUPO_MV} (slug_region)'
+        )
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_{REGION_GRUPO_MV}_grupo_region '
+            f'ON {REGION_GRUPO_MV} (slug_grupo, slug_region)'
+        )
+        conn.commit()
+        total = conn.execute(f'SELECT COUNT(*) FROM {REGION_GRUPO_MV}').fetchall()[0][0]
+    logger.info('Vista materializada %s creada (%s filas)', REGION_GRUPO_MV, total)
+    print(f'Vista materializada {REGION_GRUPO_MV}: {total:,} filas')
+    return total
+
+
 def create_publicador_materialized_view(db):
     """Crea MV publicador: catálogo de publicadores con cifras nacionales."""
     required = (
@@ -1127,6 +1917,13 @@ def parse_args():
     parser.add_argument('--skip-especie-tematica', action='store_true', help='Omitir MV especie_tematica')
     parser.add_argument('--skip-cifras-totales', action='store_true', help='Omitir MV cifras_totales')
     parser.add_argument('--skip-geografia-resumen', action='store_true', help='Omitir MV geografia_resumen')
+    parser.add_argument('--skip-region-tematica', action='store_true', help='Omitir MV region_tematica')
+    parser.add_argument('--skip-region-grupo', action='store_true', help='Omitir MV region_grupo')
+    parser.add_argument(
+        '--skip-staging-agg-taxon-region',
+        action='store_true',
+        help='No recrear staging_agg_taxon_region (requiere MV existente para region_grupo)',
+    )
     parser.add_argument('--skip-publicador', action='store_true', help='Omitir MV publicador')
     parser.add_argument('--skip-region-publicador', action='store_true', help='Omitir MV region_publicador')
     parser.add_argument('--skip-estimated', action='store_true', help='Omitir cifras estimadas')
@@ -1176,6 +1973,16 @@ def main():
 
         if not args.skip_geografia_resumen:
             create_geografia_resumen_materialized_view(db)
+
+        if not args.skip_region_tematica:
+            create_region_tematica_materialized_view(db)
+
+        if not args.skip_region_grupo:
+            if args.skip_staging_agg_taxon_region:
+                _ensure_staging_agg_taxon_region(db)
+            else:
+                create_staging_agg_taxon_region_materialized_view(db)
+            create_region_grupo_materialized_view(db)
 
         if not args.skip_publicador:
             create_publicador_materialized_view(db)
