@@ -30,9 +30,16 @@ from typing import Literal
 from dotenv import load_dotenv
 
 from utils.connection import check_connection, get_db, table_exists
-from utils.functions import DWC_INTEGRATED_TABLE
 
+# Cargar .env antes de importar utils.functions: sus constantes de tuning
+# (_WORK_MEM, _MAX_PARALLEL_WORKERS_MV) se evalúan al importar el módulo para no sobreescribir el valor por defecto.
 load_dotenv()
+
+from utils.functions import (
+    DWC_INTEGRATED_TABLE,
+    _MAX_PARALLEL_WORKERS_PER_GATHER,
+    _WORK_MEM,
+)
 
 logger = logging.getLogger('sintesis_biocifras')
 
@@ -1556,6 +1563,30 @@ _POR_REGION_COLUMNS_SQL = """
             r.slug_region
 """
 
+# Validación de especie referida a columnas de por_region (alias pr).
+_REGION_TEMATICA_SPECIES_VALID_PR = """
+    pr.species IS NOT NULL
+    AND NULLIF(BTRIM(pr.species::text), '') IS NOT NULL
+    AND pr.flagtaxo IS DISTINCT FROM 'Ausente en lista taxonómica'
+""".strip()
+
+# Expande cada ocurrencia a una dimensión temática por fila; '__total__' es el
+# conteo geográfico base. Se descarta la categoría nula (species sin ese atributo).
+_REGION_TEMATICA_DIM_LATERAL_SQL = """
+        CROSS JOIN LATERAL (VALUES
+            ('__total__', '__ALL__'::text),
+            ('threatstatusmads', pr.threatstatusmads::text),
+            ('cites', pr.cites::text),
+            ('exotic', pr.exotic::text),
+            ('invasive', pr.invasive::text),
+            ('exoticriskinvasion', pr.exoticriskinvasion::text),
+            ('transplanted', pr.transplanted::text),
+            ('endemic', pr.endemic::text),
+            ('migratory', pr.migratory::text),
+            ('threatstatusuicn', pr.threatstatusuicn::text)
+        ) AS d(dim, category)
+"""
+
 _REGION_TEMATICA_MV_SQL = f"""
     WITH base AS (
         {_OCCURRENCIA_GEO_BASE_SQL}
@@ -1566,11 +1597,41 @@ _REGION_TEMATICA_MV_SQL = f"""
         FROM base b
         {_REGION_TEMATICA_POR_REGION_LATERAL_SQL}
     ),
+    exploded AS (
+        SELECT
+            pr.slug_region,
+            pr.species,
+            ({_REGION_TEMATICA_SPECIES_VALID_PR}) AS species_valid,
+            pr.isterrestrial IS NOT NULL AS h_cont,
+            pr.ismarine IS NOT NULL AS h_mar,
+            pr.isbrackish IS NOT NULL AS h_sal,
+            d.dim,
+            d.category
+        FROM por_region pr
+        {_REGION_TEMATICA_DIM_LATERAL_SQL}
+        WHERE d.category IS NOT NULL
+    ),
+    agg AS (
+        SELECT
+            slug_region,
+            dim,
+            category,
+            COUNT(*)::bigint AS reg_all,
+            COUNT(*) FILTER (WHERE h_cont)::bigint AS reg_cont,
+            COUNT(*) FILTER (WHERE h_mar)::bigint AS reg_mar,
+            COUNT(*) FILTER (WHERE h_sal)::bigint AS reg_sal,
+            COUNT(DISTINCT species) FILTER (WHERE species_valid)::bigint AS esp_all,
+            COUNT(DISTINCT species) FILTER (WHERE species_valid AND h_cont)::bigint AS esp_cont,
+            COUNT(DISTINCT species) FILTER (WHERE species_valid AND h_mar)::bigint AS esp_mar,
+            COUNT(DISTINCT species) FILTER (WHERE species_valid AND h_sal)::bigint AS esp_sal
+        FROM exploded
+        GROUP BY GROUPING SETS ((slug_region, dim, category), (slug_region, dim))
+    ),
     metricas AS (
         SELECT
             slug_region,
-            {{agg_sql}}
-        FROM por_region
+            {{pivot_sql}}
+        FROM agg
         GROUP BY slug_region
     )
     SELECT
@@ -1585,7 +1646,6 @@ _REGION_TEMATICA_MV_SQL = f"""
         {{metric_cols}},
         {{derived_sql}}
     FROM metricas m
-    ORDER BY slug_region
 """
 
 _TAXON_RANK_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -1674,11 +1734,46 @@ def _build_region_grupo_rollup_sum_sql() -> str:
     )
 
 
+_REGION_TEMATICA_PIVOT_SRC = {
+    ('registros', None): 'reg_all',
+    ('registros', 'continental'): 'reg_cont',
+    ('registros', 'marino'): 'reg_mar',
+    ('registros', 'salobre'): 'reg_sal',
+    ('especies', None): 'esp_all',
+    ('especies', 'continental'): 'esp_cont',
+    ('especies', 'marino'): 'esp_mar',
+    ('especies', 'salobre'): 'esp_sal',
+}
+
+
+def _region_tematica_pivot_expr(metric: _RegionTematicaMetric) -> str:
+    """Extrae una métrica ancha desde el agregado largo (agg)."""
+    src = _REGION_TEMATICA_PIVOT_SRC[(metric.kind, metric.habitat)]
+    dim = metric.field or '__total__'
+    if metric.value is None:
+        # Fila de total por dimensión (grouping set sin category).
+        cat_cond = 'category IS NULL'
+    else:
+        escaped = metric.value.replace("'", "''")
+        cat_cond = f"category = '{escaped}'"
+    return (
+        f"COALESCE(MAX({src}) FILTER (WHERE dim = '{dim}' AND {cat_cond}), 0)::bigint "
+        f"AS {metric.column}"
+    )
+
+
+def _build_region_tematica_pivot_sql() -> str:
+    """Arma las 232 columnas anchas por pivote sobre el agregado largo."""
+    return ',\n            '.join(
+        _region_tematica_pivot_expr(m) for m in _REGION_TEMATICA_AGGREGATE_METRICS
+    )
+
+
 def _build_region_tematica_mv_sql() -> str:
     """Arma SQL de region_tematica (CCDM, todas las regiones en una MV)."""
-    agg_sql, metric_cols, derived_sql = _build_wide_metric_select_sql(incluye_marino=True)
+    _, metric_cols, derived_sql = _build_wide_metric_select_sql(incluye_marino=True)
     return _REGION_TEMATICA_MV_SQL.format(
-        agg_sql=agg_sql,
+        pivot_sql=_build_region_tematica_pivot_sql(),
         metric_cols=metric_cols,
         derived_sql=derived_sql,
     )
@@ -1763,6 +1858,12 @@ def create_region_tematica_materialized_view(db) -> int:
         raise ValueError(f'Faltan tablas requeridas: {", ".join(missing)}')
 
     with db.connect() as conn:
+        # Tuning local (valores del .env): la agregación larga con COUNT(DISTINCT)
+        # y GROUPING SETS necesita más work_mem para evitar volcados a disco.
+        # El paralelismo se controla por MAX_PARALLEL_WORKERS_PER_GATHER
+        # (WSL/Docker con /dev/shm pequeño: 0; Linux nativo: 4) para evitar DiskFull.
+        conn.execute(f"SET LOCAL work_mem = '{_WORK_MEM}'")
+        conn.execute(f'SET LOCAL max_parallel_workers_per_gather = {_MAX_PARALLEL_WORKERS_PER_GATHER}')
         for legacy_mv in _LEGACY_REGION_TEMATICA_MVS:
             conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {legacy_mv}')
         conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {REGION_TEMATICA_MV}')

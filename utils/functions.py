@@ -58,6 +58,9 @@ _WORK_MEM = os.getenv('WORK_MEM', '64MB')
 # Dejar en 0 en WSL (Windows) / y en ambientes con Docker para evitar "could not resize shared memory segment".
 # Sistemas operativos Linux se deja en 4 o con pruebas en valores mayores
 _MAX_PARALLEL_MAINTENANCE_WORKERS = int(os.getenv('MAX_PARALLEL_MAINTENANCE_WORKERS', '4'))
+# Workers paralelos por gather en consultas (agregaciones, CREATE MATERIALIZED VIEW).
+# Dejar en 0 en WSL/Docker con /dev/shm pequeño para evitar "could not resize shared memory segment".
+_MAX_PARALLEL_WORKERS_PER_GATHER = int(os.getenv('MAX_PARALLEL_WORKERS_PER_GATHER', '4'))
 
 DWC_OCCURRENCE_TABLE = 'dwc_occurrence'
 DWC_VERBATIM_TABLE = 'dwc_verbatim'
@@ -450,7 +453,7 @@ def create_integrated_table(db, table_names):
     with db.connect() as conn:
         conn.execute(f"SET work_mem = '{_WORK_MEM}'")
         conn.execute(f"SET maintenance_work_mem = '{_MAINTENANCE_WORK_MEM}'")
-        conn.execute("SET max_parallel_workers_per_gather = 4")
+        conn.execute(f'SET max_parallel_workers_per_gather = {_MAX_PARALLEL_WORKERS_PER_GATHER}')
         conn.execute(f'ANALYZE "{occurrence}"')
         conn.execute(f'ANALYZE "{verbatim}"')
         conn.execute(f'DROP TABLE IF EXISTS "{integrated}"')
@@ -707,7 +710,7 @@ def spatials_joins(db, table_name):
     locality_tbl = 'geo_locality_validation'
     with db.connect() as conn:
         conn.execute(f"SET work_mem = '{_WORK_MEM}'")
-        conn.execute("SET max_parallel_workers_per_gather = 4")
+        conn.execute(f'SET max_parallel_workers_per_gather = {_MAX_PARALLEL_WORKERS_PER_GATHER}')
 
         _run_spatial_join(
             conn,
@@ -834,7 +837,7 @@ def normalize_stateprovince_county(db, table_name):
         # Estadísticas actualizadastras spatials_joins para que el planner.
         conn.execute(f'ANALYZE "{locality}"')
         conn.execute(f"SET work_mem = '{_WORK_MEM}'")
-        conn.execute("SET max_parallel_workers_per_gather = 4")
+        conn.execute(f'SET max_parallel_workers_per_gather = {_MAX_PARALLEL_WORKERS_PER_GATHER}')
 
         # Validación 1 (departamento): catálogo de alias → stateprovincevalidated.
         _locality_queries_helper(conn, f"""
