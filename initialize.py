@@ -95,3 +95,6 @@ with open("initialization_scripts/cifras_ranking.py") as f:
 
 with open("initialization_scripts/cifras_region_patrocinador.py") as f:
 	exec(f.read())
+
+with open("initialization_scripts/cifras_publicador.py") as f:
+	exec(f.read())

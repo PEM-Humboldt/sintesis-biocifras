@@ -60,6 +60,7 @@ REGION_GRUPO_MV = 'region_grupo'
 STAGING_AGG_TAXON_REGION_MV = 'staging_agg_taxon_region'
 STAGING_OCURRENCIA_GEO_MV = 'staging_ocurrencia_geo'  # legacy, se elimina al crear staging_agg
 CIFRAS_ESTIMADAS_DEPT_TABLE = 'tmp_cifras_estimated_dept'
+CIFRAS_PUBLICADOR_TABLE = 'tmp_cifras_publicador'
 
 _CIFRAS_TOTALES_NIVEL_LATERAL_SQL = """
     CROSS JOIN LATERAL (VALUES
@@ -511,18 +512,19 @@ _PUBLICADOR_MV_SQL = f"""
         r.publishingorgkey AS slug,
         p.organization AS label,
         r.pais_publicacion,
-        ''::text AS tipo_organizacion,
+        COALESCE(cp.tipo_organizacion, '')::text AS tipo_organizacion,
         CASE
             WHEN r.pais_publicacion = 'CO' THEN 'Nacional'
             ELSE 'Internacional'
         END AS tipo_publicador,
-        ''::text AS url_logo,
+        COALESCE(cp.url_logo, '')::text AS url_logo,
         'https://biodiversidad.co/data/?publishingOrg=' || r.publishingorgkey AS url_socio,
         COALESCE(e.especies, 0) AS especies,
         r.registros
     FROM registros_por_pub r
     LEFT JOIN gbif_publishers p ON p.publishingorgkey = r.publishingorgkey
     LEFT JOIN especies_por_pub e ON e.publishingorgkey = r.publishingorgkey
+    LEFT JOIN {CIFRAS_PUBLICADOR_TABLE} cp ON cp.slug = r.publishingorgkey
     ORDER BY p.organization NULLS LAST, r.publishingorgkey
 """
 
@@ -1925,6 +1927,7 @@ def create_publicador_materialized_view(db):
         DWC_INTEGRATED_TABLE,
         'taxonomic_species_validation',
         'gbif_publishers',
+        CIFRAS_PUBLICADOR_TABLE,
     )
     missing = [name for name in required if not table_exists(db, name)]
     if missing:
