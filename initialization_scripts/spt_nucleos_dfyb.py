@@ -4,7 +4,7 @@ from sqlalchemy import create_engine, text
 import os
 load_dotenv()
 
-pathfile=os.getenv("FILE_SPAT_NDFYB")
+pathfile=os.getenv("FILE_SPAT_NUCLEOS_DFYB")
 
 gdf_nucleos_dfyb=gpd.read_file(pathfile)
 gdf_nucleos_dfyb=gdf_nucleos_dfyb.rename(columns={'OBJECTID':'id', 'geometry': 'geom'}).set_geometry('geom')
@@ -21,3 +21,4 @@ with engine.begin() as conn:
     ))
     
 engine.dispose()
+
