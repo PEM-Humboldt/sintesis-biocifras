@@ -1,63 +1,105 @@
-# Scripts para sintesis de cifras
+# Scripts para síntesis de cifras
 
-Script de lectura y carga de datos desde GBIF a un servidor PostgreSQL + PostGIS para el proceso de análisis y síntesis de cifras para Biodiversidad en cifras
+Scripts de lectura, carga y síntesis de datos desde GBIF hacia PostgreSQL + PostGIS, para el análisis de cifras de Biodiversidad en cifras.
 
-El script se encuentra en modificación permanente.
+El código se encuentra en modificación permanente.
 
 ## Prerequisitos
 
-El script está desarrollado en Python versión 3.10, el cual se conecta a una base de datos PostgreSQL versión 18. Los requisitos están en el archivo de requirements.txt (psycopg2 conexión a postgres, request para descargas y llamados a API, y python-dotenv para carga de datos desde un archivo de variables de entorno). También se tiene un archivo .env_template para definir las variables de conexión y otras configuraciones
+El proyecto está desarrollado en Python 3.10 y se conecta a una base de datos PostgreSQL 18 con PostGIS. Los paquetes necesarios están en `requirements.txt` (conexión a Postgres, descargas y llamadas a API, y carga de variables desde `.env`).
 
-Se debe restaurar la base de datos en blanco (encontrada dentro de la carpeta dump). El nombre por defecto de la base de datos es `sintesis_biocifras`. El dump es un archivo plano por lo que se puede restaurar con el comando `psql sintesis_biocifras < dump_sintesis_blankdb.sql`.
-También es preferible utilizar un usuario y contraseña con privilegios de `SELECT`, `UPDATE`, `INSERT`, `ALTER`, `CREATE` y `DELETE` sólo a esta base de datos.
+Hay un archivo `.env-template` con las variables de conexión, rutas de archivos y ajustes de rendimiento. Hay que copiarlo a `.env` y completar los valores.
 
-### Archivos Necesarios
+Se debe restaurar la base de datos en blanco (carpeta `dump`). El nombre por defecto es `sintesis_biocifras`. El dump es un archivo plano y se puede restaurar con:
 
-Descarga del archivo DarwinCore desde [GBIF](https://www.gbif.org/occurrence/download?country=CO&occurrence_status=present) para Colombia con estado de ocurrencia presente. Se debe contar con una cuenta de usario de GBIF para preparar la consulta. Por el tamaño de la misma la generación puede llevar un tiempo y cuando la descarga esté lista, el sistema de correo de GBIF informará el enlace para descarga de información.
+```bash
+psql sintesis_biocifras < dump_sintesis_blankdb.sql
+```
 
-Dentro del archivo descargado se utilizan el interpretado (`occurrence.txt`)y los datos en verbatim (`verbatim.txt`) 
+También es preferible usar un usuario con privilegios de `SELECT`, `UPDATE`, `INSERT`, `ALTER`, `CREATE` y `DELETE` solo sobre esta base de datos.
 
-## Como ejecutar
+### Archivos necesarios
 
-Clonar el código desde el repositorio
+Hay dos formas de obtener los registros de Colombia desde [GBIF](https://www.gbif.org/occurrence/download?country=CO&occurrence_status=present) (ocurrencias presentes) o través del servicio de descarga or SQL de [GBIF](https://www.gbif.org/occurrence/download/sql#about). Se necesita cuenta de usuario en GBIF; la generación del archivo puede tardar y el aviso llega por correo.
 
-Es preferible establecer un virtual environment para ejecutar el script.
+1. **Descarga DarwinCore (DwC-A):** Del descargado, se usan el `occurrence.txt` y también se dercarga la versión interpretada (`csv`). 
+2. **Descarga por API SQL:** un CSV único definido en `SQL_FILE` del `.env`.
+
+Además, `initialize.py` carga capas geográficas, listas taxonómicas y archivos de apoyo (estimadas por departamento, metadatos de especies, publicadores, etc.). Las rutas se configuran en el `.env` (`FILE_*`, `EXTDATADIR`, etc.).
+
+Para exportar las cifras a archivos, definir `EXPORT_DIR` en el `.env`.
+
+## Cómo ejecutar
+
+Clonar el código desde el repositorio.
+
+Es preferible usar un entorno virtual:
 
 ```bash
 python3 -m venv myvenv
 source myvenv/bin/activate
 ```
 
-(Se puede cambiar `myvenv` con otro nombre)
+(Se puede cambiar `myvenv` por otro nombre.)
 
-Instalar los requerimientos con PIP
+Instalar dependencias:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Hacer copia del archivo .env_template y dejarlo como .env
+Preparar el entorno:
 
 ```bash
-cp .env_template .env
-```
-
-Modificar los parámetros dentro del .env
-
-```bash
+cp .env-template .env
 vi .env
 ```
-Inicializar la base de datos
+
+### 1. Inicializar la base
+
+Carga tablas de referencia (geografía, taxonomía, estimadas, publicadores, etc.):
 
 ```bash
 python3 initialize.py
 ```
 
-Ejecutar el script
+### 2. Cargar y enriquecer los registros
+
+Lee la descarga de GBIF, arma la tabla integrada y aplica validaciones geográficas y taxonómicas:
 
 ```bash
 python3 main.py
 ```
+
+### 3. Generar las cifras (vistas materializadas)
+
+Construye las vistas que consume el portal (especies, regiones, temáticas, publicadores, estimadas, etc.):
+
+```bash
+python3 stats_generator.py
+```
+
+Se pueden omitir bloques concretos con flags `--skip-*` (ver `python3 stats_generator.py --help`).
+
+En ejecución bajo entornos Windows con WSL (Subsistema Linux) conviene dejar `MAX_PARALLEL_WORKERS_MV=0` y un `WORK_MEM` moderado en el `.env`, para evitar problemas de memoria compartida. En un Linux nativo o en Windows sin usas WSL se pueden subir esos valores.
+
+### 4. Exportar a TSV (opcional)
+
+Vuelca las vistas de producto a archivos tabulados en `EXPORT_DIR`:
+
+```bash
+python3 exporter.py
+```
+
+Genera, entre otros: `publicador`, `region_publicador`, `especie`, `especie_meta`, `especie_grupo`, `especie_region`, `especie_tematica`, `cifras_totales`, `region_tematica` y `region_grupo`.
+
+## Modelo de datos
+
+Un diagrama de las tablas base (sin vistas materializadas ni tablas temporales) está en [`Documentation/er_modelo_entidad_relacion.png`](Documentation/er_modelo_entidad_relacion.png).
+
+## Documentación adicional
+
+En la carpeta `Documentation/` hay notas sobre descargas GBIF, listas de referencia y ejemplos de consulta.
 
 ## Problemas conocidos
 
