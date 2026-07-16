@@ -3,9 +3,7 @@
 """
 Exporta las vistas materializadas de producto del portal a archivos TSV.
 
-Reemplaza la salida de archivos del legacy generador.py. Cada MV se vuelca
-con COPY (streaming, sin cargar todo en memoria) a <EXPORT_DIR>/<nombre_mv>.tsv
-en UTF-8, separador tab y con encabezado.
+Cada MV se vuelca con COPY (streaming, sin cargar todo en memoria) a <EXPORT_DIR>/<nombre_mv>.tsv
 """
 
 import os
@@ -18,7 +16,7 @@ load_dotenv()
 from utils.connection import get_db, check_connection
 from utils.logger import setup_logger
 
-# MVs de producto equivalentes a las salidas de generador.py.
+# MVs de tablas a las salidas de generador.py.
 _EXPORT_MVS = (
     'publicador',
     'region_publicador',
@@ -45,9 +43,7 @@ def matview_exists(conn, name):
 
 
 def export_matview(raw_conn, name, out_dir):
-    # Vuelca una MV a TSV con COPY. Formato csv + delimitador tab para usar
-    # quoting mínimo (igual que pandas.to_csv(sep='\t') del legacy) y ser
-    # robusto ante tabs o saltos de línea dentro de los datos.
+    # Vuelca una MV a TSV con COPY. Formato csv + delimitador
     path = os.path.join(out_dir, f'{name}.tsv')
     copy_sql = (
         f'COPY (SELECT * FROM "{name}") TO STDOUT '
