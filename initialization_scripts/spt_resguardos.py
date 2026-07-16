@@ -12,9 +12,6 @@ gdf_resguardos
 
 engine=create_engine("postgresql://"+os.getenv("DATABASE_USER")+":"+os.getenv("DATABASE_PASS")+"@"+os.getenv("DATABASE_HOST")+":"+os.getenv("DATABASE_PORT")+"/"+os.getenv("DATABASE_NAME"))
 gdf_resguardos.to_postgis("RESGUARDOS",engine, if_exists='replace')
-
-engine=create_engine("postgresql://"+os.getenv("DATABASE_USER")+":"+os.getenv("DATABASE_PASS")+"@"+os.getenv("DATABASE_HOST")+":"+os.getenv("DATABASE_PORT")+"/"+os.getenv("DATABASE_NAME"))
-gdf_resguardos.to_postgis("RESGUARDOS",engine, if_exists='replace')
 with engine.begin() as conn:
     conn.execute(text(
         'CREATE INDEX "sidx_RESGUARDOS_geom" ON public."RESGUARDOS" USING gist (geom)'

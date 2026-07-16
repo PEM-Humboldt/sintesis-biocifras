@@ -78,6 +78,9 @@ with open("initialization_scripts/threat_mads.py") as f:
 with open("initialization_scripts/worms_validation.py") as f:
 	exec(f.read())
 
+with open("initialization_scripts/grupos_biologicos.py") as f:
+	exec(f.read())
+
 with open("initialization_scripts/cifras_dato_relevante.py") as f:
 	exec(f.read())
 
@@ -94,6 +97,9 @@ with open("initialization_scripts/cifras_ranking.py") as f:
 	exec(f.read())
 
 with open("initialization_scripts/cifras_region_patrocinador.py") as f:
+	exec(f.read())
+
+with open("initialization_scripts/cifras_estimadas_depto.py") as f:
 	exec(f.read())
 
 

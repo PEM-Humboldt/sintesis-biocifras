@@ -18,6 +18,10 @@ from utils.logger import setup_logger
 
 # MVs de tablas a las salidas de generador.py.
 _EXPORT_MVS = (
+    'dato_relevante',
+    'departamento',
+    'municipio',
+    'region',
     'publicador',
     'region_publicador',
     'especie',
