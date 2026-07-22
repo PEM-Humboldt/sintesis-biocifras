@@ -24,7 +24,6 @@ _REQUIRED_REFERENCE_TABLES = (
     'gbif_datasets',
     'gbif_publishers',
     'geo_county_validation',
-    'geo_countyslug_validation',
     'geo_master_geography',
     'geo_locality_validation',
     'geo_stateprovince_validation',
