@@ -127,7 +127,7 @@ _SIMPLE_TYPES = {
     'taxonrank': 'TEXT', 'day': 'SMALLINT', 'month': 'SMALLINT',
     'year': 'SMALLINT', 'verbatimscientificname': 'TEXT',
     'datasetkey': 'TEXT', 'publishingorgkey': 'TEXT',
-    'taxonkey': 'BIGINT', 'issue': 'TEXT', 'occurrencestatus': 'TEXT',
+    'taxonkey': 'TEXT', 'issue': 'TEXT', 'occurrencestatus': 'TEXT',
     'lastinterpreted': 'TIMESTAMPTZ',
 }
 
@@ -158,7 +158,7 @@ _SQL_COL_TYPES = {
     'genus': 'TEXT', 'species': 'TEXT', 'infraspecificepithet': 'TEXT',
     'taxonrank': 'TEXT', 'day': 'SMALLINT', 'month': 'SMALLINT',
     'year': 'SMALLINT', 'v_scientificname': 'TEXT', 'datasetkey': 'TEXT',
-    'publishingorgkey': 'TEXT', 'taxonkey': 'BIGINT',
+    'publishingorgkey': 'TEXT', 'taxonkey': 'TEXT',
     'issue': 'TEXT', 'occurrencestatus': 'TEXT',
     'type': 'TEXT', 'datasetid': 'TEXT', 'datasetname': 'TEXT',
     'organismquantity': 'TEXT', 'organismquantitytype': 'TEXT',
