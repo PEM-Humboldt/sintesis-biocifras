@@ -219,7 +219,7 @@ def _build_create_ddl(table_name, col_types):
     # - ddl: Sentencia CREATE TABLE para la tabla.
     cols = ', '.join(f'"{col}" {dtype}' for col, dtype in col_types.items())
     return f"""
-        CREATE UNLOGGED TABLE "{table_name}" ({cols})
+        CREATE TABLE "{table_name}" ({cols})
         WITH (autovacuum_enabled = false);
     """
 
