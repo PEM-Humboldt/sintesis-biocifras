@@ -2,6 +2,11 @@
 """
 Estadísticas de síntesis: vistas geo, catálogo de especies, tabla integrada vigente y cifras estimadas por temática.
 
+Fecha de corte:
+- FECHA_CORTE = MAX(created) de gbif_datasets (YYYY-MM-DD).
+- Conteos desde dwc_integrated solo incluyen registros cuyo dataset en
+  gbif_datasets.created sea <= FECHA_CORTE.
+- En departamento, municipio y region_tematica, fecha_corte = FECHA_CORTE.
 - MV especie: catálogo taxonómico desde taxonomic_species_validation (slug + rangos).
 - MV especie_meta: metadatos de especie (vernacular, URLs) desde taxonomic_species_meta por slug.
 - MV especie_grupo: relación especie ↔ grupo biológico/interés desde taxonomic_groups.
@@ -22,7 +27,6 @@ Cifras estimadas:
 
 import argparse
 import logging
-import os
 import sys
 from dataclasses import dataclass
 from typing import Literal
@@ -42,6 +46,32 @@ from utils.functions import (
 )
 
 logger = logging.getLogger('sintesis_biocifras')
+
+
+def _resolve_fecha_corte() -> str:
+    """MAX(created) de gbif_datasets (YYYY-MM-DD)."""
+    db = get_db()
+    try:
+        if not table_exists(db, 'gbif_datasets'):
+            raise ValueError('La tabla gbif_datasets no existe en la base de datos.')
+        with db.connect() as conn:
+            value = conn.execute(
+                'SELECT MAX(created)::date FROM gbif_datasets WHERE created IS NOT NULL'
+            ).fetchall()[0][0]
+        if value is None:
+            raise ValueError('gbif_datasets no tiene valores en created.')
+        return value.isoformat() if hasattr(value, 'isoformat') else str(value)
+    finally:
+        db.dispose()
+
+
+FECHA_CORTE = _resolve_fecha_corte()
+
+# Filtro de corte: solo datasets con created <= FECHA_CORTE.
+_INTEGRATED_CUTOFF_JOIN_SQL = f"""INNER JOIN gbif_datasets gd
+            ON gd.datasetkey = i.datasetkey
+           AND gd.created IS NOT NULL
+           AND gd.created <= DATE '{FECHA_CORTE}'"""
 
 ESTIMADAS_TOTAL_MV = 'estimadas_total'
 ESTIMATED_SPECIES_MV_LEGACY = 'estimated_species_totals'
@@ -215,6 +245,7 @@ _ESPECIE_REGION_MV_SQL = f"""
             gl.indigenousreserve,
             gl.dfybnucleus
         FROM "{DWC_INTEGRATED_TABLE}" i
+        {_INTEGRATED_CUTOFF_JOIN_SQL}
         INNER JOIN taxonomic_species_validation ts ON ts.id = i.taxonomic_species_id
         INNER JOIN geo_locality_validation gl ON gl.id = i.locality_id
         LEFT JOIN geo_master_geography gm ON gm.id = gl.geo_master_geography_id
@@ -268,6 +299,7 @@ _ESPECIE_TEMATICA_MV_SQL = f"""
             ts.endemic,
             ts.migratory
         FROM "{DWC_INTEGRATED_TABLE}" i
+        {_INTEGRATED_CUTOFF_JOIN_SQL}
         INNER JOIN taxonomic_species_validation ts ON ts.id = i.taxonomic_species_id
         INNER JOIN geo_locality_validation gl ON gl.id = i.locality_id
         LEFT JOIN geo_master_geography gm ON gm.id = gl.geo_master_geography_id
@@ -317,6 +349,7 @@ _CIFRAS_TOTALES_MV_SQL = f"""
             COALESCE(gl.stateprovinceslug, dept.slug) AS dept_slug,
             COALESCE(gl.countyslug, muni.slug) AS muni_slug
         FROM "{DWC_INTEGRATED_TABLE}" i
+        {_INTEGRATED_CUTOFF_JOIN_SQL}
         LEFT JOIN taxonomic_species_validation ts ON ts.id = i.taxonomic_species_id
         LEFT JOIN geo_locality_validation gl ON gl.id = i.locality_id
         LEFT JOIN geo_master_geography gm ON gm.id = gl.geo_master_geography_id
@@ -403,6 +436,7 @@ _GEOGRAFIA_RESUMEN_MV_SQL = f"""
             COALESCE(gl.stateprovinceslug, dept.slug) AS dept_slug,
             COALESCE(gl.countyslug, muni.slug) AS muni_slug
         FROM "{DWC_INTEGRATED_TABLE}" i
+        {_INTEGRATED_CUTOFF_JOIN_SQL}
         LEFT JOIN taxonomic_species_validation ts ON ts.id = i.taxonomic_species_id
         LEFT JOIN geo_locality_validation gl ON gl.id = i.locality_id
         LEFT JOIN geo_master_geography gm ON gm.id = gl.geo_master_geography_id
@@ -490,6 +524,7 @@ _PUBLICADOR_MV_SQL = f"""
                 REPLACE(BTRIM(i.publishingcountry), 'País publicador: ', '')
             ) AS pais_publicacion
         FROM "{DWC_INTEGRATED_TABLE}" i
+        {_INTEGRATED_CUTOFF_JOIN_SQL}
         WHERE i.publishingorgkey IS NOT NULL
           AND NULLIF(BTRIM(i.publishingorgkey::text), '') IS NOT NULL
         GROUP BY i.publishingorgkey
@@ -499,6 +534,7 @@ _PUBLICADOR_MV_SQL = f"""
             i.publishingorgkey,
             COUNT(DISTINCT ts.id)::int AS especies
         FROM "{DWC_INTEGRATED_TABLE}" i
+        {_INTEGRATED_CUTOFF_JOIN_SQL}
         INNER JOIN taxonomic_species_validation ts ON ts.id = i.taxonomic_species_id
         WHERE i.publishingorgkey IS NOT NULL
           AND NULLIF(BTRIM(i.publishingorgkey::text), '') IS NOT NULL
@@ -545,6 +581,7 @@ _REGION_PUBLICADOR_MV_SQL = f"""
             gl.indigenousreserve,
             gl.dfybnucleus
         FROM "{DWC_INTEGRATED_TABLE}" i
+        {_INTEGRATED_CUTOFF_JOIN_SQL}
         LEFT JOIN taxonomic_species_validation ts ON ts.id = i.taxonomic_species_id
         LEFT JOIN geo_locality_validation gl ON gl.id = i.locality_id
         LEFT JOIN geo_master_geography gm ON gm.id = gl.geo_master_geography_id
@@ -828,14 +865,14 @@ def create_departamento_materialized_view(db):
         raise ValueError('La tabla geo_master_geography no existe en la base de datos.')
     with db.connect() as conn:
         conn.execute('DROP MATERIALIZED VIEW IF EXISTS departamento')
-        conn.execute("""
+        conn.execute(f"""
             CREATE MATERIALIZED VIEW departamento AS
             SELECT
                 d.slug,
                 d."name" AS label,
                 d.codedane AS cod_dane,
                 d.ismarine AS marino,
-                d."date" AS fecha_corte
+                DATE '{FECHA_CORTE}' AS fecha_corte
             FROM geo_master_geography d
             WHERE d.subtype = 'departamento'
             ORDER BY slug
@@ -852,14 +889,14 @@ def create_municipio_materialized_view(db):
         raise ValueError('La tabla geo_master_geography no existe en la base de datos.')
     with db.connect() as conn:
         conn.execute('DROP MATERIALIZED VIEW IF EXISTS municipio')
-        conn.execute("""
+        conn.execute(f"""
             CREATE MATERIALIZED VIEW municipio AS
             SELECT
                 d.slug,
                 d."name" AS label,
                 d.codedane AS cod_dane,
                 d.ismarine AS marino,
-                d."date" AS fecha_corte
+                DATE '{FECHA_CORTE}' AS fecha_corte
             FROM geo_master_geography d
             WHERE d.subtype = 'municipio'
             ORDER BY slug
@@ -934,6 +971,7 @@ def create_especie_region_materialized_view(db):
     """Crea MV especie_region: conteos por slug_especie y slug_region."""
     required = (
         DWC_INTEGRATED_TABLE,
+        'gbif_datasets',
         'taxonomic_species_validation',
         'geo_locality_validation',
         'geo_master_geography',
@@ -967,6 +1005,7 @@ def create_especie_tematica_materialized_view(db):
     """Crea MV especie_tematica: relación DISTINCT slug_especie, slug_region, slug_tematica."""
     required = (
         DWC_INTEGRATED_TABLE,
+        'gbif_datasets',
         'taxonomic_species_validation',
         'geo_locality_validation',
         'geo_master_geography',
@@ -1004,6 +1043,7 @@ def create_cifras_totales_materialized_view(db):
     """Crea MV cifras_totales: conteos globales por nivel CDM (6 filas)."""
     required = (
         DWC_INTEGRATED_TABLE,
+        'gbif_datasets',
         'taxonomic_species_validation',
         'geo_locality_validation',
         'geo_master_geography',
@@ -1029,6 +1069,7 @@ def create_geografia_resumen_materialized_view(db):
     """Crea MV geografia_resumen: conteos por nivel CDM y slug_region."""
     required = (
         DWC_INTEGRATED_TABLE,
+        'gbif_datasets',
         'taxonomic_species_validation',
         'geo_locality_validation',
         'geo_master_geography',
@@ -1536,6 +1577,7 @@ _OCCURRENCIA_GEO_BASE_SQL = f"""
             gl.indigenousreserve,
             gl.dfybnucleus
         FROM "{DWC_INTEGRATED_TABLE}" i
+        {_INTEGRATED_CUTOFF_JOIN_SQL}
         LEFT JOIN taxonomic_species_validation ts ON ts.id = i.taxonomic_species_id
         LEFT JOIN geo_locality_validation gl ON gl.id = i.locality_id
         LEFT JOIN geo_master_geography gm ON gm.id = gl.geo_master_geography_id
@@ -1639,11 +1681,7 @@ _REGION_TEMATICA_MV_SQL = f"""
     )
     SELECT
         m.slug_region,
-        (
-            SELECT MAX("date")::date
-            FROM geo_master_geography
-            WHERE "date" IS NOT NULL
-        ) AS fecha_corte,
+        DATE '{FECHA_CORTE}' AS fecha_corte,
         e.estimada::bigint AS especies_region_estimadas,
         (CASE
             WHEN m.slug_region = 'colombia' THEN '86'
@@ -1811,6 +1849,7 @@ def create_staging_agg_taxon_region_materialized_view(db) -> int:
     """Crea MV staging_agg_taxon_region: agregados por taxonrank, taxon y slug_region."""
     required = (
         DWC_INTEGRATED_TABLE,
+        'gbif_datasets',
         'taxonomic_species_validation',
         'geo_locality_validation',
         'geo_master_geography',
@@ -1856,6 +1895,7 @@ def create_region_tematica_materialized_view(db) -> int:
     """Crea MV region_tematica: una fila por slug_region (nacional, depto, muni)."""
     required = (
         DWC_INTEGRATED_TABLE,
+        'gbif_datasets',
         'taxonomic_species_validation',
         'geo_locality_validation',
         'geo_master_geography',
@@ -1925,6 +1965,7 @@ def create_publicador_materialized_view(db):
     """Crea MV publicador: catálogo de publicadores con cifras nacionales."""
     required = (
         DWC_INTEGRATED_TABLE,
+        'gbif_datasets',
         'taxonomic_species_validation',
         'gbif_publishers',
         CIFRAS_PUBLICADOR_TABLE,
@@ -1954,6 +1995,7 @@ def create_region_publicador_materialized_view(db):
     """Crea MV region_publicador: cifras por slug_region y publicador (todos los niveles)."""
     required = (
         DWC_INTEGRATED_TABLE,
+        'gbif_datasets',
         'taxonomic_species_validation',
         'geo_locality_validation',
         'geo_master_geography',
@@ -2050,6 +2092,9 @@ def main():
             'No se pudo conectar a la base de datos. Verifique los valores de conexión en .env'
         )
         sys.exit(1)
+
+    logger.info('Fecha de corte: %s', FECHA_CORTE)
+    print(f'Fecha de corte: {FECHA_CORTE}')
 
     try:
         if not args.skip_geo_views:
