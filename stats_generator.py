@@ -27,6 +27,7 @@ Cifras estimadas:
 
 import argparse
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from typing import Literal
@@ -34,6 +35,7 @@ from typing import Literal
 from dotenv import load_dotenv
 
 from utils.connection import check_connection, get_db, table_exists
+from utils.logger import setup_logger
 
 # Cargar .env antes de importar utils.functions: sus constantes de tuning
 # (_WORK_MEM, _MAX_PARALLEL_WORKERS_MV) se evalúan al importar el módulo para no sobreescribir el valor por defecto.
@@ -794,18 +796,6 @@ _ESTIMADAS_TOTAL_MV_SQL = f"""
     LEFT JOIN joined j USING (slug_grupo)
     GROUP BY s.slug_grupo
 """
-
-def setup_console_logger():
-    if logger.handlers:
-        return logger
-    logger.setLevel(logging.INFO)
-    handler = logging.StreamHandler()
-    handler.setFormatter(
-        logging.Formatter('%(asctime)s | %(levelname)s | %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-    )
-    logger.addHandler(handler)
-    return logger
-
 
 def get_integrated_table(db):
     if not table_exists(db, DWC_INTEGRATED_TABLE):
@@ -2083,7 +2073,7 @@ def parse_args():
 
 
 def main():
-    setup_console_logger()
+    setup_logger(os.getenv('LOG_FILE_PATH'))
     args = parse_args()
     db = get_db()
 
@@ -2147,6 +2137,8 @@ def main():
 
         if not args.skip_estimated:
             create_estimated_species_materialized_view(db)
+
+        logger.info('Proceso completado.')
 
     except ValueError as e:
         logger.error('%s', e)
