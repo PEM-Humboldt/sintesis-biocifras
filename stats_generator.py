@@ -171,6 +171,7 @@ _THEMATIC_LATERAL_SQL = """
 _ESPECIE_MV_SQL = """
     SELECT
         slugspecies AS slug,
+        species,
         kingdom,
         phylum,
         "class",
