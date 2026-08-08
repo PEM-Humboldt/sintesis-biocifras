@@ -102,7 +102,7 @@ def extract_gbifZip(zipFile, nameInZip, destFile, checkHash=True):
 ### PARTE 2: descargar datos con la api classica de GBIF ###
 ################################################################################
 
-def occurrence_download_predicate(predicate=default_predicates, down_format='DWCA', backbone=os.getenv("TAXONOMIC_BACKBONE","COL_XR"),user=os.getenv("GBIF_USER"), pwd=os.getenv("GBIF_PWD"), email=os.getenv("GBIF_EMAIL")):
+def occurrence_download_predicate(predicate=default_predicates, down_format='DWCA', backbone=os.getenv("TAXONOMIC_BACKBONE","COL_XR"),user=os.getenv("GBIF_USER"), pwd=os.getenv("GBIF_PWD"), email=os.getenv("GBIF_email")):
   if(not backbone in ['GBIF_BACKBONE', 'COL_XR']):
     raise Exception(ValueError,backbone + ' is not in the accepted backbone specifications, it should be either of \'GBIF_BACKBONE\' or \'COL_XR\'')
   backbone_uuids = {'GBIF_BACKBONE': 'd7dddbf4-2cf0-4f39-9b2a-bb099caae36c', 'COL_XR': '7ddf754f-d193-4cc9-b351-99906754a03b'}
@@ -123,7 +123,7 @@ def occurrence_download_predicate(predicate=default_predicates, down_format='DWC
   )
   return r.text
   
-def download_gbif_predicates_files(predicates=default_predicates, backbone=os.getenv("TAXONOMIC_BACKBONE","COL_XR"), maximum_time_s = 60*60*24*7, maximum_diff_time_s=60*60*24, limit = 20,  simple_csv_file=os.getenv('SIMPLE_FILE'), verbatim_dwca_file=os.getenv('OCURRENCE_FILE'), user=os.getenv("GBIF_USER"), pwd=os.getenv("GBIF_PWD"), email=os.getenv("GBIF_EMAIL")):
+def download_gbif_predicates_files(predicates=default_predicates, backbone=os.getenv("TAXONOMIC_BACKBONE","COL_XR"), maximum_time_s = 60*60*24*7, maximum_diff_time_s=60*60*24, limit = 20,  simple_csv_file=os.getenv('SIMPLE_FILE'), verbatim_dwca_file=os.getenv('OCURRENCE_FILE'), user=os.getenv("GBIF_USER"), pwd=os.getenv("GBIF_PWD"), email=os.getenv("GBIF_email")):
   dwca_corres=corresponding_download_list(format_download= 'DWCA', predicates=predicates, maximum_time_s=maximum_time_s, limit=limit, user=user, pwd=pwd )
   simple_corres=corresponding_download_list(format_download='SIMPLE_CSV', predicates=predicates, maximum_time_s=maximum_time_s, limit=limit, user=user, pwd=pwd)
   preparedDownloadExists = dwca_corres.shape[0] > 0 and simple_corres.shape[0] > 0
