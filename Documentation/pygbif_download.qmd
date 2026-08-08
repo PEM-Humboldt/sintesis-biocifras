@@ -32,6 +32,7 @@ from pygbif import occurrences as occ
 from tabulate import tabulate
 import pandas as pd
 import json
+import requests
 load_dotenv()
 print(os.getenv("GBIF_USER"))
 #occ.download_sql("SELECT gbifid, ScientificName, countryCode FROM occurrence WHERE genus='Espeletia' LIMIT 10")

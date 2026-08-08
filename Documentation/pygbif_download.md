@@ -19,6 +19,7 @@ from pygbif import occurrences as occ
 from tabulate import tabulate
 import pandas as pd
 import json
+import requests
 load_dotenv()
 ```
 
@@ -29,6 +30,10 @@ print(os.getenv("GBIF_USER"))
 ```
 
     bottinmarius
+
+``` python
+#occ.download_sql("SELECT gbifid, ScientificName, countryCode FROM occurrence WHERE genus='Espeletia' LIMIT 10")
+```
 
 La lista de descarga permite descargar los metadatos de las descargas
 presentes en el perfil del usuario de GBIF
@@ -45,10 +50,10 @@ Index(\[‘key’, ‘doi’, ‘license’, ‘created’, ‘modified’, ‘e
 ‘status’, ‘downloadLink’, ‘size’, ‘totalRecords’, ‘numberDatasets’,
 ‘source’, ‘request.sql’, ‘request.creator’,
 ‘request.notificationAddresses’, ‘request.sendNotification’,
-‘request.format’, ‘request.type’, ‘request.predicate.type’,
-‘request.predicate.key’, ‘request.predicate.value’,
-‘request.predicate.matchCase’, ‘request.verbatimExtensions’,
-‘request.interpretedExtensions’\], dtype=‘str’)
+‘request.format’, ‘request.type’, ‘request.checklistKey’,
+‘request.predicate.type’, ‘request.predicate.predicates’,
+‘request.verbatimExtensions’, ‘request.interpretedExtensions’\],
+dtype=‘str’)
 
 ``` python
 df_downList2 = df_downList[['key', 'doi','created','status','request.sendNotification','downloadLink']]
@@ -57,33 +62,33 @@ print(tabulate(df_downList2, headers = 'keys', tablefmt = 'github'))
 
 |  | key | doi | created | status | request.sendNotification | downloadLink |
 |----|----|----|----|----|----|----|
-| 0 | 0021086-260409193756587 | 10.15468/dl.cvycbf | 2026-04-15T20:09:50.347+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0021086-260409193756587.zip |
-| 1 | 0014838-260409193756587 | 10.15468/dl.dgnk5q | 2026-04-14T13:17:44.430+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0014838-260409193756587.zip |
-| 2 | 0013205-260409193756587 | nan | 2026-04-14T02:28:48.246+00:00 | CANCELLED | True | https://api.gbif.org/v1/occurrence/download/request/0013205-260409193756587.zip |
-| 3 | 0011853-260409193756587 | 10.15468/dl.wjqax9 | 2026-04-13T16:55:33.892+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0011853-260409193756587.zip |
-| 4 | 0002968-260409193756587 | 10.15468/dl.d5u7xz | 2026-04-11T03:02:40.859+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0002968-260409193756587.zip |
-| 5 | 0002247-260409193756587 | 10.15468/dl.q749s6 | 2026-04-10T20:25:47.789+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0002247-260409193756587.zip |
-| 6 | 0001627-260409193756587 | 10.15468/dl.b8bq55 | 2026-04-10T15:45:40.874+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0001627-260409193756587.zip |
-| 7 | 0001625-260409193756587 | 10.15468/dl.b3vtxm | 2026-04-10T15:44:48.512+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0001625-260409193756587.zip |
-| 8 | 0001617-260409193756587 | 10.15468/dl.h2hk99 | 2026-04-10T15:40:48.745+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0001617-260409193756587.zip |
-| 9 | 0082621-260226173443078 | 10.15468/dl.pywwwt | 2026-04-03T21:01:03.966+00:00 | SUCCEEDED | False | https://api.gbif.org/v1/occurrence/download/request/0082621-260226173443078.zip |
-| 10 | 0082571-260226173443078 | 10.15468/dl.hf8r23 | 2026-04-03T20:46:34.621+00:00 | SUCCEEDED | False | https://api.gbif.org/v1/occurrence/download/request/0082571-260226173443078.zip |
-| 11 | 0065380-260226173443078 | 10.15468/dl.y8375s | 2026-03-27T21:06:00.411+00:00 | SUCCEEDED | False | https://api.gbif.org/v1/occurrence/download/request/0065380-260226173443078.zip |
-| 12 | 0065368-260226173443078 | nan | 2026-03-27T20:48:37.673+00:00 | CANCELLED | False | https://api.gbif.org/v1/occurrence/download/request/0065368-260226173443078.zip |
-| 13 | 0064920-260226173443078 | nan | 2026-03-27T15:08:16.378+00:00 | FAILED | False | https://api.gbif.org/v1/occurrence/download/request/0064920-260226173443078.zip |
-| 14 | 0064894-260226173443078 | 10.15468/dl.ytr8y9 | 2026-03-27T14:55:36.702+00:00 | SUCCEEDED | False | https://api.gbif.org/v1/occurrence/download/request/0064894-260226173443078.zip |
-| 15 | 0064859-260226173443078 | 10.15468/dl.2zptkn | 2026-03-27T14:41:33.806+00:00 | SUCCEEDED | False | https://api.gbif.org/v1/occurrence/download/request/0064859-260226173443078.zip |
-| 16 | 0064834-260226173443078 | 10.15468/dl.k8xwmr | 2026-03-27T14:28:53.677+00:00 | SUCCEEDED | False | https://api.gbif.org/v1/occurrence/download/request/0064834-260226173443078.zip |
-| 17 | 0027989-180131172636756 | 10.15468/dl.9ggjke | 2018-04-02T14:59:29.957+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0027989-180131172636756.zip |
-| 18 | 0027985-180131172636756 | 10.15468/dl.awmqai | 2018-04-02T14:27:14.581+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0027985-180131172636756.zip |
-| 19 | 0095338-160910150852091 | 10.15468/dl.reshq8 | 2017-05-30T19:48:22.381+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0095338-160910150852091.zip |
+| 0 | 0004286-260806074905277 | 10.15468/dl.qe2d2x | 2026-08-08T16:58:13.596+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0004286-260806074905277.zip |
+| 1 | 0004170-260806074905277 | 10.15468/dl.m9k9fp | 2026-08-08T14:25:32.885+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0004170-260806074905277.zip |
+| 2 | 0003420-260806074905277 | 10.15468/dl.xbnznz | 2026-08-08T03:17:38.940+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0003420-260806074905277.zip |
+| 3 | 0003414-260806074905277 | 10.15468/dl.rs67zs | 2026-08-08T03:15:52.111+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0003414-260806074905277.zip |
+| 4 | 0003361-260806074905277 | 10.15468/dl.y9vdqa | 2026-08-08T02:35:01.949+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0003361-260806074905277.zip |
+| 5 | 0003335-260806074905277 | nan | 2026-08-08T02:09:32.414+00:00 | CANCELLED | True | https://api.gbif.org/v1/occurrence/download/request/0003335-260806074905277.zip |
+| 6 | 0003324-260806074905277 | nan | 2026-08-08T01:56:38.418+00:00 | CANCELLED | False | https://api.gbif.org/v1/occurrence/download/request/0003324-260806074905277.zip |
+| 7 | 0003217-260806074905277 | 10.15468/dl.gep3k5 | 2026-08-08T00:02:05.794+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0003217-260806074905277.zip |
+| 8 | 0003094-260806074905277 | 10.15468/dl.r5nr4r | 2026-08-07T22:04:06.314+00:00 | SUCCEEDED | False | https://api.gbif.org/v1/occurrence/download/request/0003094-260806074905277.zip |
+| 9 | 0003091-260806074905277 | nan | 2026-08-07T22:02:57.548+00:00 | CANCELLED | False | https://api.gbif.org/v1/occurrence/download/request/0003091-260806074905277.zip |
+| 10 | 0003058-260806074905277 | nan | 2026-08-07T21:29:03.149+00:00 | CANCELLED | False | https://api.gbif.org/v1/occurrence/download/request/0003058-260806074905277.zip |
+| 11 | 0003035-260806074905277 | nan | 2026-08-07T21:15:39.317+00:00 | CANCELLED | False | https://api.gbif.org/v1/occurrence/download/request/0003035-260806074905277.zip |
+| 12 | 0001181-260806074905277 | 10.15468/dl.7qvhjm | 2026-08-06T20:55:46.084+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0001181-260806074905277.zip |
+| 13 | 0000136-260721160103020 | 10.15468/dl.qfyxpd | 2026-07-21T17:19:06.172+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0000136-260721160103020.zip |
+| 14 | 0028327-260519110011954 | 10.15468/dl.qanw77 | 2026-06-01T14:06:56.911+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0028327-260519110011954.zip |
+| 15 | 0012748-260507073636908 | 10.15468/dl.cmt5s9 | 2026-05-12T13:11:29.093+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0012748-260507073636908.zip |
+| 16 | 0012747-260507073636908 | nan | 2026-05-12T13:11:12.562+00:00 | CANCELLED | True | https://api.gbif.org/v1/occurrence/download/request/0012747-260507073636908.zip |
+| 17 | 0012707-260507073636908 | nan | 2026-05-12T12:58:35.976+00:00 | CANCELLED | True | https://api.gbif.org/v1/occurrence/download/request/0012707-260507073636908.zip |
+| 18 | 0011985-260507073636908 | 10.15468/dl.6a45kb | 2026-05-12T05:12:59.862+00:00 | SUCCEEDED | True | https://api.gbif.org/v1/occurrence/download/request/0011985-260507073636908.zip |
+| 19 | 0011984-260507073636908 | nan | 2026-05-12T05:12:21.631+00:00 | CANCELLED | True | https://api.gbif.org/v1/occurrence/download/request/0011984-260507073636908.zip |
 
 Podemos utilizar esta lista para probar si ya se descargo, a través de
 la API SQL una consulta SQL (Nota: imagino que cuando son consultas
 complejas, podríamos tener problemas con los cambios de linea):
 
 ``` python
-def is_in_my_download_list(sql_query, limit=20):
+def is_in_my_download_list(sql_query, limit=100):
   downList = occ.download_list(limit=limit)
   df_downList = pd.json_normalize(downList["results"])
   df_downList_SQLok = df_downList[df_downList["request.sql"] == sql_query]
@@ -101,7 +106,7 @@ Incluso podemos mirar cual es el “key” de descarga que corresponde a la
 consulta SQL:
 
 ``` python
-def get_query_key(sql_query, limit=20):
+def get_query_key(sql_query, limit=100):
   downList = occ.download_list(limit=limit)
   df_downList = pd.json_normalize(downList["results"])
   df_downList_SQLok = df_downList[df_downList["request.sql"] == sql_query]
@@ -496,7 +501,7 @@ require(sf)
 
     Loading required package: sf
 
-    Linking to GEOS 3.13.0, GDAL 3.12.1, PROJ 9.4.1; sf_use_s2() is TRUE
+    Linking to GEOS 3.13.0, GDAL 3.13.1, PROJ 9.4.1; sf_use_s2() is TRUE
 
 ``` r
 DSN <- "../../data_sintesis-biocifras/"
@@ -507,7 +512,7 @@ reg_mar<-st_read(dsn=DSN,layer = "RegionesMaritimas")
       `/home/marius/Travail/traitementDonnees/2026_scripts_filter_sintesis_cifras/data_sintesis-biocifras' 
       using driver `ESRI Shapefile'
     Simple feature collection with 5 features and 2 fields
-    Geometry type: POLYGON
+    Geometry type: MULTIPOLYGON
     Dimension:     XY
     Bounding box:  xmin: -85.9926 ymin: 1.429 xmax: -69.4917 ymax: 16.1694
     Geodetic CRS:  WGS 84
@@ -561,3 +566,142 @@ data.frame(dataset=names(A),registros=as.numeric(A))
 | 211                                             |         1 |
 | 885                                             |        23 |
 | calcofi.io_workflows_ichthyo_to_obis_2026-03-06 |        46 |
+
+## Utilizar y controlar el backbone
+
+Cuando empezamos este proyecto, el único backbone de taxonomía
+disponible en GBIF era el “GBIF-Backbone”. Poco a poco, GBIF está
+adoptando otro sistema taxonomico “COL-XR” (Catalog of Life Extended
+Release).
+
+Desafortunadamente, al momento de probar y comparar las funcionalidades
+del sistema para su entrega al instituto Humboldt, estamos en una
+situación complicada donde la nueva norma es utilizar COL-XR, pero el
+desarrollo de las funcionalidades desarrolladas en GBIF no está
+exactamente claro ni terminado…
+
+Lo que vamos a probar, y describir en esta sección cambiará
+probablemente en el año 2026.
+
+Al momento de escribir esas líneas, no existe la posibilidad de utilizar
+el paquete `pygbif` y sus funciones con un parametro simple para
+descargar datos que utilizan un backbone o otro. No quiere decir que no
+existan soluciones, simplemente que complican un poco la forma de
+interactuar con las APIs de descarga de los datos.
+
+### Controlar el backbone desde la api de GBIF “Clasica”
+
+Tomamos el ejemplo de la descarga de los registros en Colombia del
+genero *Acer*, permite obtener suficientes datos, pero no hacer un
+download masivo de datos.
+
+``` python
+USER=os.getenv("GBIF_USER")
+PASS=os.getenv("GBIF_PWD")
+EMAIL=os.getenv("GBIF_EMAIL")
+payload = {
+    "creator": USER,
+    "notificationAddresses": [EMAIL],
+    "format": "DWCA",
+ "predicate": {
+  "type": "and",
+  "predicates": [
+    {
+      "type": "equals",
+      "key": "OCCURRENCE_STATUS",
+      "value": "present",
+      "matchCase": False
+    },
+    {
+      "type": "equals",
+      "key": "COUNTRY",
+      "value": "CO",
+      "matchCase": False
+    },
+    {
+      "type": "in",
+      "key": "TAXON_KEY",
+      "values": ["64FK9","946Z","949X","94DL","94F5","94G9","94H3","94HF","94JK","MLD"],
+      "checklistKey": "7ddf754f-d193-4cc9-b351-99906754a03b"
+    }
+  ]
+},
+ "checklistKey": "7ddf754f-d193-4cc9-b351-99906754a03b"
+
+}    
+
+
+
+
+r = requests.post(
+    "https://api.gbif.org/v1/occurrence/download/request",
+    json=payload,
+    auth=(USER, PASS),
+)
+
+print(r.status_code, r.text)
+```
+
+    201 0004540-260806074905277
+
+### Controlar el backbone desde la API SQL
+
+Intentemos construir algo parecido con la API SQL:
+
+``` python
+backbone = os.getenv("TAXONOMIC_BACKBONE","COL_XR")
+backbone_uuids = {'GBIF_BACKBONE': 'd7dddbf4-2cf0-4f39-9b2a-bb099caae36c', 'COL_XR': '7ddf754f-d193-4cc9-b351-99906754a03b'}
+checklistKey = backbone_uuids.get(backbone)
+
+sql_query = f'''SELECT gbifid, 
+      occurrenceid,
+      basisofrecord,
+      collectioncode,
+      catalognumber,
+      recordedby,
+      individualcount,
+      eventdate,
+      countrycode,
+      stateprovince,
+      locality,
+      elevation,
+      depth,
+      decimallatitude,
+      decimallongitude,
+      coordinateuncertaintyinmeters,
+      classificationdetails[\'{checklistKey}\'][\'scientificname\'] scientificname,
+      classificationdetails[\'{checklistKey}\'][\'kingdom\'] AS kingdom,
+      classificationdetails[\'{checklistKey}\'][\'phylum\'] AS phylum,
+      classificationdetails[\'{checklistKey}\'][\'class\'] AS class,
+      classificationdetails[\'{checklistKey}\'][\'order\'] AS "order",
+      classificationdetails[\'{checklistKey}\'][\'family\'] AS family,
+      classificationdetails[\'{checklistKey}\'][\'genus\'] AS genus,
+      classificationdetails[\'{checklistKey}\'][\'species\'] AS species,
+      classificationdetails[\'{checklistKey}\'][\'infraspecificepithet\'] AS infraspecificepithet,
+      classificationdetails[\'{checklistKey}\'][\'taxonrank\'] AS taxonrank,
+      "day",
+      "month",
+      "year",
+      classificationdetails[\'{checklistKey}\'][\'verbatimscientificname\'] AS v_scientificname,
+      datasetkey,
+      publishingorgkey,
+      classificationdetails[\'{checklistKey}\'][\'taxonkey\'] AS taxonkey,
+      issue,
+      occurrencestatus,
+      lastinterpreted,
+      type,
+      datasetid,
+      datasetname,
+      organismquantity,
+      organismquantitytype,
+      eventid,
+      samplingprotocol,
+      county,
+      municipality,
+      repatriated,
+      publishingcountry,
+      lastparsed FROM occurrence WHERE occurrence.countrycode = 'CO' AND occurrence.occurrencestatus = 'PRESENT' AND  classificationdetails[\'{checklistKey}\'][\'genus\'] = \'Acer\''''
+occ.download_sql(sql_query)
+```
+
+    '0004541-260806074905277'
