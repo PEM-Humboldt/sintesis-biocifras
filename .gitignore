@@ -175,6 +175,7 @@ cython_debug/
 .vscode/
 .cursor/
 .cursorrules/
+**/**.rmarkdown
 
 # R
 .Rproj.user
@@ -186,3 +187,10 @@ cython_debug/
 
 #folder
 output/
+
+
+
+#zip and pdf output files
+**/**.zip
+**/**.pdf
+
