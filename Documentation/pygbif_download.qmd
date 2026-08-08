@@ -34,6 +34,7 @@ import pandas as pd
 import json
 load_dotenv()
 print(os.getenv("GBIF_USER"))
+#occ.download_sql("SELECT gbifid, ScientificName, countryCode FROM occurrence WHERE genus='Espeletia' LIMIT 10")
 ```
 
 La lista de descarga permite descargar los metadatos de las descargas presentes en el perfil del usuario de GBIF
@@ -54,7 +55,7 @@ Podemos utilizar esta lista para probar si ya se descargo, a través de la API S
 
 
 ```{python}
-def is_in_my_download_list(sql_query, limit=20):
+def is_in_my_download_list(sql_query, limit=100):
   downList = occ.download_list(limit=limit)
   df_downList = pd.json_normalize(downList["results"])
   df_downList_SQLok = df_downList[df_downList["request.sql"] == sql_query]
@@ -69,7 +70,7 @@ is_in_my_download_list(query)
 Incluso podemos mirar cual es el "key" de descarga que corresponde a la consulta SQL:
 
 ```{python}
-def get_query_key(sql_query, limit=20):
+def get_query_key(sql_query, limit=100):
   downList = occ.download_list(limit=limit)
   df_downList = pd.json_normalize(downList["results"])
   df_downList_SQLok = df_downList[df_downList["request.sql"] == sql_query]
@@ -339,4 +340,131 @@ A <- table(dq2_s$datasetid[is.na(dq2_s$countrycode)|dq2_s$countrycode==""])
 data.frame(dataset=names(A),registros=as.numeric(A))
 ```
 
+## Utilizar y controlar el backbone
+
+Cuando empezamos este proyecto, el único backbone de taxonomía disponible en GBIF era el "GBIF-Backbone".
+Poco a poco, GBIF está adoptando otro sistema taxonomico "COL-XR" (Catalog of Life Extended Release).
+
+Desafortunadamente, al momento de probar y comparar las funcionalidades del sistema para su entrega al instituto Humboldt, estamos en una situación complicada donde la nueva norma es utilizar COL-XR, pero el desarrollo de las funcionalidades desarrolladas en GBIF no está exactamente claro ni terminado...
+
+Lo que vamos a probar, y describir en esta sección cambiará probablemente en el año 2026.
+
+Al momento de escribir esas líneas, no existe la posibilidad de utilizar el paquete `pygbif` y sus funciones con un parametro simple para descargar datos que utilizan un backbone o otro. No quiere decir que no existan soluciones, simplemente que complican un poco la forma de interactuar con las APIs de descarga de los datos.
+
+
+### Controlar el backbone desde la api de GBIF "Clasica"
+
+Tomamos el ejemplo de la descarga de los registros en Colombia del genero *Acer*, permite obtener suficientes datos, pero no hacer un download masivo de datos.
+
+
+
+
+```{python}
+USER=os.getenv("GBIF_USER")
+PASS=os.getenv("GBIF_PWD")
+EMAIL=os.getenv("GBIF_EMAIL")
+payload = {
+    "creator": USER,
+    "notificationAddresses": [EMAIL],
+    "format": "DWCA",
+ "predicate": {
+  "type": "and",
+  "predicates": [
+    {
+      "type": "equals",
+      "key": "OCCURRENCE_STATUS",
+      "value": "present",
+      "matchCase": False
+    },
+    {
+      "type": "equals",
+      "key": "COUNTRY",
+      "value": "CO",
+      "matchCase": False
+    },
+    {
+      "type": "in",
+      "key": "TAXON_KEY",
+      "values": ["64FK9","946Z","949X","94DL","94F5","94G9","94H3","94HF","94JK","MLD"],
+      "checklistKey": "7ddf754f-d193-4cc9-b351-99906754a03b"
+    }
+  ]
+},
+ "checklistKey": "7ddf754f-d193-4cc9-b351-99906754a03b"
+
+}    
+
+
+
+
+r = requests.post(
+    "https://api.gbif.org/v1/occurrence/download/request",
+    json=payload,
+    auth=(USER, PASS),
+)
+
+print(r.status_code, r.text)
+```
+
+
+### Controlar el backbone desde la API SQL
+
+Intentemos construir algo parecido con la API SQL:
+
+
+```{python}
+backbone = os.getenv("TAXONOMIC_BACKBONE","COL_XR")
+backbone_uuids = {'GBIF_BACKBONE': 'd7dddbf4-2cf0-4f39-9b2a-bb099caae36c', 'COL_XR': '7ddf754f-d193-4cc9-b351-99906754a03b'}
+checklistKey = backbone_uuids.get(backbone)
+
+sql_query = f'''SELECT gbifid, 
+      occurrenceid,
+      basisofrecord,
+      collectioncode,
+      catalognumber,
+      recordedby,
+      individualcount,
+      eventdate,
+      countrycode,
+      stateprovince,
+      locality,
+      elevation,
+      depth,
+      decimallatitude,
+      decimallongitude,
+      coordinateuncertaintyinmeters,
+      classificationdetails[\'{checklistKey}\'][\'scientificname\'] scientificname,
+      classificationdetails[\'{checklistKey}\'][\'kingdom\'] AS kingdom,
+      classificationdetails[\'{checklistKey}\'][\'phylum\'] AS phylum,
+      classificationdetails[\'{checklistKey}\'][\'class\'] AS class,
+      classificationdetails[\'{checklistKey}\'][\'order\'] AS "order",
+      classificationdetails[\'{checklistKey}\'][\'family\'] AS family,
+      classificationdetails[\'{checklistKey}\'][\'genus\'] AS genus,
+      classificationdetails[\'{checklistKey}\'][\'species\'] AS species,
+      classificationdetails[\'{checklistKey}\'][\'infraspecificepithet\'] AS infraspecificepithet,
+      classificationdetails[\'{checklistKey}\'][\'taxonrank\'] AS taxonrank,
+      "day",
+      "month",
+      "year",
+      classificationdetails[\'{checklistKey}\'][\'verbatimscientificname\'] AS v_scientificname,
+      datasetkey,
+      publishingorgkey,
+      classificationdetails[\'{checklistKey}\'][\'taxonkey\'] AS taxonkey,
+      issue,
+      occurrencestatus,
+      lastinterpreted,
+      type,
+      datasetid,
+      datasetname,
+      organismquantity,
+      organismquantitytype,
+      eventid,
+      samplingprotocol,
+      county,
+      municipality,
+      repatriated,
+      publishingcountry,
+      lastparsed FROM occurrence WHERE occurrence.countrycode = 'CO' AND occurrence.occurrencestatus = 'PRESENT' AND  classificationdetails[\'{checklistKey}\'][\'genus\'] = \'Acer\''''
+occ.download_sql(sql_query)
+```
 

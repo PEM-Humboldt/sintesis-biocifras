@@ -3,6 +3,7 @@
 import os
 import json
 from pygbif import occurrences as occ
+import requests
 import pandas as pd
 import time
 from datetime import datetime, timezone
@@ -16,8 +17,12 @@ dotenv.load_dotenv()
 ################################################################################
 
 default_predicates={'type':'and', 'predicates':[{'type': 'equals', 'key': 'COUNTRY', 'value': 'CO','matchCase': False}, {'type': 'equals', 'key': 'OCCURRENCE_STATUS', 'value': 'present', 'matchCase':False}]}
+backbone = os.getenv("TAXONOMIC_BACKBONE","COL_XR")
+backbone_uuids = {'GBIF_BACKBONE': 'd7dddbf4-2cf0-4f39-9b2a-bb099caae36c', 'COL_XR': '7ddf754f-d193-4cc9-b351-99906754a03b'}
+checklistKey = backbone_uuids.get(backbone)
 
-default_sql_query='SELECT gbifid, occurrenceid, basisofrecord, collectioncode, catalognumber, recordedby, individualcount, eventdate, countrycode, stateprovince, locality, elevation, depth, decimallatitude, decimallongitude, coordinateuncertaintyinmeters, scientificname, kingdom, phylum, class, "order", family, genus, species, infraspecificepithet, taxonrank, "day", "month", "year", v_scientificname, datasetkey, publishingorgkey, taxonkey, issue, occurrencestatus, lastinterpreted, type, datasetid, datasetname, organismquantity, organismquantitytype, eventid, samplingprotocol, county, municipality, repatriated, publishingcountry, lastparsed' + ' FROM occurrence' + " WHERE occurrence.countrycode = 'CO' AND occurrence.occurrencestatus = 'PRESENT'"
+default_sql_query=f'''SELECT gbifid, occurrenceid, basisofrecord, collectioncode, catalognumber, recordedby, individualcount, eventdate, countrycode, stateprovince, locality,
+elevation, depth, decimallatitude, decimallongitude, coordinateuncertaintyinmeters, classificationdetails[\'{checklistKey}\'][\'scientificname\'] scientificname, classificationdetails[\'{checklistKey}\'][\'kingdom\'] AS kingdom, classificationdetails[\'{checklistKey}\'][\'phylum\'] AS phylum, classificationdetails[\'{checklistKey}\'][\'class\'] AS class, classificationdetails[\'{checklistKey}\'][\'order\'] AS "order", classificationdetails[\'{checklistKey}\'][\'family\'] AS family, classificationdetails[\'{checklistKey}\'][\'genus\'] AS genus, classificationdetails[\'{checklistKey}\'][\'species\'] AS species, classificationdetails[\'{checklistKey}\'][\'infraspecificepithet\'] AS infraspecificepithet, classificationdetails[\'{checklistKey}\'][\'taxonrank\'] AS taxonrank, "day", "month", "year", classificationdetails[\'{checklistKey}\'][\'verbatimscientificname\'] AS v_scientificname, datasetkey, publishingorgkey, classificationdetails[\'{checklistKey}\'][\'taxonkey\'] AS taxonkey, issue, occurrencestatus, lastinterpreted, type, datasetid,  datasetname, organismquantity, organismquantitytype, eventid, samplingprotocol, county, municipality, repatriated, publishingcountry, lastparsed FROM occurrence WHERE occurrence.countrycode = 'CO' AND occurrence.occurrencestatus = 'PRESENT' '''
 
 def corresponding_download_list(format_download, predicates = default_predicates, sql_query=default_sql_query, maximum_time_s = 60*60*24*7, limit = 20, user=os.getenv("GBIF_USER"), pwd=os.getenv("GBIF_PWD")):
   accepted_formats=['DWCA','SIMPLE_CSV','SQL_TSV_ZIP']
@@ -97,7 +102,28 @@ def extract_gbifZip(zipFile, nameInZip, destFile, checkHash=True):
 ### PARTE 2: descargar datos con la api classica de GBIF ###
 ################################################################################
 
-def download_gbif_predicates_files(predicates=default_predicates, maximum_time_s = 60*60*24*7, maximum_diff_time_s=60*60*24, limit = 20,  simple_csv_file=os.getenv('SIMPLE_FILE'), verbatim_dwca_file=os.getenv('OCURRENCE_FILE'), user=os.getenv("GBIF_USER"), pwd=os.getenv("GBIF_PWD")):
+def occurrence_download_predicate(predicate=default_predicates, down_format='DWCA', backbone=os.getenv("TAXONOMIC_BACKBONE","COL_XR"),user=os.getenv("GBIF_USER"), pwd=os.getenv("GBIF_PWD"), email=os.getenv("GBIF_EMAIL")):
+  if(not backbone in ['GBIF_BACKBONE', 'COL_XR']):
+    raise Exception(ValueError,backbone + ' is not in the accepted backbone specifications, it should be either of \'GBIF_BACKBONE\' or \'COL_XR\'')
+  backbone_uuids = {'GBIF_BACKBONE': 'd7dddbf4-2cf0-4f39-9b2a-bb099caae36c', 'COL_XR': '7ddf754f-d193-4cc9-b351-99906754a03b'}
+  checklistKey = backbone_uuids.get(backbone)
+  if(not down_format in ['DWCA', 'SIMPLE_CSV']):
+    raise Exception(ValueError, down_format + 'is not in the accepted format specifications, it should be either \'DWCA\' or \'SIMPLE_CSV\'')
+  payload = {
+    "creator": user,
+    "notificationAddresses": [email],
+    "format": down_format,
+    "predicate" : predicate,
+    "checklistKey": checklistKey
+  }
+  r=requests.post(
+    "https://api.gbif.org/v1/occurrence/download/request",
+    json=payload,
+    auth=(user, pwd),
+  )
+  return r.text
+  
+def download_gbif_predicates_files(predicates=default_predicates, backbone=os.getenv("TAXONOMIC_BACKBONE","COL_XR"), maximum_time_s = 60*60*24*7, maximum_diff_time_s=60*60*24, limit = 20,  simple_csv_file=os.getenv('SIMPLE_FILE'), verbatim_dwca_file=os.getenv('OCURRENCE_FILE'), user=os.getenv("GBIF_USER"), pwd=os.getenv("GBIF_PWD"), email=os.getenv("GBIF_EMAIL")):
   dwca_corres=corresponding_download_list(format_download= 'DWCA', predicates=predicates, maximum_time_s=maximum_time_s, limit=limit, user=user, pwd=pwd )
   simple_corres=corresponding_download_list(format_download='SIMPLE_CSV', predicates=predicates, maximum_time_s=maximum_time_s, limit=limit, user=user, pwd=pwd)
   preparedDownloadExists = dwca_corres.shape[0] > 0 and simple_corres.shape[0] > 0
@@ -113,8 +139,10 @@ def download_gbif_predicates_files(predicates=default_predicates, maximum_time_s
     needNew=True
   if needNew:
     print('New downloads need to be prepared')
-    dwca_key = occ.download(predicates,'DWCA',user=user,pwd=pwd)[0]
-    simple_key = occ.download(predicates, 'SIMPLE_CSV',user=user,pwd=pwd)[0]
+    dwca_key=occurrence_download_predicate(predicate=predicates, down_format='DWCA', backbone=backbone, user=user, pwd=pwd, email=email)
+    simple_key=occurrence_download_predicate(predicate=predicates, down_format='SIMPLE_CSV', backbone=backbone, user=user, pwd=pwd, email=email)
+    #dwca_key = occ.download(predicates,'DWCA',user=user,pwd=pwd)[0]
+    #simple_key = occ.download(predicates, 'SIMPLE_CSV',user=user,pwd=pwd)[0]
   else:
     print('Downloads are already prepared in user\'s GBIF API')
     dwca_key = dwca_corres['key'].values[0]
