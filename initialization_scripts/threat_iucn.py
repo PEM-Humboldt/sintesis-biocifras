@@ -36,6 +36,7 @@ with db.connect() as conn:
 CREATE TABLE public.taxonomic_threat_iucn (
     id serial PRIMARY KEY,
     originaltaxonid text,
+    threatstatus text,
     scientificname text,
     species text NOT NULL,
     scientificnameauthorship text,
@@ -46,8 +47,7 @@ CREATE TABLE public.taxonomic_threat_iucn (
     "order" text,
     family text,
     genus text,
-    specificepithet text,
-    threatstatus text
+    specificepithet text
   );
   ''')
   conn.commit()

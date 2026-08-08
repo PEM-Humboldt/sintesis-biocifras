@@ -56,6 +56,10 @@ with db.connect() as conn:
     genus text,
     subgenus text,
     specificepithet text,
+    infraspecificepithet text,
+    infragenericepithet text,
+    cultivarepithet text,
+    genericname text,
     taxonid text,
     datasetid text
     );

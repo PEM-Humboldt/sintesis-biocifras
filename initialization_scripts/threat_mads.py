@@ -35,10 +35,11 @@ with db.connect() as conn:
   conn.execute('''CREATE TABLE public.taxonomic_threat_mads (
     id serial PRIMARY KEY,
     originaltaxonid text,
-    taxonremarks text,
+    threatstatus text,
     scientificname text,
     species text NOT NULL,
     scientificnameauthorship text,
+    taxonomicstatus text,
     kingdom text,
     phylum text,
     class text,
@@ -47,7 +48,8 @@ with db.connect() as conn:
     genus text,
     specificepithet text,
     taxonrank text,
-    threatstatus text
+    vernacularname text,
+    taxonremarks text
   );
   ''')
   conn.commit()
