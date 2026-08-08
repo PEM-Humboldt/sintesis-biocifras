@@ -38,16 +38,16 @@ CREATE TABLE public.taxonomic_cites (
     originaltaxonid text,
     scientificname text,
     species text NOT NULL,
+    cites text,
     scientificnameauthorship text,
+    taxonrank text,
     kingdom text,
     phylum text,
     class text,
     "order" text,
     family text,
     genus text,
-    specificepithet text,
-    taxonrank text,
-    cites text
+    specificepithet text
   );
   ''')
   conn.commit()
