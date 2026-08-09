@@ -84,7 +84,8 @@ def crc32(fileName):
         return format(hash & 0xFFFFFFFF, '08x')
 
 def extract_gbifZip(zipFile, nameInZip, destFile, checkHash=True):
-  if checkHash and os.path.exist(destFile):
+  print("destFile:" + destFile)
+  if checkHash and os.path.exists(destFile):
     if crc32_file_in_zip(zipFile,nameInZip) == crc32(destFile):
       print("The current file has a corresponding hash to the one in the zip archive, skipping extraction")
       return destFile
