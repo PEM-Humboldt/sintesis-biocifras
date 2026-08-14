@@ -1678,7 +1678,7 @@ def populate_geo_slugs(db):
 # UPDATE "taxonomic_species_validation" v SET "referencelist" = t."datasetid" FROM "taxonomic_col_list" t WHERE v."species" = t."species"
 # UPDATE ... SET ismarine/isbrackish/isfreshwater/isterrestrial desde taxonomic_worms.environmentaphiaworms (ILIKE)
 _FLAGTAXO_CLASSES = ('Aves', 'Mammalia', 'Reptilia', 'Squamata', 'Crocodylia', 'Testudines')
-_FLAGTAXO_ORDERS = ('Lepidoptera','Odonota')
+_FLAGTAXO_ORDERS = ('Lepidoptera','Odonata')
 
 _TAXONOMIC_JOINS = {
     'taxonomic_cites': {
