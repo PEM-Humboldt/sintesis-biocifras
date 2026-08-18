@@ -3,12 +3,14 @@
 """
 Exporta las vistas materializadas de producto del portal a archivos TSV.
 
-Cada MV se vuelca con COPY (streaming, sin cargar todo en memoria) a <EXPORT_DIR>/<nombre_mv>.tsv
+Cada MV se lee con pandas/SqlAlchemy y se exporta a <EXPORT_DIR>/<nombre_mv>.tsv.
+Los booleanos se escriben como TRUE/FALSE manteniendo el tipo de dato con script originales.
 """
 
 import os
 import sys
 
+import pandas as pd
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -46,15 +48,16 @@ def matview_exists(conn, name):
     return bool(rows)
 
 
-def export_matview(raw_conn, name, out_dir):
-    # Vuelca una MV a TSV con COPY. Formato csv + delimitador
+def export_matview(conn, name, out_dir):
+    # Lee la MV con cursor psycopg2 y la exporta a TSV.
     path = os.path.join(out_dir, f'{name}.tsv')
-    copy_sql = (
-        f'COPY (SELECT * FROM "{name}") TO STDOUT '
-        "WITH (FORMAT csv, DELIMITER E'\\t', HEADER true)"
-    )
-    with raw_conn.cursor() as cur, open(path, 'w', encoding='utf-8', newline='') as f:
-        cur.copy_expert(copy_sql, f)
+    with conn.cursor() as cur:
+        cur.execute(f'SELECT * FROM "{name}"')
+        df = pd.DataFrame(cur.fetchall(), columns=[d[0] for d in cur.description])
+    df = df.convert_dtypes()
+    for col in df.select_dtypes(include=['bool', 'boolean']).columns:
+        df[col] = df[col].map({True: 'TRUE', False: 'FALSE'})
+    df.to_csv(path, sep='\t', index=False, encoding='utf-8')
     return path
 
 
@@ -69,20 +72,16 @@ def main():
     if not check_connection(db):
         sys.exit(1)
 
-    # Valida que todas las MVs existan antes de exportar.
-    with db.connect() as conn:
-        missing = [name for name in _EXPORT_MVS if not matview_exists(conn, name)]
-    if missing:
-        logger.error('MVs faltantes: %s', ', '.join(missing))
-        sys.exit(1)
-
-    raw_conn = db.raw_connection()
     try:
-        for name in _EXPORT_MVS:
-            path = export_matview(raw_conn, name, out_dir)
-            logger.info('Exportado %s', path)
+        with db.connect() as conn:
+            missing = [name for name in _EXPORT_MVS if not matview_exists(conn, name)]
+            if missing:
+                logger.error('MVs faltantes: %s', ', '.join(missing))
+                sys.exit(1)
+            for name in _EXPORT_MVS:
+                path = export_matview(conn, name, out_dir)
+                logger.info('Exportado %s', path)
     finally:
-        raw_conn.close()
         db.dispose()
 
 
