@@ -19,10 +19,8 @@ Fecha de corte:
 - MV region_grupo: cifras anchas por slug_grupo y slug_region (nacional, depto, muni, amazonía, reservas, resguardos, núcleos DFYB).
 - MV publicador: catálogo de publicadores con registros (integrada total) y especies (validadas).
 - MV region_publicador: cifras por slug_region y publicador (nacional, depto, muni, amazonía, reservas, resguardos, núcleos DFYB).
-
-Cifras estimadas:
 - MV taxonomic_estimated_source: unión de taxonomic_col_list, taxonomic_cites, taxonomic_threat_mads, taxonomic_threat_iucn, taxonomic_invasive_exotic y taxonomic_migratory por species y JOIN temático por taxonomía para tener una única vista con todas las taxonomías y temáticas.
-- MV estimadas_total: doble LATERAL (rangos × temáticas) + JOIN taxonomic_groups + pivot FILTER para obtener las cifras estimadas por temática y rango taxonómico.
+- MV estimadas: Calculos con FILTER por temática y especies.
 """
 
 import argparse
@@ -75,8 +73,7 @@ _INTEGRATED_CUTOFF_JOIN_SQL = f"""INNER JOIN gbif_datasets gd
            AND gd.created IS NOT NULL
            AND gd.created <= DATE '{FECHA_CORTE}'"""
 
-ESTIMADAS_TOTAL_MV = 'estimadas_total'
-ESTIMATED_SPECIES_MV_LEGACY = 'estimated_species_totals'
+ESTIMADAS_MV = 'estimadas'
 TAXONOMIC_ESTIMATED_SOURCE_MV = 'taxonomic_estimated_source'
 ESPECIE_MV = 'especie'
 ESPECIE_META_MV = 'especie_meta'
@@ -90,7 +87,6 @@ REGION_PUBLICADOR_MV = 'region_publicador'
 REGION_TEMATICA_MV = 'region_tematica'
 REGION_GRUPO_MV = 'region_grupo'
 STAGING_AGG_TAXON_REGION_MV = 'staging_agg_taxon_region'
-STAGING_OCURRENCIA_GEO_MV = 'staging_ocurrencia_geo'  # legacy, se elimina al crear staging_agg
 CIFRAS_ESTIMADAS_DEPT_TABLE = 'tmp_cifras_estimated_dept'
 CIFRAS_PUBLICADOR_TABLE = 'tmp_cifras_publicador'
 
@@ -697,104 +693,124 @@ _ESTIMATED_SOURCE_MV_SQL = """
         SELECT DISTINCT ON (species) * FROM taxonomic_migratory ORDER BY species, id
     ) mig ON mig.species = s.species
 """
-# SQL para crear la vista estimadas_total con las cifras estimadas por temática y rango taxonómico.
-_ESTIMADAS_TOTAL_MV_SQL = f"""
-    WITH counts_by_taxon_rank_and_theme AS (
-        SELECT
-            th.theme,
-            r.taxon_rank,
-            r.grupo_tax,
-            th.thematic,
-            COUNT(*)::int AS taxones
+# SQL para crear la vista estimadas: unpivot de rangos + JOIN grupos + COUNT FILTER.
+_ESTIMADAS_MV_SQL = f"""
+    WITH matched AS (
+        SELECT DISTINCT ON (g.slug, t.species)
+            g.slug AS slug_grupo,
+            t.species,
+            t.cites,
+            t.threatstatus_mads,
+            t.threatstatus_iucn,
+            t.exotic,
+            t.exoticriskinvasion,
+            t.invasive,
+            t.transplanted,
+            t.endemic,
+            t.migratory
         FROM "{TAXONOMIC_ESTIMATED_SOURCE_MV}" t
         CROSS JOIN LATERAL (VALUES
             ('kingdom', t.kingdom), ('phylum', t.phylum), ('class', t."class"),
             ('order', t."order"), ('family', t.family), ('genus', t.genus),
             ('species', t.species)
         ) AS r(taxon_rank, grupo_tax)
-        CROSS JOIN LATERAL (VALUES
-            ('cites', t.cites),
-            ('mads', t.threatstatus_mads),
-            ('iucn', t.threatstatus_iucn),
-            ('potencial', t.exoticriskinvasion),
-            ('exoticas', t.exotic),
-            ('invasoras', t.invasive),
-            ('trasplantadas', t.transplanted),
-            ('endemicas', t.endemic),
-            ('migratorias', t.migratory)
-        ) AS th(theme, thematic)
-        WHERE r.grupo_tax IS NOT NULL
-          AND NULLIF(BTRIM(th.thematic::text), '') IS NOT NULL
-          AND (th.theme <> 'iucn' OR th.thematic IN ('VU', 'EN', 'CR'))
-        GROUP BY th.theme, r.taxon_rank, r.grupo_tax, th.thematic
-    ),
-    joined AS (
-        SELECT g.slug AS slug_grupo, l.theme, l.thematic, SUM(l.taxones) AS taxones
-        FROM counts_by_taxon_rank_and_theme l
         JOIN taxonomic_groups g
-          ON g.taxon = l.grupo_tax
-         AND g.taxonrank = l.taxon_rank
-         AND g.grouptype IS NOT NULL AND BTRIM(g.grouptype) <> '-'
-        GROUP BY 1, 2, 3
+          ON g.taxon = r.grupo_tax
+         AND g.taxonrank = r.taxon_rank
+         AND g.grouptype IS NOT NULL
+         AND BTRIM(g.grouptype) <> '-'
+        WHERE r.grupo_tax IS NOT NULL
+        ORDER BY g.slug, t.species
     )
     SELECT
         s.slug_grupo,
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'cites' AND j.thematic = 'I'))::text
-            AS "especies_cites_i_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'cites' AND j.thematic = 'II'))::text
-            AS "especies_cites_ii_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'cites' AND j.thematic = 'I/II'))::text
-            AS "especies_cites_i_ii_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'cites' AND j.thematic = 'III'))::text
-            AS "especies_cites_iii_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'cites'))::text
-            AS "especies_cites_total_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'mads' AND j.thematic = 'CR'))::text
-            AS "especies_amenazadas_nacional_CR_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'mads' AND j.thematic = 'EN'))::text
-            AS "especies_amenazadas_nacional_EN_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'mads' AND j.thematic = 'VU'))::text
-            AS "especies_amenazadas_nacional_VU_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'mads'))::text
-            AS "especies_amenazadas_nacional_total_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'iucn' AND j.thematic = 'CR'))::text
-            AS "especies_amenazadas_global_CR_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'iucn' AND j.thematic = 'EN'))::text
-            AS "especies_amenazadas_global_EN_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'iucn' AND j.thematic = 'VU'))::text
-            AS "especies_amenazadas_global_VU_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'iucn'))::text
-            AS "especies_amenazadas_global_total_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'potencial'
-            AND j.thematic = 'Exótica con potencial de invasión Alto Riesgo'))::text
-            AS "especies_potencial_invasion_alto_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'potencial'
-            AND j.thematic = 'Exótica con potencial de invasión Bajo Riesgo'))::text
-            AS "especies_potencial_invasion_bajo_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'potencial'
-            AND j.thematic = 'Exótica con potencial de invasión Riesgo Moderado'))::text
-            AS "especies_potencial_invasion_moderado_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'potencial'
-            AND j.thematic = 'Exótica con potencial de invasión Riesgo Moderado/ Alto'))::text
-            AS "especies_potencial_invasion_moderado_alto_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'potencial'))::text
-            AS "especies_potencial_invasion_total_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'exoticas'))::text
-            AS "especies_exoticas_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'invasoras'))::text
-            AS "especies_invasoras_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'trasplantadas'))::text
-            AS "especies_trasplantadas_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'endemicas'))::text
-            AS "especies_endemicas_estimadas",
-        (SUM(j.taxones) FILTER (WHERE j.theme = 'migratorias'))::text
-            AS "especies_migratorias_estimadas"
+        NULL AS comentarios,
+        NULL AS especies_estimadas,
+        NULL AS especies_estimadas_ref_id,
+        NULLIF(COUNT(m.species) FILTER (
+            WHERE NULLIF(BTRIM(m.endemic), '') IS NOT NULL
+        ), 0)::int AS especies_endemicas_estimadas,
+        NULL AS especies_endemicas_estimadas_ref_id,
+        NULLIF(COUNT(m.species) FILTER (
+            WHERE NULLIF(BTRIM(m.migratory), '') IS NOT NULL
+        ), 0)::int AS especies_migratorias_estimadas,
+        NULL AS especies_migratorias_ref_id,
+        NULLIF(COUNT(m.species) FILTER (
+            WHERE NULLIF(BTRIM(m.threatstatus_mads), '') IS NOT NULL
+        ), 0)::int AS especies_amenazadas_nacional_total_estimadas,
+        NULL AS especies_amenazadas_nacional_estimadas_ref_id,
+        NULLIF(COUNT(m.species) FILTER (WHERE m.threatstatus_mads = 'VU'), 0)::int
+            AS especies_amenazadas_nacional_vu_estimadas,
+        NULLIF(COUNT(m.species) FILTER (WHERE m.threatstatus_mads = 'EN'), 0)::int
+            AS especies_amenazadas_nacional_en_estimadas,
+        NULLIF(COUNT(m.species) FILTER (WHERE m.threatstatus_mads = 'CR'), 0)::int
+            AS especies_amenazadas_nacional_cr_estimadas,
+        NULLIF(COUNT(m.species) FILTER (
+            WHERE NULLIF(BTRIM(m.cites), '') IS NOT NULL
+        ), 0)::int AS especies_cites_total_estimadas,
+        NULL AS especies_cites_estimadas_ref_id,
+        NULLIF(COUNT(m.species) FILTER (WHERE m.cites = 'I'), 0)::int
+            AS especies_cites_i_estimadas,
+        NULLIF(COUNT(m.species) FILTER (WHERE m.cites = 'I/II'), 0)::int
+            AS especies_cites_i_ii_estimadas,
+        NULLIF(COUNT(m.species) FILTER (WHERE m.cites = 'II'), 0)::int
+            AS especies_cites_ii_estimadas,
+        NULLIF(COUNT(m.species) FILTER (WHERE m.cites = 'III'), 0)::int
+            AS especies_cites_iii_estimadas,
+        NULLIF(COUNT(m.species) FILTER (
+            WHERE m.threatstatus_iucn IN ('VU', 'EN', 'CR')
+        ), 0)::int AS especies_amenazadas_global_total_estimadas,
+        NULL AS especies_amenazadas_global_estimadas_ref_id,
+        NULLIF(COUNT(m.species) FILTER (WHERE m.threatstatus_iucn = 'VU'), 0)::int
+            AS especies_amenazadas_global_vu_estimadas,
+        NULLIF(COUNT(m.species) FILTER (WHERE m.threatstatus_iucn = 'EN'), 0)::int
+            AS especies_amenazadas_global_en_estimadas,
+        NULLIF(COUNT(m.species) FILTER (WHERE m.threatstatus_iucn = 'CR'), 0)::int
+            AS especies_amenazadas_global_cr_estimadas,
+        NULLIF(COUNT(m.species) FILTER (
+            WHERE NULLIF(BTRIM(m.exotic), '') IS NOT NULL
+               OR NULLIF(BTRIM(m.invasive), '') IS NOT NULL
+               OR NULLIF(BTRIM(m.transplanted), '') IS NOT NULL
+               OR NULLIF(BTRIM(m.exoticriskinvasion), '') IS NOT NULL
+        ), 0)::int AS especies_exoticas_total_estimadas,
+        NULL AS especies_exoticas_total_estimadas_ref_id,
+        NULLIF(COUNT(m.species) FILTER (
+            WHERE NULLIF(BTRIM(m.exotic), '') IS NOT NULL
+        ), 0)::int AS especies_exoticas_estimadas,
+        NULL AS especies_exoticas_estimadas_ref_id,
+        NULLIF(COUNT(m.species) FILTER (
+            WHERE NULLIF(BTRIM(m.invasive), '') IS NOT NULL
+        ), 0)::int AS especies_invasoras_estimadas,
+        NULL AS especies_invasoras_estimadas_ref_id,
+        NULLIF(COUNT(m.species) FILTER (
+            WHERE NULLIF(BTRIM(m.transplanted), '') IS NOT NULL
+        ), 0)::int AS especies_trasplantadas_estimadas,
+        NULLIF(COUNT(m.species) FILTER (
+            WHERE NULLIF(BTRIM(m.exoticriskinvasion), '') IS NOT NULL
+        ), 0)::int AS especies_exoticas_riesgo_invasion_estimadas,
+        NULL AS especies_exoticas_riesgo_invasion_estimadas_ref_id,
+        NULLIF(COUNT(m.species) FILTER (
+            WHERE m.exoticriskinvasion =
+                'Exótica con potencial de invasión Bajo Riesgo'
+        ), 0)::int AS especies_exoticas_riesgo_invasion_bajo_estimadas,
+        NULLIF(COUNT(m.species) FILTER (
+            WHERE m.exoticriskinvasion =
+                'Exótica con potencial de invasión Riesgo Moderado'
+        ), 0)::int AS especies_exoticas_riesgo_invasion_moderado_estimadas,
+        NULLIF(COUNT(m.species) FILTER (
+            WHERE m.exoticriskinvasion =
+                'Exótica con potencial de invasión Riesgo Moderado/ Alto'
+        ), 0)::int AS especies_exoticas_riesgo_invasion_moderado_alto_estimadas,
+        NULLIF(COUNT(m.species) FILTER (
+            WHERE m.exoticriskinvasion =
+                'Exótica con potencial de invasión Alto Riesgo'
+        ), 0)::int AS especies_exoticas_riesgo_invasion_alto_estimadas
     FROM (
         SELECT DISTINCT slug AS slug_grupo
         FROM taxonomic_groups
         WHERE grouptype IS NOT NULL AND BTRIM(grouptype) <> '-'
     ) s
-    LEFT JOIN joined j USING (slug_grupo)
+    LEFT JOIN matched m USING (slug_grupo)
     GROUP BY s.slug_grupo
 """
 
@@ -1851,7 +1867,6 @@ def create_staging_agg_taxon_region_materialized_view(db) -> int:
 
     with db.connect() as conn:
         _drop_region_grupo_dependent_mvs(conn)
-        conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {STAGING_OCURRENCIA_GEO_MV}')
         conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS {STAGING_AGG_TAXON_REGION_MV}')
         conn.execute(
             f'CREATE MATERIALIZED VIEW {STAGING_AGG_TAXON_REGION_MV} AS '
@@ -2019,34 +2034,32 @@ def create_region_publicador_materialized_view(db):
 
 
 def create_estimated_species_materialized_view(db) -> int:
-    """Crea taxonomic_estimated_source y estimadas_total (doble LATERAL + pivot FILTER)."""
+    """Crea taxonomic_estimated_source y estimadas (unpivot rangos + COUNT FILTER)."""
 
     with db.connect() as conn:
-        conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS "{ESTIMADAS_TOTAL_MV}"')
-        conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS "{ESTIMATED_SPECIES_MV_LEGACY}"')
+        conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS "{ESTIMADAS_MV}"')
         conn.execute(f'DROP MATERIALIZED VIEW IF EXISTS "{TAXONOMIC_ESTIMATED_SOURCE_MV}"')
-        conn.execute('DROP TABLE IF EXISTS "_estimated_species_staging"')
 
         conn.execute(
-            f'CREATE MATERIALIZED VIEW "{TAXONOMIC_ESTIMATED_SOURCE_MV}" AS {_ESTIMATED_SOURCE_MV_SQL}'
-        )
+            f'CREATE MATERIALIZED VIEW "{TAXONOMIC_ESTIMATED_SOURCE_MV}" AS #{_ESTIMATED_SOURCE_MV_SQL}'
+           )
         conn.execute(
             f'CREATE INDEX IF NOT EXISTS idx_taxonomic_estimated_source_species '
             f'ON "{TAXONOMIC_ESTIMATED_SOURCE_MV}" (species)'
         )
-
+        
         source_total = conn.execute(
             f'SELECT COUNT(*) FROM "{TAXONOMIC_ESTIMATED_SOURCE_MV}"'
         ).fetchall()[0][0]
         logger.info('MV %s creada (%s filas)', TAXONOMIC_ESTIMATED_SOURCE_MV, source_total)
 
-        conn.execute(f'CREATE MATERIALIZED VIEW "{ESTIMADAS_TOTAL_MV}" AS {_ESTIMADAS_TOTAL_MV_SQL}')
+        conn.execute(f'CREATE MATERIALIZED VIEW "{ESTIMADAS_MV}" AS {_ESTIMADAS_MV_SQL}')
         conn.commit()
-        total = conn.execute(f'SELECT COUNT(*) FROM "{ESTIMADAS_TOTAL_MV}"').fetchall()[0][0]
+        total = conn.execute(f'SELECT COUNT(*) FROM "{ESTIMADAS_MV}"').fetchall()[0][0]
 
-    logger.info('MV %s creada (%s filas)', ESTIMADAS_TOTAL_MV, total)
+    logger.info('MV %s creada (%s filas)', ESTIMADAS_MV, total)
     print(f'Vista materializada {TAXONOMIC_ESTIMATED_SOURCE_MV}: {source_total:,} filas')
-    print(f'Vista materializada {ESTIMADAS_TOTAL_MV}: {total:,} filas')
+    print(f'Vista materializada {ESTIMADAS_MV}: {total:,} filas')
     return total
 
 
